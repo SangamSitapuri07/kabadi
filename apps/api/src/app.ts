@@ -2,7 +2,7 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
-import { env } from "./config/env";
+import { describePaymentRuntime, env } from "./config/env";
 import { getRateLimiterDiagnostics } from "./lib/redisStore";
 import {
   correlationMiddleware,
@@ -16,6 +16,8 @@ import { aiRouter } from "./modules/ai/ai.routes";
 import { getOnnxEngineHealth } from "./modules/ai/onnx.engine";
 import { authRouter } from "./modules/auth/auth.routes";
 import { webhooksRouter } from "./modules/integrations/webhooks.routes";
+import { paymentsRouter } from "./modules/payments/payments.routes";
+import { paymentWebhooksRouter } from "./modules/payments/razorpay.webhook.routes";
 import { marketplaceRouter } from "./modules/marketplace/marketplace.routes";
 import { operationsRouter } from "./modules/operations/operations.routes";
 import { supplyChainRouter } from "./modules/supplychain/supplychain.routes";
@@ -56,7 +58,8 @@ export function createApp() {
   app.use(correlationMiddleware);
   app.use(cookieParser());
 
-  // Mount raw-body HMAC webhook endpoint BEFORE JSON body parsers mutate payload bytes
+  // Mount raw-body HMAC webhook endpoints BEFORE JSON body parsers mutate payload bytes
+  app.use("/api/v1/webhooks", paymentWebhooksRouter);
   app.use("/api/v1/webhooks", webhooksRouter);
 
   // Allow up to 8 MB JSON exclusively on /api/v1/ai for mobile base64 camera frames
@@ -74,6 +77,7 @@ export function createApp() {
         onnxEngine: getOnnxEngineHealth(),
         rateLimiter: getRateLimiterDiagnostics(),
         smsProvider: env.SMS_PROVIDER,
+        payments: describePaymentRuntime(),
         vaultStorageDriver: env.VAULT_STORAGE_DRIVER,
       },
       timestamp: new Date().toISOString(),
@@ -86,6 +90,7 @@ export function createApp() {
   app.use("/api/v1/public", publicVerifyRouter);
   app.use("/api/v1/verification", verificationRouter);
   app.use("/api/v1/ai", aiRouter);
+  app.use("/api/v1", paymentsRouter);
   app.use("/api/v1", operationsRouter);
   app.use("/api/v1", supplyChainRouter);
   app.use("/api/v1", marketplaceRouter);

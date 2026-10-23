@@ -344,6 +344,7 @@ export type TransactionOrderWhereInput = {
   weighingRecords?: Prisma.WeighingRecordListRelationFilter
   handoverRecords?: Prisma.HandoverRecordListRelationFilter
   paymentRecords?: Prisma.PaymentRecordListRelationFilter
+  paymentIntents?: Prisma.PaymentIntentListRelationFilter
   disputes?: Prisma.DisputeListRelationFilter
   childLineageLinks?: Prisma.BatchLineageListRelationFilter
   parentLineageLinks?: Prisma.BatchLineageListRelationFilter
@@ -377,6 +378,7 @@ export type TransactionOrderOrderByWithRelationInput = {
   weighingRecords?: Prisma.WeighingRecordOrderByRelationAggregateInput
   handoverRecords?: Prisma.HandoverRecordOrderByRelationAggregateInput
   paymentRecords?: Prisma.PaymentRecordOrderByRelationAggregateInput
+  paymentIntents?: Prisma.PaymentIntentOrderByRelationAggregateInput
   disputes?: Prisma.DisputeOrderByRelationAggregateInput
   childLineageLinks?: Prisma.BatchLineageOrderByRelationAggregateInput
   parentLineageLinks?: Prisma.BatchLineageOrderByRelationAggregateInput
@@ -413,6 +415,7 @@ export type TransactionOrderWhereUniqueInput = Prisma.AtLeast<{
   weighingRecords?: Prisma.WeighingRecordListRelationFilter
   handoverRecords?: Prisma.HandoverRecordListRelationFilter
   paymentRecords?: Prisma.PaymentRecordListRelationFilter
+  paymentIntents?: Prisma.PaymentIntentListRelationFilter
   disputes?: Prisma.DisputeListRelationFilter
   childLineageLinks?: Prisma.BatchLineageListRelationFilter
   parentLineageLinks?: Prisma.BatchLineageListRelationFilter
@@ -494,6 +497,7 @@ export type TransactionOrderCreateInput = {
   weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
@@ -523,6 +527,7 @@ export type TransactionOrderUncheckedCreateInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
@@ -552,6 +557,7 @@ export type TransactionOrderUpdateInput = {
   weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
@@ -581,6 +587,7 @@ export type TransactionOrderUncheckedUpdateInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
@@ -1002,6 +1009,20 @@ export type TransactionOrderUpdateOneRequiredWithoutParentLineageLinksNestedInpu
   update?: Prisma.XOR<Prisma.XOR<Prisma.TransactionOrderUpdateToOneWithWhereWithoutParentLineageLinksInput, Prisma.TransactionOrderUpdateWithoutParentLineageLinksInput>, Prisma.TransactionOrderUncheckedUpdateWithoutParentLineageLinksInput>
 }
 
+export type TransactionOrderCreateNestedOneWithoutPaymentIntentsInput = {
+  create?: Prisma.XOR<Prisma.TransactionOrderCreateWithoutPaymentIntentsInput, Prisma.TransactionOrderUncheckedCreateWithoutPaymentIntentsInput>
+  connectOrCreate?: Prisma.TransactionOrderCreateOrConnectWithoutPaymentIntentsInput
+  connect?: Prisma.TransactionOrderWhereUniqueInput
+}
+
+export type TransactionOrderUpdateOneRequiredWithoutPaymentIntentsNestedInput = {
+  create?: Prisma.XOR<Prisma.TransactionOrderCreateWithoutPaymentIntentsInput, Prisma.TransactionOrderUncheckedCreateWithoutPaymentIntentsInput>
+  connectOrCreate?: Prisma.TransactionOrderCreateOrConnectWithoutPaymentIntentsInput
+  upsert?: Prisma.TransactionOrderUpsertWithoutPaymentIntentsInput
+  connect?: Prisma.TransactionOrderWhereUniqueInput
+  update?: Prisma.XOR<Prisma.XOR<Prisma.TransactionOrderUpdateToOneWithWhereWithoutPaymentIntentsInput, Prisma.TransactionOrderUpdateWithoutPaymentIntentsInput>, Prisma.TransactionOrderUncheckedUpdateWithoutPaymentIntentsInput>
+}
+
 export type TransactionOrderCreateWithoutSellerInput = {
   id?: string
   orderNumber: string
@@ -1025,6 +1046,7 @@ export type TransactionOrderCreateWithoutSellerInput = {
   weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
@@ -1053,6 +1075,7 @@ export type TransactionOrderUncheckedCreateWithoutSellerInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
@@ -1091,6 +1114,7 @@ export type TransactionOrderCreateWithoutBuyerInput = {
   weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
@@ -1119,6 +1143,7 @@ export type TransactionOrderUncheckedCreateWithoutBuyerInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
@@ -1214,6 +1239,7 @@ export type TransactionOrderCreateWithoutStorefrontInput = {
   weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
@@ -1242,6 +1268,7 @@ export type TransactionOrderUncheckedCreateWithoutStorefrontInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
@@ -1296,6 +1323,7 @@ export type TransactionOrderCreateWithoutListingInput = {
   weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
@@ -1324,6 +1352,7 @@ export type TransactionOrderUncheckedCreateWithoutListingInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
@@ -1368,6 +1397,7 @@ export type TransactionOrderUpdateWithoutListingInput = {
   weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
@@ -1396,6 +1426,7 @@ export type TransactionOrderUncheckedUpdateWithoutListingInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
@@ -1424,6 +1455,7 @@ export type TransactionOrderCreateWithoutItemsInput = {
   weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
@@ -1452,6 +1484,7 @@ export type TransactionOrderUncheckedCreateWithoutItemsInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
@@ -1496,6 +1529,7 @@ export type TransactionOrderUpdateWithoutItemsInput = {
   weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
@@ -1524,6 +1558,7 @@ export type TransactionOrderUncheckedUpdateWithoutItemsInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
@@ -1552,6 +1587,7 @@ export type TransactionOrderCreateWithoutWeighingRecordsInput = {
   items?: Prisma.OrderItemCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
@@ -1580,6 +1616,7 @@ export type TransactionOrderUncheckedCreateWithoutWeighingRecordsInput = {
   items?: Prisma.OrderItemUncheckedCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
@@ -1624,6 +1661,7 @@ export type TransactionOrderUpdateWithoutWeighingRecordsInput = {
   items?: Prisma.OrderItemUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
@@ -1652,6 +1690,7 @@ export type TransactionOrderUncheckedUpdateWithoutWeighingRecordsInput = {
   items?: Prisma.OrderItemUncheckedUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
@@ -1680,6 +1719,7 @@ export type TransactionOrderCreateWithoutHandoverRecordsInput = {
   items?: Prisma.OrderItemCreateNestedManyWithoutOrderInput
   weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
@@ -1708,6 +1748,7 @@ export type TransactionOrderUncheckedCreateWithoutHandoverRecordsInput = {
   items?: Prisma.OrderItemUncheckedCreateNestedManyWithoutOrderInput
   weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
@@ -1752,6 +1793,7 @@ export type TransactionOrderUpdateWithoutHandoverRecordsInput = {
   items?: Prisma.OrderItemUpdateManyWithoutOrderNestedInput
   weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
@@ -1780,6 +1822,7 @@ export type TransactionOrderUncheckedUpdateWithoutHandoverRecordsInput = {
   items?: Prisma.OrderItemUncheckedUpdateManyWithoutOrderNestedInput
   weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
@@ -1808,6 +1851,7 @@ export type TransactionOrderCreateWithoutPaymentRecordsInput = {
   items?: Prisma.OrderItemCreateNestedManyWithoutOrderInput
   weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
@@ -1836,6 +1880,7 @@ export type TransactionOrderUncheckedCreateWithoutPaymentRecordsInput = {
   items?: Prisma.OrderItemUncheckedCreateNestedManyWithoutOrderInput
   weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
@@ -1880,6 +1925,7 @@ export type TransactionOrderUpdateWithoutPaymentRecordsInput = {
   items?: Prisma.OrderItemUpdateManyWithoutOrderNestedInput
   weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
@@ -1908,6 +1954,7 @@ export type TransactionOrderUncheckedUpdateWithoutPaymentRecordsInput = {
   items?: Prisma.OrderItemUncheckedUpdateManyWithoutOrderNestedInput
   weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
@@ -1937,6 +1984,7 @@ export type TransactionOrderCreateWithoutDisputesInput = {
   weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
 }
@@ -1965,6 +2013,7 @@ export type TransactionOrderUncheckedCreateWithoutDisputesInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
 }
@@ -2009,6 +2058,7 @@ export type TransactionOrderUpdateWithoutDisputesInput = {
   weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
 }
@@ -2037,6 +2087,7 @@ export type TransactionOrderUncheckedUpdateWithoutDisputesInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
 }
@@ -2065,6 +2116,7 @@ export type TransactionOrderCreateWithoutChildLineageLinksInput = {
   weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
   parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
 }
@@ -2093,6 +2145,7 @@ export type TransactionOrderUncheckedCreateWithoutChildLineageLinksInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
 }
@@ -2126,6 +2179,7 @@ export type TransactionOrderCreateWithoutParentLineageLinksInput = {
   weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
 }
@@ -2154,6 +2208,7 @@ export type TransactionOrderUncheckedCreateWithoutParentLineageLinksInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
   handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
   paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedCreateNestedManyWithoutOrderInput
   disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
   childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
 }
@@ -2198,6 +2253,7 @@ export type TransactionOrderUpdateWithoutChildLineageLinksInput = {
   weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
 }
@@ -2226,6 +2282,7 @@ export type TransactionOrderUncheckedUpdateWithoutChildLineageLinksInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
 }
@@ -2265,6 +2322,7 @@ export type TransactionOrderUpdateWithoutParentLineageLinksInput = {
   weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
 }
@@ -2293,8 +2351,141 @@ export type TransactionOrderUncheckedUpdateWithoutParentLineageLinksInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
+}
+
+export type TransactionOrderCreateWithoutPaymentIntentsInput = {
+  id?: string
+  orderNumber: string
+  sellerTier: $Enums.SupplyChainTier
+  buyerTier: $Enums.SupplyChainTier
+  fulfillmentMode?: string
+  status?: $Enums.TransactionStatus
+  indicativeTotalPaise: number
+  agreedTotalPaise: number
+  finalSettlementPaise?: number | null
+  priceAdjustmentReason?: string | null
+  qrTraceToken: string
+  scheduledAt?: Date | string | null
+  completedAt?: Date | string | null
+  createdAt?: Date | string
+  updatedAt?: Date | string
+  listing?: Prisma.MaterialListingCreateNestedOneWithoutOrderInput
+  seller: Prisma.UserCreateNestedOneWithoutSellerOrdersInput
+  buyer: Prisma.UserCreateNestedOneWithoutBuyerOrdersInput
+  storefront?: Prisma.StorefrontCreateNestedOneWithoutOrdersInput
+  items?: Prisma.OrderItemCreateNestedManyWithoutOrderInput
+  weighingRecords?: Prisma.WeighingRecordCreateNestedManyWithoutOrderInput
+  handoverRecords?: Prisma.HandoverRecordCreateNestedManyWithoutOrderInput
+  paymentRecords?: Prisma.PaymentRecordCreateNestedManyWithoutOrderInput
+  disputes?: Prisma.DisputeCreateNestedManyWithoutOrderInput
+  childLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutParentBulkOrderInput
+  parentLineageLinks?: Prisma.BatchLineageCreateNestedManyWithoutChildSourceOrderInput
+}
+
+export type TransactionOrderUncheckedCreateWithoutPaymentIntentsInput = {
+  id?: string
+  orderNumber: string
+  listingId?: string | null
+  sellerId: string
+  buyerId: string
+  storefrontId?: string | null
+  sellerTier: $Enums.SupplyChainTier
+  buyerTier: $Enums.SupplyChainTier
+  fulfillmentMode?: string
+  status?: $Enums.TransactionStatus
+  indicativeTotalPaise: number
+  agreedTotalPaise: number
+  finalSettlementPaise?: number | null
+  priceAdjustmentReason?: string | null
+  qrTraceToken: string
+  scheduledAt?: Date | string | null
+  completedAt?: Date | string | null
+  createdAt?: Date | string
+  updatedAt?: Date | string
+  items?: Prisma.OrderItemUncheckedCreateNestedManyWithoutOrderInput
+  weighingRecords?: Prisma.WeighingRecordUncheckedCreateNestedManyWithoutOrderInput
+  handoverRecords?: Prisma.HandoverRecordUncheckedCreateNestedManyWithoutOrderInput
+  paymentRecords?: Prisma.PaymentRecordUncheckedCreateNestedManyWithoutOrderInput
+  disputes?: Prisma.DisputeUncheckedCreateNestedManyWithoutOrderInput
+  childLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutParentBulkOrderInput
+  parentLineageLinks?: Prisma.BatchLineageUncheckedCreateNestedManyWithoutChildSourceOrderInput
+}
+
+export type TransactionOrderCreateOrConnectWithoutPaymentIntentsInput = {
+  where: Prisma.TransactionOrderWhereUniqueInput
+  create: Prisma.XOR<Prisma.TransactionOrderCreateWithoutPaymentIntentsInput, Prisma.TransactionOrderUncheckedCreateWithoutPaymentIntentsInput>
+}
+
+export type TransactionOrderUpsertWithoutPaymentIntentsInput = {
+  update: Prisma.XOR<Prisma.TransactionOrderUpdateWithoutPaymentIntentsInput, Prisma.TransactionOrderUncheckedUpdateWithoutPaymentIntentsInput>
+  create: Prisma.XOR<Prisma.TransactionOrderCreateWithoutPaymentIntentsInput, Prisma.TransactionOrderUncheckedCreateWithoutPaymentIntentsInput>
+  where?: Prisma.TransactionOrderWhereInput
+}
+
+export type TransactionOrderUpdateToOneWithWhereWithoutPaymentIntentsInput = {
+  where?: Prisma.TransactionOrderWhereInput
+  data: Prisma.XOR<Prisma.TransactionOrderUpdateWithoutPaymentIntentsInput, Prisma.TransactionOrderUncheckedUpdateWithoutPaymentIntentsInput>
+}
+
+export type TransactionOrderUpdateWithoutPaymentIntentsInput = {
+  id?: Prisma.StringFieldUpdateOperationsInput | string
+  orderNumber?: Prisma.StringFieldUpdateOperationsInput | string
+  sellerTier?: Prisma.EnumSupplyChainTierFieldUpdateOperationsInput | $Enums.SupplyChainTier
+  buyerTier?: Prisma.EnumSupplyChainTierFieldUpdateOperationsInput | $Enums.SupplyChainTier
+  fulfillmentMode?: Prisma.StringFieldUpdateOperationsInput | string
+  status?: Prisma.EnumTransactionStatusFieldUpdateOperationsInput | $Enums.TransactionStatus
+  indicativeTotalPaise?: Prisma.IntFieldUpdateOperationsInput | number
+  agreedTotalPaise?: Prisma.IntFieldUpdateOperationsInput | number
+  finalSettlementPaise?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
+  priceAdjustmentReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  qrTraceToken?: Prisma.StringFieldUpdateOperationsInput | string
+  scheduledAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  completedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  listing?: Prisma.MaterialListingUpdateOneWithoutOrderNestedInput
+  seller?: Prisma.UserUpdateOneRequiredWithoutSellerOrdersNestedInput
+  buyer?: Prisma.UserUpdateOneRequiredWithoutBuyerOrdersNestedInput
+  storefront?: Prisma.StorefrontUpdateOneWithoutOrdersNestedInput
+  items?: Prisma.OrderItemUpdateManyWithoutOrderNestedInput
+  weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
+  handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
+  paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
+  childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
+  parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
+}
+
+export type TransactionOrderUncheckedUpdateWithoutPaymentIntentsInput = {
+  id?: Prisma.StringFieldUpdateOperationsInput | string
+  orderNumber?: Prisma.StringFieldUpdateOperationsInput | string
+  listingId?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  sellerId?: Prisma.StringFieldUpdateOperationsInput | string
+  buyerId?: Prisma.StringFieldUpdateOperationsInput | string
+  storefrontId?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  sellerTier?: Prisma.EnumSupplyChainTierFieldUpdateOperationsInput | $Enums.SupplyChainTier
+  buyerTier?: Prisma.EnumSupplyChainTierFieldUpdateOperationsInput | $Enums.SupplyChainTier
+  fulfillmentMode?: Prisma.StringFieldUpdateOperationsInput | string
+  status?: Prisma.EnumTransactionStatusFieldUpdateOperationsInput | $Enums.TransactionStatus
+  indicativeTotalPaise?: Prisma.IntFieldUpdateOperationsInput | number
+  agreedTotalPaise?: Prisma.IntFieldUpdateOperationsInput | number
+  finalSettlementPaise?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
+  priceAdjustmentReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  qrTraceToken?: Prisma.StringFieldUpdateOperationsInput | string
+  scheduledAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  completedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  items?: Prisma.OrderItemUncheckedUpdateManyWithoutOrderNestedInput
+  weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
+  handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
+  childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
+  parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
 }
 
 export type TransactionOrderCreateManySellerInput = {
@@ -2362,6 +2553,7 @@ export type TransactionOrderUpdateWithoutSellerInput = {
   weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
@@ -2390,6 +2582,7 @@ export type TransactionOrderUncheckedUpdateWithoutSellerInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
@@ -2439,6 +2632,7 @@ export type TransactionOrderUpdateWithoutBuyerInput = {
   weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
@@ -2467,6 +2661,7 @@ export type TransactionOrderUncheckedUpdateWithoutBuyerInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
@@ -2537,6 +2732,7 @@ export type TransactionOrderUpdateWithoutStorefrontInput = {
   weighingRecords?: Prisma.WeighingRecordUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUpdateManyWithoutChildSourceOrderNestedInput
@@ -2565,6 +2761,7 @@ export type TransactionOrderUncheckedUpdateWithoutStorefrontInput = {
   weighingRecords?: Prisma.WeighingRecordUncheckedUpdateManyWithoutOrderNestedInput
   handoverRecords?: Prisma.HandoverRecordUncheckedUpdateManyWithoutOrderNestedInput
   paymentRecords?: Prisma.PaymentRecordUncheckedUpdateManyWithoutOrderNestedInput
+  paymentIntents?: Prisma.PaymentIntentUncheckedUpdateManyWithoutOrderNestedInput
   disputes?: Prisma.DisputeUncheckedUpdateManyWithoutOrderNestedInput
   childLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutParentBulkOrderNestedInput
   parentLineageLinks?: Prisma.BatchLineageUncheckedUpdateManyWithoutChildSourceOrderNestedInput
@@ -2601,6 +2798,7 @@ export type TransactionOrderCountOutputType = {
   weighingRecords: number
   handoverRecords: number
   paymentRecords: number
+  paymentIntents: number
   disputes: number
   childLineageLinks: number
   parentLineageLinks: number
@@ -2611,6 +2809,7 @@ export type TransactionOrderCountOutputTypeSelect<ExtArgs extends runtime.Types.
   weighingRecords?: boolean | TransactionOrderCountOutputTypeCountWeighingRecordsArgs
   handoverRecords?: boolean | TransactionOrderCountOutputTypeCountHandoverRecordsArgs
   paymentRecords?: boolean | TransactionOrderCountOutputTypeCountPaymentRecordsArgs
+  paymentIntents?: boolean | TransactionOrderCountOutputTypeCountPaymentIntentsArgs
   disputes?: boolean | TransactionOrderCountOutputTypeCountDisputesArgs
   childLineageLinks?: boolean | TransactionOrderCountOutputTypeCountChildLineageLinksArgs
   parentLineageLinks?: boolean | TransactionOrderCountOutputTypeCountParentLineageLinksArgs
@@ -2652,6 +2851,13 @@ export type TransactionOrderCountOutputTypeCountHandoverRecordsArgs<ExtArgs exte
  */
 export type TransactionOrderCountOutputTypeCountPaymentRecordsArgs<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   where?: Prisma.PaymentRecordWhereInput
+}
+
+/**
+ * TransactionOrderCountOutputType without action
+ */
+export type TransactionOrderCountOutputTypeCountPaymentIntentsArgs<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
+  where?: Prisma.PaymentIntentWhereInput
 }
 
 /**
@@ -2704,6 +2910,7 @@ export type TransactionOrderSelect<ExtArgs extends runtime.Types.Extensions.Inte
   weighingRecords?: boolean | Prisma.TransactionOrder$weighingRecordsArgs<ExtArgs>
   handoverRecords?: boolean | Prisma.TransactionOrder$handoverRecordsArgs<ExtArgs>
   paymentRecords?: boolean | Prisma.TransactionOrder$paymentRecordsArgs<ExtArgs>
+  paymentIntents?: boolean | Prisma.TransactionOrder$paymentIntentsArgs<ExtArgs>
   disputes?: boolean | Prisma.TransactionOrder$disputesArgs<ExtArgs>
   childLineageLinks?: boolean | Prisma.TransactionOrder$childLineageLinksArgs<ExtArgs>
   parentLineageLinks?: boolean | Prisma.TransactionOrder$parentLineageLinksArgs<ExtArgs>
@@ -2794,6 +3001,7 @@ export type TransactionOrderInclude<ExtArgs extends runtime.Types.Extensions.Int
   weighingRecords?: boolean | Prisma.TransactionOrder$weighingRecordsArgs<ExtArgs>
   handoverRecords?: boolean | Prisma.TransactionOrder$handoverRecordsArgs<ExtArgs>
   paymentRecords?: boolean | Prisma.TransactionOrder$paymentRecordsArgs<ExtArgs>
+  paymentIntents?: boolean | Prisma.TransactionOrder$paymentIntentsArgs<ExtArgs>
   disputes?: boolean | Prisma.TransactionOrder$disputesArgs<ExtArgs>
   childLineageLinks?: boolean | Prisma.TransactionOrder$childLineageLinksArgs<ExtArgs>
   parentLineageLinks?: boolean | Prisma.TransactionOrder$parentLineageLinksArgs<ExtArgs>
@@ -2823,6 +3031,7 @@ export type $TransactionOrderPayload<ExtArgs extends runtime.Types.Extensions.In
     weighingRecords: Prisma.$WeighingRecordPayload<ExtArgs>[]
     handoverRecords: Prisma.$HandoverRecordPayload<ExtArgs>[]
     paymentRecords: Prisma.$PaymentRecordPayload<ExtArgs>[]
+    paymentIntents: Prisma.$PaymentIntentPayload<ExtArgs>[]
     disputes: Prisma.$DisputePayload<ExtArgs>[]
     childLineageLinks: Prisma.$BatchLineagePayload<ExtArgs>[]
     parentLineageLinks: Prisma.$BatchLineagePayload<ExtArgs>[]
@@ -3249,6 +3458,7 @@ export interface Prisma__TransactionOrderClient<T, Null = never, ExtArgs extends
   weighingRecords<T extends Prisma.TransactionOrder$weighingRecordsArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.TransactionOrder$weighingRecordsArgs<ExtArgs>>): Prisma.PrismaPromise<runtime.Types.Result.GetResult<Prisma.$WeighingRecordPayload<ExtArgs>, T, "findMany", GlobalOmitOptions> | Null>
   handoverRecords<T extends Prisma.TransactionOrder$handoverRecordsArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.TransactionOrder$handoverRecordsArgs<ExtArgs>>): Prisma.PrismaPromise<runtime.Types.Result.GetResult<Prisma.$HandoverRecordPayload<ExtArgs>, T, "findMany", GlobalOmitOptions> | Null>
   paymentRecords<T extends Prisma.TransactionOrder$paymentRecordsArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.TransactionOrder$paymentRecordsArgs<ExtArgs>>): Prisma.PrismaPromise<runtime.Types.Result.GetResult<Prisma.$PaymentRecordPayload<ExtArgs>, T, "findMany", GlobalOmitOptions> | Null>
+  paymentIntents<T extends Prisma.TransactionOrder$paymentIntentsArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.TransactionOrder$paymentIntentsArgs<ExtArgs>>): Prisma.PrismaPromise<runtime.Types.Result.GetResult<Prisma.$PaymentIntentPayload<ExtArgs>, T, "findMany", GlobalOmitOptions> | Null>
   disputes<T extends Prisma.TransactionOrder$disputesArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.TransactionOrder$disputesArgs<ExtArgs>>): Prisma.PrismaPromise<runtime.Types.Result.GetResult<Prisma.$DisputePayload<ExtArgs>, T, "findMany", GlobalOmitOptions> | Null>
   childLineageLinks<T extends Prisma.TransactionOrder$childLineageLinksArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.TransactionOrder$childLineageLinksArgs<ExtArgs>>): Prisma.PrismaPromise<runtime.Types.Result.GetResult<Prisma.$BatchLineagePayload<ExtArgs>, T, "findMany", GlobalOmitOptions> | Null>
   parentLineageLinks<T extends Prisma.TransactionOrder$parentLineageLinksArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.TransactionOrder$parentLineageLinksArgs<ExtArgs>>): Prisma.PrismaPromise<runtime.Types.Result.GetResult<Prisma.$BatchLineagePayload<ExtArgs>, T, "findMany", GlobalOmitOptions> | Null>
@@ -3832,6 +4042,30 @@ export type TransactionOrder$paymentRecordsArgs<ExtArgs extends runtime.Types.Ex
   take?: number
   skip?: number
   distinct?: Prisma.PaymentRecordScalarFieldEnum | Prisma.PaymentRecordScalarFieldEnum[]
+}
+
+/**
+ * TransactionOrder.paymentIntents
+ */
+export type TransactionOrder$paymentIntentsArgs<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
+  /**
+   * Select specific fields to fetch from the PaymentIntent
+   */
+  select?: Prisma.PaymentIntentSelect<ExtArgs> | null
+  /**
+   * Omit specific fields from the PaymentIntent
+   */
+  omit?: Prisma.PaymentIntentOmit<ExtArgs> | null
+  /**
+   * Choose, which related nodes to fetch as well
+   */
+  include?: Prisma.PaymentIntentInclude<ExtArgs> | null
+  where?: Prisma.PaymentIntentWhereInput
+  orderBy?: Prisma.PaymentIntentOrderByWithRelationInput | Prisma.PaymentIntentOrderByWithRelationInput[]
+  cursor?: Prisma.PaymentIntentWhereUniqueInput
+  take?: number
+  skip?: number
+  distinct?: Prisma.PaymentIntentScalarFieldEnum | Prisma.PaymentIntentScalarFieldEnum[]
 }
 
 /**

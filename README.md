@@ -73,6 +73,15 @@ kabadi/
   - **New API surfaces:** `POST /api/v1/ai/xray-estimate` (real camera photo → multi-head CNN → internal component BOM priced against **live `StorefrontRateItem` mandi rates**), `POST /api/v1/ai/assistant` (vernacular voice/chat → ONNX NLU → valuation / forecast / buyer match / **one-click live pickup listing**), `GET /api/v1/ai/market-intelligence`, `POST /api/v1/ai/smart-match` (CPCB-authorisation-aware multi-tier buyer ranking with extra-margin vs street collector).
   - **UI:** Web `CameraAiStudio.tsx` now has 5 tabs (Material Vision · Scale OCR · **Camera Photo X-Ray CNN** · **Vernacular AI Assistant** · **AI Mandi Forecast & Smart Match**); Expo app gained `X-Ray` and `AI Chat` tabs.
   - **REAL-DATA model (not synthetic):** `ml/train_real.py` trains on **2,527 genuine photographs** from the TrashNet dataset (`npm run ml:download-real` → MIT-licensed, fetched from `github.com/garythung/trashnet`), exporting `apps/api/models/real_trashnet_cnn_v1.onnx` with **65.15% accuracy on 505 held-out real photos** (random-weight control 16.04%, **+49.1 pts**). Every camera scan now also returns a `realPhotoGate` — an independent real-photo opinion that flags `realPhotoGateDisagrees` when it contradicts the synthetic-trained spectral verdict.
+- **Real Money Payments — Razorpay Gateway with No Dummy Secrets (`M7.4`):** replaces the placeholder signed-webhook stub with a production payment pipeline.
+  - **No hardcoded fallback secrets anywhere.** The old `kc-dev-razorpay-…` default is gone; `PAYMENT_WEBHOOK_SECRET` (and every JWT secret) is **required** and the API exits at boot without it. `npm run env:generate` writes 256-bit values, and `.env.example` ships empty placeholders instead of fake secrets.
+  - **Server-authoritative amounts:** `POST /api/v1/payments/intents` derives the charge from `finalSettlementPaise ?? agreedTotalPaise ?? indicativeTotalPaise`. The client schema is `.strict()` and rejects any `amountPaise` field, so a tampered browser cannot alter the price.
+  - **Two-step confirmation:** the checkout callback is verified with `HMAC_SHA256(order_id|payment_id, key_secret)` **and** the payment is re-fetched from the gateway; only `captured`/`authorized` payments matching the intent amount are credited.
+  - **Replay-safe webhooks:** `POST /api/v1/webhooks/payments/razorpay` reads the raw bytes before JSON parsing, verifies `x-razorpay-signature`, and stores every `x-razorpay-event-id` in a unique column — retries return `{ idempotentReplay: true }` and never double-credit.
+  - **Admin-only refunds + reconciliation:** `POST /api/v1/payments/intents/:id/refund` (partial or full, audited) and `POST /api/v1/payments/reconcile` for lost-webhook recovery.
+  - **Local-first:** `PAYMENT_PROVIDER=mock` runs the identical state machine, signatures and idempotency without moving rupees, so the whole flow is testable offline; `PAYMENT_PROVIDER=razorpay` flips to live UPI/cards with real test keys. Web UI ships a `PaymentCheckoutPanel` inside the settlement slip; `/api/v1/payments/config` exposes only the public key id.
+  - **Honest limit:** payouts *out* to a household (`PAYOUT_PROVIDER=razorpayx`) need RazorpayX + current account + KYC; it stays `simulated` until that clears. See `docs/PAYMENTS.md`.
+
   - **GPU scaling path:** `ml/pytorch_yolo_gpu_trainer.py` (MobileNetV3-small transfer learning + YOLOv8n) exports graphs with **identical tensor contracts**, so retrained weights drop into `apps/api/models/` with zero code changes. `apps/api/scripts/export-active-learning-dataset.ts` (`npm run ml:export-dataset`) closes the loop by exporting human-confirmed field scans into `ml/datasets/`.
 
 ---
@@ -96,10 +105,13 @@ npm run ml:train
 # Prove the exported weights are genuinely trained (trained vs random-weight control)
 npm run ml:verify
 
+# Generate .env with real 256-bit secrets (API refuses to boot without them)
+cp .env.example .env && npm run env:generate
+
 # Retrain on real field photos confirmed by users (active learning)
 npm run ml:export-dataset && npm run ml:train
 
-# Run full automated OWASP security, RBAC/BOLA, ONNX ML, Webhook & Mobile E2E suite (23 tests)
+# Run full automated OWASP security, RBAC/BOLA, ONNX ML, Payments & Mobile E2E suite (25 tests)
 npm test
 
 # Start API server (port 4000), Next.js Web App (port 3000), or Expo Android Field App

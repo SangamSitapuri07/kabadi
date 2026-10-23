@@ -84,7 +84,11 @@ export const ModelName = {
   AIScanRecord: 'AIScanRecord',
   SyncOperation: 'SyncOperation',
   Notification: 'Notification',
-  AuditEvent: 'AuditEvent'
+  AuditEvent: 'AuditEvent',
+  PaymentIntent: 'PaymentIntent',
+  GatewayPayment: 'GatewayPayment',
+  PaymentRefund: 'PaymentRefund',
+  PaymentWebhookEvent: 'PaymentWebhookEvent'
 } as const
 
 export type ModelName = (typeof ModelName)[keyof typeof ModelName]
@@ -633,6 +637,80 @@ export const AuditEventScalarFieldEnum = {
 } as const
 
 export type AuditEventScalarFieldEnum = (typeof AuditEventScalarFieldEnum)[keyof typeof AuditEventScalarFieldEnum]
+
+
+export const PaymentIntentScalarFieldEnum = {
+  id: 'id',
+  intentNumber: 'intentNumber',
+  orderId: 'orderId',
+  payerId: 'payerId',
+  payeeId: 'payeeId',
+  purpose: 'purpose',
+  provider: 'provider',
+  providerOrderId: 'providerOrderId',
+  amountPaise: 'amountPaise',
+  currency: 'currency',
+  status: 'status',
+  description: 'description',
+  receipt: 'receipt',
+  failureReason: 'failureReason',
+  expiresAt: 'expiresAt',
+  paidAt: 'paidAt',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+} as const
+
+export type PaymentIntentScalarFieldEnum = (typeof PaymentIntentScalarFieldEnum)[keyof typeof PaymentIntentScalarFieldEnum]
+
+
+export const GatewayPaymentScalarFieldEnum = {
+  id: 'id',
+  intentId: 'intentId',
+  providerPaymentId: 'providerPaymentId',
+  status: 'status',
+  method: 'method',
+  amountPaise: 'amountPaise',
+  feePaise: 'feePaise',
+  taxPaise: 'taxPaise',
+  capturedAt: 'capturedAt',
+  failureReason: 'failureReason',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+} as const
+
+export type GatewayPaymentScalarFieldEnum = (typeof GatewayPaymentScalarFieldEnum)[keyof typeof GatewayPaymentScalarFieldEnum]
+
+
+export const PaymentRefundScalarFieldEnum = {
+  id: 'id',
+  intentId: 'intentId',
+  paymentId: 'paymentId',
+  providerRefundId: 'providerRefundId',
+  amountPaise: 'amountPaise',
+  status: 'status',
+  reason: 'reason',
+  initiatedById: 'initiatedById',
+  createdAt: 'createdAt',
+  processedAt: 'processedAt'
+} as const
+
+export type PaymentRefundScalarFieldEnum = (typeof PaymentRefundScalarFieldEnum)[keyof typeof PaymentRefundScalarFieldEnum]
+
+
+export const PaymentWebhookEventScalarFieldEnum = {
+  id: 'id',
+  provider: 'provider',
+  providerEventId: 'providerEventId',
+  eventType: 'eventType',
+  signatureVerified: 'signatureVerified',
+  status: 'status',
+  rawPayload: 'rawPayload',
+  failureReason: 'failureReason',
+  receivedAt: 'receivedAt',
+  processedAt: 'processedAt'
+} as const
+
+export type PaymentWebhookEventScalarFieldEnum = (typeof PaymentWebhookEventScalarFieldEnum)[keyof typeof PaymentWebhookEventScalarFieldEnum]
 
 
 export const SortOrder = {

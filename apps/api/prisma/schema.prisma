@@ -507,6 +507,7 @@ model TransactionOrder {
   weighingRecords    WeighingRecord[]
   handoverRecords    HandoverRecord[]
   paymentRecords     PaymentRecord[]
+  paymentIntents     PaymentIntent[]
   disputes           Dispute[]
   childLineageLinks  BatchLineage[]   @relation("ParentBulkOrder")
   parentLineageLinks BatchLineage[]   @relation("ChildSourceOrder")
@@ -721,4 +722,129 @@ model AuditEvent {
   @@index([action, createdAt])
   @@index([resourceType, resourceId])
   @@index([actorId, createdAt])
+}
+
+// ============================================================================
+// PAYMENT GATEWAY — real money movement (Razorpay) with auditable state machine
+// ============================================================================
+
+enum PaymentProviderKind {
+  MOCK
+  RAZORPAY
+}
+
+enum PaymentIntentStatus {
+  CREATED
+  ATTEMPTED
+  PAID
+  FAILED
+  EXPIRED
+  CANCELLED
+}
+
+enum GatewayPaymentStatus {
+  CREATED
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum PaymentRefundStatus {
+  PENDING
+  PROCESSED
+  FAILED
+}
+
+enum WebhookProcessingStatus {
+  PROCESSED
+  DUPLICATE
+  FAILED
+}
+
+/// Server-authoritative payment intent. The amount here is always recomputed
+/// from the TransactionOrder, never accepted from the client.
+model PaymentIntent {
+  id                String              @id @default(uuid())
+  intentNumber      String              @unique
+  orderId           String
+  payerId           String
+  payeeId           String?
+  purpose           String              @default("ORDER_SETTLEMENT")
+  provider          PaymentProviderKind
+  providerOrderId   String              @unique
+  amountPaise       Int
+  currency          String              @default("INR")
+  status            PaymentIntentStatus @default(CREATED)
+  description       String?
+  receipt           String?
+  failureReason     String?
+  expiresAt         DateTime?
+  paidAt            DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  order    TransactionOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  payments GatewayPayment[]
+  refunds  PaymentRefund[]
+
+  @@index([orderId, status])
+  @@index([payerId, createdAt])
+}
+
+model GatewayPayment {
+  id                String               @id @default(uuid())
+  intentId          String
+  providerPaymentId String               @unique
+  status            GatewayPaymentStatus @default(CREATED)
+  method            String?
+  amountPaise       Int
+  feePaise          Int                  @default(0)
+  taxPaise          Int                  @default(0)
+  capturedAt        DateTime?
+  failureReason     String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  intent  PaymentIntent  @relation(fields: [intentId], references: [id], onDelete: Cascade)
+  refunds PaymentRefund[]
+
+  @@index([intentId, status])
+}
+
+model PaymentRefund {
+  id               String              @id @default(uuid())
+  intentId         String
+  paymentId        String?
+  providerRefundId String              @unique
+  amountPaise      Int
+  status           PaymentRefundStatus @default(PENDING)
+  reason           String
+  initiatedById    String
+  createdAt        DateTime            @default(now())
+  processedAt      DateTime?
+
+  intent  PaymentIntent   @relation(fields: [intentId], references: [id], onDelete: Cascade)
+  payment GatewayPayment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@index([intentId, status])
+}
+
+/// Idempotency ledger for inbound gateway callbacks. The unique providerEventId
+/// makes replayed webhooks a no-op instead of a double credit.
+model PaymentWebhookEvent {
+  id                String                  @id @default(uuid())
+  provider          PaymentProviderKind
+  providerEventId   String                  @unique
+  eventType         String
+  signatureVerified Boolean                 @default(false)
+  status            WebhookProcessingStatus @default(PROCESSED)
+  rawPayload        String
+  failureReason     String?
+  receivedAt        DateTime                @default(now())
+  processedAt       DateTime?
+
+  @@index([provider, eventType])
+  @@index([receivedAt])
 }

@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { Printer, X, Smartphone, ShieldCheck, Check, Copy } from "lucide-react";
+import { PaymentCheckoutPanel } from "./PaymentCheckoutPanel";
 
 interface SlipResponse {
   orderId: string;
@@ -268,6 +269,13 @@ export function SettlementSlipModal({
                 {slip.statutoryDisclaimer}
               </div>
             </div>
+
+            <PaymentCheckoutPanel
+              orderId={orderId}
+              accessToken={accessToken}
+              amountPaise={slip.totals.netPayablePaise}
+              lang={lang}
+            />
           </div>
         )}
       </div>

@@ -119,14 +119,21 @@ export async function getPrisma(): Promise<PrismaClient> {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    const migrationPath = path.join(
-      API_PACKAGE_ROOT,
-      "prisma",
-      "migrations",
-      "0001_initial_foundation",
-      "migration.sql"
-    );
-    const migrationSql = fs.readFileSync(migrationPath, "utf8");
+    // Apply every migration directory in lexical order (0001, 0002, ...).
+    // Each migration file is written to be idempotent so re-running on boot
+    // is safe for both embedded PGlite and external PostgreSQL.
+    const migrationsDir = path.join(API_PACKAGE_ROOT, "prisma", "migrations");
+    const migrationSql = fs
+      .readdirSync(migrationsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+      .map((dirName) => {
+        const filePath = path.join(migrationsDir, dirName, "migration.sql");
+        return fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "";
+      })
+      .filter((sql) => sql.trim().length > 0)
+      .join("\n\n");
 
     if (env.USE_EXTERNAL_POSTGRES) {
       poolInstance = new Pool({

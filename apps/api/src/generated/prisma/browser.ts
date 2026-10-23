@@ -187,3 +187,25 @@ export type Notification = Prisma.NotificationModel
  * 
  */
 export type AuditEvent = Prisma.AuditEventModel
+/**
+ * Model PaymentIntent
+ * Server-authoritative payment intent. The amount here is always recomputed
+ * from the TransactionOrder, never accepted from the client.
+ */
+export type PaymentIntent = Prisma.PaymentIntentModel
+/**
+ * Model GatewayPayment
+ * 
+ */
+export type GatewayPayment = Prisma.GatewayPaymentModel
+/**
+ * Model PaymentRefund
+ * 
+ */
+export type PaymentRefund = Prisma.PaymentRefundModel
+/**
+ * Model PaymentWebhookEvent
+ * Idempotency ledger for inbound gateway callbacks. The unique providerEventId
+ * makes replayed webhooks a no-op instead of a double credit.
+ */
+export type PaymentWebhookEvent = Prisma.PaymentWebhookEventModel

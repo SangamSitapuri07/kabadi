@@ -142,3 +142,53 @@ export const DisputeStatus = {
 } as const
 
 export type DisputeStatus = (typeof DisputeStatus)[keyof typeof DisputeStatus]
+
+
+export const PaymentProviderKind = {
+  MOCK: 'MOCK',
+  RAZORPAY: 'RAZORPAY'
+} as const
+
+export type PaymentProviderKind = (typeof PaymentProviderKind)[keyof typeof PaymentProviderKind]
+
+
+export const PaymentIntentStatus = {
+  CREATED: 'CREATED',
+  ATTEMPTED: 'ATTEMPTED',
+  PAID: 'PAID',
+  FAILED: 'FAILED',
+  EXPIRED: 'EXPIRED',
+  CANCELLED: 'CANCELLED'
+} as const
+
+export type PaymentIntentStatus = (typeof PaymentIntentStatus)[keyof typeof PaymentIntentStatus]
+
+
+export const GatewayPaymentStatus = {
+  CREATED: 'CREATED',
+  AUTHORIZED: 'AUTHORIZED',
+  CAPTURED: 'CAPTURED',
+  FAILED: 'FAILED',
+  REFUNDED: 'REFUNDED',
+  PARTIALLY_REFUNDED: 'PARTIALLY_REFUNDED'
+} as const
+
+export type GatewayPaymentStatus = (typeof GatewayPaymentStatus)[keyof typeof GatewayPaymentStatus]
+
+
+export const PaymentRefundStatus = {
+  PENDING: 'PENDING',
+  PROCESSED: 'PROCESSED',
+  FAILED: 'FAILED'
+} as const
+
+export type PaymentRefundStatus = (typeof PaymentRefundStatus)[keyof typeof PaymentRefundStatus]
+
+
+export const WebhookProcessingStatus = {
+  PROCESSED: 'PROCESSED',
+  DUPLICATE: 'DUPLICATE',
+  FAILED: 'FAILED'
+} as const
+
+export type WebhookProcessingStatus = (typeof WebhookProcessingStatus)[keyof typeof WebhookProcessingStatus]

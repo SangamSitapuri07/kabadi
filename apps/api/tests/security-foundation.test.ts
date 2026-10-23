@@ -19,6 +19,7 @@ import {
   computeWebhookHmacSignature,
   getRecentSandboxSmsDispatches,
 } from "../src/modules/integrations/gateways.service";
+import { buildMockWebhookSignature } from "../src/modules/payments/payment.provider";
 import { MobileApiClient } from "../../mobile/src/api/mobileClient";
 import { createInMemoryTokenAdapter } from "../../mobile/src/security/secureSession";
 import {
@@ -1560,6 +1561,216 @@ describe("Kabadiwala Connect — Phase 1 Foundation, RBAC, BOLA & OWASP Security
     expect(typeof scan.body.data.antiFraudForensics.realPhotoGateDisagrees).toBe(
       "boolean"
     );
+  });
+
+  it("25. [M7.4] Real payment gateway: server-authoritative amounts, Razorpay/HMAC verification, replay-safe webhooks & admin-only refunds", async () => {
+    const prisma = await getPrisma();
+
+    // 0. Runtime config is honest and never leaks a gateway secret
+    const cfg = await request(app).get("/api/v1/payments/config");
+    expect(cfg.status).toBe(200);
+    const cfgBody = JSON.stringify(cfg.body);
+    expect(cfgBody).not.toContain("key_secret");
+    expect(cfgBody).not.toContain("KEY_SECRET");
+    expect(cfg.body.data.provider).toBe("mock");
+    expect(cfg.body.data.liveMoneyEnabled).toBe(false);
+    expect(cfg.body.data.keyIdEnvironment).toBe("MOCK");
+    expect(cfg.body.data.webhookUrl).toContain("/api/v1/webhooks/payments/razorpay");
+
+    const health = await request(app).get("/api/v1/health");
+    expect(health.body.data.subsystems.payments.provider).toBe("mock");
+    expect(health.body.data.subsystems.payments.liveMoneyEnabled).toBe(false);
+    expect(health.body.data.subsystems.payments.webhookSecretConfigured).toBe(true);
+
+    // 1. Build a dedicated order (buyer = collector, seller = customer)
+    const buyer = await prisma.user.findUniqueOrThrow({
+      where: { email: "collector@kabadiwala.local" },
+    });
+    const seller = await prisma.user.findUniqueOrThrow({
+      where: { email: "customer@kabadiwala.local" },
+    });
+    const outsider = await prisma.user.findUniqueOrThrow({
+      where: { email: "recycler@kabadiwala.local" },
+    });
+
+    const orderNumber = `KC-TEST-PAY-${Date.now()}`;
+    const order = await prisma.transactionOrder.create({
+      data: {
+        orderNumber,
+        sellerId: seller.id,
+        buyerId: buyer.id,
+        sellerTier: seller.tier,
+        buyerTier: buyer.tier,
+        indicativeTotalPaise: 120000,
+        agreedTotalPaise: 118500,
+        qrTraceToken: `pay-test-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      },
+    });
+
+    const buyerLogin = await request(app).post("/api/v1/auth/login").send({
+      identifier: "collector@kabadiwala.local",
+      password: "KabadiPass123",
+    });
+    const buyerToken = buyerLogin.body.data.tokens.accessToken;
+
+    const outsiderLogin = await request(app).post("/api/v1/auth/login").send({
+      identifier: "recycler@kabadiwala.local",
+      password: "KabadiPass123",
+    });
+    const outsiderToken = outsiderLogin.body.data.tokens.accessToken;
+
+    // 2. Client cannot smuggle its own amount (strict schema + server-side source of truth)
+    const tamper = await request(app)
+      .post("/api/v1/payments/intents")
+      .set("Authorization", `Bearer ${buyerToken}`)
+      .send({ orderId: order.id, amountPaise: 1 });
+    expect(tamper.status).toBe(400);
+    expect(tamper.body.error.code).toBe("VALIDATION_ERROR");
+
+    // 3. Non-participants are blocked (BOLA)
+    const forbidden = await request(app)
+      .post("/api/v1/payments/intents")
+      .set("Authorization", `Bearer ${outsiderToken}`)
+      .send({ orderId: order.id });
+    expect(forbidden.status).toBe(403);
+
+    // 4. Intent amount is derived from the order — ₹1185.00, never from the request
+    const created = await request(app)
+      .post("/api/v1/payments/intents")
+      .set("Authorization", `Bearer ${buyerToken}`)
+      .send({ orderId: order.id });
+    expect(created.status).toBe(201);
+    expect(created.body.data.amountPaise).toBe(118500);
+    expect(created.body.data.amountFormatted).toBe("1185.00");
+    expect(created.body.data.status).toBe("CREATED");
+    expect(created.body.data.provider).toBe("MOCK");
+    const intentId = created.body.data.id as string;
+    const providerOrderId = created.body.data.providerOrderId as string;
+
+    // 5. Repeated clicks reuse the in-flight intent (no duplicate gateway orders)
+    const again = await request(app)
+      .post("/api/v1/payments/intents")
+      .set("Authorization", `Bearer ${buyerToken}`)
+      .send({ orderId: order.id });
+    expect(again.body.data.id).toBe(intentId);
+
+    // 6. Forged webhook signature is rejected outright
+    const forgedBody = JSON.stringify({
+      event: "payment.captured",
+      payload: { payment: { entity: { id: "pay_forged", order_id: providerOrderId, amount: 118500 } } },
+    });
+    const forged = await request(app)
+      .post("/api/v1/webhooks/payments/razorpay")
+      .set("Content-Type", "application/json")
+      .set("x-razorpay-signature", "0".repeat(64))
+      .set("x-razorpay-event-id", `evt-forged-${Date.now()}`)
+      .send(forgedBody);
+    expect(forged.status).toBe(401);
+    expect(forged.body.error.code).toBe("WEBHOOK_SIGNATURE_INVALID");
+
+    // 7. A correctly-signed BUT underpaid capture must not settle the order
+    const underpayBody = JSON.stringify({
+      event: "payment.captured",
+      payload: {
+        payment: {
+          entity: {
+            id: `pay_underpay_${Date.now()}`,
+            order_id: providerOrderId,
+            status: "captured",
+            amount: 100,
+            method: "upi",
+            created_at: Math.floor(Date.now() / 1000),
+          },
+        },
+      },
+    });
+    const underpay = await request(app)
+      .post("/api/v1/webhooks/payments/razorpay")
+      .set("Content-Type", "application/json")
+      .set("x-razorpay-signature", buildMockWebhookSignature(underpayBody))
+      .set("x-razorpay-event-id", `evt-underpay-${Date.now()}`)
+      .send(underpayBody);
+    expect(underpay.status).toBe(200);
+    expect(underpay.body.data.settlement).toBe("AMOUNT_MISMATCH");
+
+    const stillUnpaid = await request(app)
+      .get(`/api/v1/payments/intents/${intentId}`)
+      .set("Authorization", `Bearer ${buyerToken}`);
+    expect(stillUnpaid.body.data.status).toBe("CREATED");
+
+    // 8. Valid signed webhook settles exactly once; the replay is a no-op
+    const payId = `pay_valid_${Date.now()}`;
+    const paidBody = JSON.stringify({
+      event: "payment.captured",
+      payload: {
+        payment: {
+          entity: {
+            id: payId,
+            order_id: providerOrderId,
+            status: "captured",
+            amount: 118500,
+            method: "upi",
+            fee: 2368,
+            tax: 0,
+            created_at: Math.floor(Date.now() / 1000),
+          },
+        },
+      },
+    });
+    const eventId = `evt-paid-${Date.now()}`;
+    const paid = await request(app)
+      .post("/api/v1/webhooks/payments/razorpay")
+      .set("Content-Type", "application/json")
+      .set("x-razorpay-signature", buildMockWebhookSignature(paidBody))
+      .set("x-razorpay-event-id", eventId)
+      .send(paidBody);
+    expect(paid.status).toBe(200);
+    expect(paid.body.data.settlement).toBe("PAID");
+    expect(paid.body.data.intentStatus).toBe("PAID");
+
+    const replay = await request(app)
+      .post("/api/v1/webhooks/payments/razorpay")
+      .set("Content-Type", "application/json")
+      .set("x-razorpay-signature", buildMockWebhookSignature(paidBody))
+      .set("x-razorpay-event-id", eventId)
+      .send(paidBody);
+    expect(replay.status).toBe(200);
+    expect(replay.body.data.idempotentReplay).toBe(true);
+
+    // 9. Ledger got exactly one PAID row — no double credit on replay
+    const ledger = await prisma.paymentRecord.findMany({
+      where: { orderId: order.id, externalRef: payId },
+    });
+    expect(ledger.length).toBe(1);
+    expect(ledger[0]?.status).toBe("PAID");
+    expect(ledger[0]?.amountPaise).toBe(118500);
+
+    // 10. Fully-paid order refuses a second checkout
+    const duplicate = await request(app)
+      .post("/api/v1/payments/intents")
+      .set("Authorization", `Bearer ${buyerToken}`)
+      .send({ orderId: order.id });
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body.error.code).toBe("ORDER_ALREADY_PAID");
+
+    // 11. Refunds are admin-only (audited, never client-triggerable)
+    const refundForbidden = await request(app)
+      .post(`/api/v1/payments/intents/${intentId}/refund`)
+      .set("Authorization", `Bearer ${buyerToken}`)
+      .send({ reason: "self-service refund attempt" });
+    expect(refundForbidden.status).toBe(403);
+
+    // 12. Checkout callback verifies the gateway signature before crediting
+    const badVerify = await request(app)
+      .post(`/api/v1/payments/intents/${intentId}/verify`)
+      .set("Authorization", `Bearer ${buyerToken}`)
+      .send({
+        razorpay_order_id: providerOrderId,
+        razorpay_payment_id: "pay_forged_callback",
+        razorpay_signature: "a".repeat(64),
+      });
+    expect(badVerify.status).toBe(400);
+    expect(badVerify.body.error.code).toBe("CHECKOUT_SIGNATURE_INVALID");
   });
 
   it("12. Immediately blocks suspended accounts and triggers HTTP 429 rate limiting on auth abuse", async () => {
