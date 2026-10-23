@@ -1,0 +1,28 @@
+# ── Stage 1: Build Shared Types & Next.js 14 Production App ──────────────────
+FROM node:22-bookworm-slim AS builder
+
+WORKDIR /workspace
+COPY package.json package-lock.json tsconfig.base.json ./
+COPY packages/shared ./packages/shared
+COPY apps/web ./apps/web
+
+RUN npm ci
+RUN npm --workspace @kabadi/shared run build
+RUN npm --workspace @kabadi/web run build
+
+# ── Stage 2: Hardened Non-Root Production Runtime ────────────────────────────
+FROM node:22-bookworm-slim AS runner
+
+WORKDIR /workspace
+ENV NODE_ENV=production
+
+COPY --from=builder /workspace/package.json ./package.json
+COPY --from=builder /workspace/node_modules ./node_modules
+COPY --from=builder /workspace/packages/shared ./packages/shared
+COPY --from=builder /workspace/apps/web ./apps/web
+
+RUN chown -R node:node /workspace
+USER node
+
+EXPOSE 3000
+CMD ["npm", "--workspace", "@kabadi/web", "run", "start"]

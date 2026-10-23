@@ -1,0 +1,209 @@
+{
+  "generatedAt": "2026-10-23T10:08:44.812Z",
+  "irVersion": 8,
+  "opsetVersion": 13,
+  "models": {
+    "scrapMaterialClassifier": {
+      "file": "scrap_material_classifier_v1.onnx",
+      "bytes": 1893,
+      "sha256": "f717b96ae2b0fca6be72699e70f426d8a6f3617c4dc02de8ab8606c19c604065",
+      "classes": [
+        "metal-copper-bright",
+        "ewaste-pcb-grade-a",
+        "battery-inverter-lead",
+        "paper-cardboard",
+        "metal-aluminium-utensil",
+        "metal-heavy-iron"
+      ],
+      "selfTestCopperConfidence": 1
+    },
+    "lcdScaleDigitOcr": {
+      "file": "lcd_scale_ocr_v1.onnx",
+      "bytes": 8099,
+      "sha256": "355c54b38229979af87f6e48d397c6a087a387d6a367281103ea37a331f3a88e",
+      "classes": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9"
+      ],
+      "selfTestDigit8Confidence": 1
+    }
+  },
+  "suiteVersion": "2.0.0-cnn-multitask-selfhosted",
+  "trainedAt": "2026-10-23T11:35:24Z",
+  "trainingDurationSec": 85.88,
+  "v2Models": {
+    "scrapVisionCnn": {
+      "file": "scrap_vision_cnn_v2.onnx",
+      "bytes": 24864,
+      "sha256": "58000ef75a1236905631e68038809da5bc27849ddaaac372830342cdcb755743",
+      "valAccuracy": 1.0,
+      "trainSamples": 541,
+      "valSamples": 119,
+      "realFieldImagesMerged": 0,
+      "classes": [
+        "metal-copper-bright",
+        "metal-copper-burnt",
+        "metal-aluminium-utensil",
+        "ewaste-pcb-grade-a",
+        "battery-inverter-lead",
+        "paper-cardboard"
+      ]
+    },
+    "deviceXrayCnn": {
+      "file": "device_xray_cnn_v2.onnx",
+      "bytes": 122341,
+      "sha256": "e9030ffca39b44c5712cf955eb805b61a87f7cb608ff5194557dcdab8964cbeb",
+      "valDeviceAccuracy": 1.0,
+      "valCoilAccuracy": 1.0,
+      "classes": [
+        "split-ac-15ton-copper",
+        "split-ac-15ton-aluminum",
+        "smartphone-midrange-android",
+        "laptop-business-14",
+        "ceiling-fan-copper-motor",
+        "washing-machine-twin-tub"
+      ]
+    },
+    "scaleCrnnOcr": {
+      "file": "scale_crnn_ocr_v2.onnx",
+      "bytes": 165721,
+      "sha256": "07299fb305f4c132f7c7d44d83c5dd9316fc620e3fd72d2c09f57d79638ca155",
+      "valAccuracy": 1.0
+    },
+    "vernacularIntentNlu": {
+      "file": "vernacular_intent_nlu_v2.onnx",
+      "bytes": 133234,
+      "sha256": "85ef400f678d7a5b3d6d8a64033f522298e09e78138536086a57c1e222e31506",
+      "valAccuracy": 1.0,
+      "intents": [
+        "VALUATE_AND_RATES",
+        "PRICE_FORECAST_TIMING",
+        "SMART_BUYER_MATCH",
+        "BOOK_PICKUP_LISTING",
+        "SCALE_DISPUTE_FRAUD_HELP",
+        "SAFETY_HAZARD_COMPLIANCE"
+      ]
+    },
+    "mandiPriceForecaster": {
+      "file": "mandi_price_forecaster_v2.onnx",
+      "bytes": 3855,
+      "sha256": "eb58fe2ebc477e43798caf4d869472d1070b023f375d37c6006b8a0bea4e3a46",
+      "valMaePct": 0.3221
+    }
+  },
+  "realDataModels": {
+    "realTrashnetCnn": {
+      "model": "real_trashnet_cnn_v1.onnx",
+      "trainedOn": "REAL_PHOTOS",
+      "dataset": "TrashNet (garythung/trashnet, MIT) \u2014 2,527 real 512x384 photographs",
+      "classes": [
+        "cardboard",
+        "glass",
+        "metal",
+        "paper",
+        "plastic",
+        "trash"
+      ],
+      "bytes": 90892,
+      "sha256": "d3f96674ba53325387d404fb974abda1ee41747337f03f39a31026ff948d38f7",
+      "totalRealPhotos": 2527,
+      "trainPhotos": 2022,
+      "heldoutRealPhotos": 505,
+      "heldoutAccuracy": 0.6515,
+      "randomWeightsHeldoutAccuracy": 0.1604,
+      "liftOverRandomPts": 49.11,
+      "perClass": {
+        "cardboard": {
+          "support": 81,
+          "recall": 0.7901,
+          "precision": 0.7111
+        },
+        "glass": {
+          "support": 100,
+          "recall": 0.53,
+          "precision": 0.5096
+        },
+        "metal": {
+          "support": 82,
+          "recall": 0.5854,
+          "precision": 0.6667
+        },
+        "paper": {
+          "support": 119,
+          "recall": 0.8739,
+          "precision": 0.7027
+        },
+        "plastic": {
+          "support": 96,
+          "recall": 0.6146,
+          "precision": 0.7108
+        },
+        "trash": {
+          "support": 27,
+          "recall": 0.037,
+          "precision": 0.125
+        }
+      },
+      "confusionMatrix": [
+        [
+          64,
+          4,
+          3,
+          6,
+          4,
+          0
+        ],
+        [
+          4,
+          53,
+          12,
+          12,
+          13,
+          6
+        ],
+        [
+          5,
+          15,
+          48,
+          8,
+          5,
+          1
+        ],
+        [
+          5,
+          8,
+          0,
+          104,
+          2,
+          0
+        ],
+        [
+          6,
+          11,
+          6,
+          14,
+          59,
+          0
+        ],
+        [
+          6,
+          13,
+          3,
+          4,
+          0,
+          1
+        ]
+      ],
+      "trainingSeconds": 227.7,
+      "honestNote": "Accuracy is measured on real photographs withheld from training. TrashNet objects sit on a plain white background, so glass/plastic separation remains the hardest pair; field accuracy on cluttered scrap-yard photos will be lower."
+    }
+  }
+}

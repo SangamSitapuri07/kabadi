@@ -1,0 +1,29 @@
+{
+  "name": "kabadiwala-connect",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Kabadiwala Connect \u2014 Multi-Tier Scrap & E-Waste Marketplace, Storefronts, AI X-Ray & Traceability Platform",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build:shared": "npm --workspace @kabadi/shared run build",
+    "db:generate": "npm --workspace @kabadi/api run db:generate",
+    "db:push": "npm --workspace @kabadi/api run db:push",
+    "db:seed": "npm --workspace @kabadi/api run db:seed",
+    "dev:api": "npm --workspace @kabadi/api run dev",
+    "dev:web": "npm --workspace @kabadi/web run dev",
+    "ml:train": ".venv/bin/python ml/train_all.py",
+    "ml:download-real": ".venv/bin/python ml/download_real_dataset.py",
+    "ml:train:real": ".venv/bin/python ml/train_real.py",
+    "ml:verify": ".venv/bin/python ml/verify_training.py",
+    "ml:export-dataset": "npx tsx apps/api/scripts/export-active-learning-dataset.ts",
+    "test": "npm --workspace @kabadi/api run test",
+    "typecheck": "npm --workspace @kabadi/shared run typecheck && npm --workspace @kabadi/api run typecheck && npm --workspace @kabadi/web run typecheck && npm --workspace @kabadi/mobile run typecheck",
+    "build": "npm run build:shared && npm --workspace @kabadi/api run build && npm --workspace @kabadi/web run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
