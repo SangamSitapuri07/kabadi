@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "Kabadiwala Connect",
+    "slug": "kabadiwala-connect",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "android": {
+      "package": "in.kabadiwalaconnect.field",
+      "permissions": [
+        "android.permission.CAMERA"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "in.kabadiwalaconnect.field",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Capture scrap piles for AI purity checks, scan digital weighing scales for anti-fraud OCR, and scan QR badges."
+      }
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Kabadiwala Connect to photograph scrap lots, digital weighing scales, and QR badges."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Select saved scrap or scale photos from gallery for AI verification."
+        }
+      ],
+      "expo-secure-store",
+      "expo-sqlite"
+    ]
+  }
+}

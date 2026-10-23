@@ -1,0 +1,105 @@
+{
+  "model": "real_trashnet_cnn_v1.onnx",
+  "trainedOn": "REAL_PHOTOS",
+  "dataset": "TrashNet (garythung/trashnet, MIT) \u2014 2,527 real 512x384 photographs",
+  "classes": [
+    "cardboard",
+    "glass",
+    "metal",
+    "paper",
+    "plastic",
+    "trash"
+  ],
+  "bytes": 90892,
+  "sha256": "d3f96674ba53325387d404fb974abda1ee41747337f03f39a31026ff948d38f7",
+  "totalRealPhotos": 2527,
+  "trainPhotos": 2022,
+  "heldoutRealPhotos": 505,
+  "heldoutAccuracy": 0.6515,
+  "randomWeightsHeldoutAccuracy": 0.1604,
+  "liftOverRandomPts": 49.11,
+  "perClass": {
+    "cardboard": {
+      "support": 81,
+      "recall": 0.7901,
+      "precision": 0.7111
+    },
+    "glass": {
+      "support": 100,
+      "recall": 0.53,
+      "precision": 0.5096
+    },
+    "metal": {
+      "support": 82,
+      "recall": 0.5854,
+      "precision": 0.6667
+    },
+    "paper": {
+      "support": 119,
+      "recall": 0.8739,
+      "precision": 0.7027
+    },
+    "plastic": {
+      "support": 96,
+      "recall": 0.6146,
+      "precision": 0.7108
+    },
+    "trash": {
+      "support": 27,
+      "recall": 0.037,
+      "precision": 0.125
+    }
+  },
+  "confusionMatrix": [
+    [
+      64,
+      4,
+      3,
+      6,
+      4,
+      0
+    ],
+    [
+      4,
+      53,
+      12,
+      12,
+      13,
+      6
+    ],
+    [
+      5,
+      15,
+      48,
+      8,
+      5,
+      1
+    ],
+    [
+      5,
+      8,
+      0,
+      104,
+      2,
+      0
+    ],
+    [
+      6,
+      11,
+      6,
+      14,
+      59,
+      0
+    ],
+    [
+      6,
+      13,
+      3,
+      4,
+      0,
+      1
+    ]
+  ],
+  "trainingSeconds": 227.7,
+  "honestNote": "Accuracy is measured on real photographs withheld from training. TrashNet objects sit on a plain white background, so glass/plastic separation remains the hardest pair; field accuracy on cluttered scrap-yard photos will be lower."
+}

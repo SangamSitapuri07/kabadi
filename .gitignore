@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Environment & Secrets (NEVER commit real secrets)
+.env
+.env.*
+!.env.example
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.expo/
+*.tsbuildinfo
+
+# Local database & private non-public document storage
+.data/
+.pglite-data/
+.storage-private/
+
+# Logs & OS files
+*.log
+npm-debug.log*
+.DS_Store
+coverage/
+.venv/
+
+# ML training datasets (real field photos) stay local / external storage
+ml/datasets/**/*.jpg
+ml/datasets/**/*.jpeg
+ml/datasets/**/*.png
+ml/datasets/**/*.webp

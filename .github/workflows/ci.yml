@@ -1,0 +1,84 @@
+name: Kabadiwala Connect CI — OWASP Security, ONNX AI, Web & Mobile
+
+on:
+  push:
+    branches: ["main", "arena/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  verify-full-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: kabadiwala_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d kabadiwala_ci"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+
+    env:
+      NODE_ENV: test
+      USE_EXTERNAL_POSTGRES: "true"
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/kabadiwala_ci?sslmode=disable
+      REDIS_URL: redis://127.0.0.1:6379
+      JWT_ACCESS_SECRET: ci-access-secret-key-at-least-32-characters-long-2026
+      JWT_REFRESH_SECRET: ci-refresh-secret-key-at-least-32-characters-long-2026
+      SIGNED_URL_SECRET: ci-signed-url-secret-key-at-least-32-chars-long-2026
+      PAYMENT_WEBHOOK_SECRET: ci-payment-webhook-hmac-secret-at-least-32-chars-2026
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Build shared package & Prisma client
+        run: |
+          npm run build:shared
+          npm run db:generate
+
+      - name: Train & self-test ONNX vision and LCD-OCR models
+        run: npx tsx apps/api/scripts/train-and-export-onnx.ts
+
+      - name: Bootstrap PostgreSQL schema & PL/pgSQL audit triggers
+        run: npm --workspace @kabadi/api run db:push
+
+      - name: Run OWASP API Top 10, AI Vision/OCR, Mobile SDK & Webhook E2E Suite
+        run: npm test
+
+      - name: Production Build (API + Next.js Web) & 4-Package Typecheck
+        run: |
+          npm run build
+          npm run typecheck
+
+      - name: Validate backup & restore scripts syntax
+        run: |
+          bash -n scripts/backup-postgres.sh
+          bash -n scripts/restore-postgres.sh

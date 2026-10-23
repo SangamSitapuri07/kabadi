@@ -1,0 +1,724 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================================
+// ENUMS — ROLES, TIERS, HONEST VERIFICATION, PRICING & STATE MACHINES
+// ============================================================================
+
+enum UserRole {
+  CUSTOMER
+  COLLECTOR
+  SCRAP_BUSINESS
+  AUTHORISED_RECYCLER
+  ADMIN
+}
+
+enum SupplyChainTier {
+  TIER_0_GENERATOR
+  TIER_1_LOCAL_COLLECTOR
+  TIER_2_AREA_SHOP
+  TIER_3_WHOLESALE_AGGREGATOR
+  TIER_4_AUTHORISED_RECYCLER
+  PLATFORM_STAFF
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum VerificationLevel {
+  LEVEL_0_REGISTERED
+  LEVEL_1_CONTACT_VERIFIED
+  LEVEL_2_IDENTITY_REVIEWED
+  LEVEL_3_BUSINESS_VERIFIED
+  LEVEL_4_AUTHORISED_RECYCLER
+}
+
+enum VerificationStatus {
+  NOT_SUBMITTED
+  PENDING
+  UNDER_REVIEW
+  ACTION_REQUIRED
+  VERIFIED
+  REJECTED
+  EXPIRED
+  SUSPENDED
+}
+
+enum MaterialUnit {
+  KG
+  PIECE
+}
+
+enum PurityGrade {
+  CLEAN_SORTED
+  GRADE_A
+  GRADE_B
+  MIXED
+}
+
+enum PriceType {
+  INDICATIVE_ESTIMATE
+  STOREFRONT_RATE_OR_OFFER
+  AGREED_PRICE
+  FINAL_SETTLEMENT
+}
+
+enum TransactionStatus {
+  DRAFT
+  LISTED
+  REQUESTED
+  ACCEPTED
+  PICKUP_SCHEDULED
+  COLLECTED
+  WEIGHED
+  HANDED_OVER
+  SETTLED
+  COMPLETED
+  CANCELLED
+  REJECTED
+  DISPUTED
+  ON_HOLD
+}
+
+enum PaymentMethod {
+  CASH
+  UPI_INTENT
+  BANK_TRANSFER
+  LEDGER_OFFSET
+}
+
+enum PaymentStatus {
+  PENDING
+  PARTIALLY_PAID
+  PAID
+  DISPUTED
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  REJECTED
+}
+
+// ============================================================================
+// 1. IDENTITY, SESSIONS & AUTHENTICATION SECURITY
+// ============================================================================
+
+model User {
+  id                String            @id @default(uuid())
+  phone             String            @unique
+  email             String?           @unique
+  passwordHash      String
+  role              UserRole
+  tier              SupplyChainTier
+  accountStatus     AccountStatus     @default(ACTIVE)
+  verificationLevel VerificationLevel @default(LEVEL_0_REGISTERED)
+  platformCode      String            @unique // e.g., KC-COL-000101 (never gov ID)
+  phoneVerifiedAt   DateTime?
+  mfaEnabled        Boolean           @default(false)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  profile                UserProfile?
+  organization           Organization?
+  refreshTokens          RefreshToken[]
+  loginAttempts          LoginAttempt[]
+  verificationCases      VerificationCase[]     @relation("CaseApplicant")
+  verificationDecisions  VerificationDecision[] @relation("DecisionAdmin")
+  sellerListings         MaterialListing[]      @relation("ListingOwner")
+  buyerOffers            PurchaseOffer[]        @relation("OfferBuyer")
+  sellerOrders           TransactionOrder[]     @relation("OrderSeller")
+  buyerOrders            TransactionOrder[]     @relation("OrderBuyer")
+  khataAdvancesGiven     KhataLedgerEntry[]     @relation("KhataLender")
+  khataAdvancesTaken     KhataLedgerEntry[]     @relation("KhataBorrower")
+  raisedDisputes         Dispute[]              @relation("DisputeRaiser")
+  resolvedDisputes       Dispute[]              @relation("DisputeResolver")
+  aiScans                AIScanRecord[]
+  syncOperations         SyncOperation[]
+  notifications          Notification[]
+  auditEvents            AuditEvent[]
+
+  @@index([role, tier])
+  @@index([accountStatus])
+}
+
+model UserProfile {
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  displayName       String
+  preferredLanguage String   @default("EN")
+  city              String
+  pincode           String
+  addressLine       String?  // PRIVATE: shared only on active authorised collection
+  publicBio         String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([city, pincode])
+}
+
+model Organization {
+  id                String            @id @default(uuid())
+  ownerUserId       String            @unique
+  tier              SupplyChainTier
+  platformCode      String            @unique
+  businessName      String
+  city              String
+  pincode           String
+  serviceRadiusKm   Int               @default(5)
+  verificationLevel VerificationLevel @default(LEVEL_0_REGISTERED)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  owner                 User                   @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  storefront            Storefront?
+  businessRegistration  BusinessRegistration?
+  recyclerRegistration  RecyclerRegistration?
+  inventoryBins         InventoryBin[]
+  dismantlingRecords    DismantlingRecord[]
+
+  @@index([tier, city, pincode])
+}
+
+model RefreshToken {
+  id            String    @id @default(uuid())
+  userId        String
+  tokenHash     String    @unique
+  familyId      String    // Detects stolen refresh-token replay
+  ipAddress     String?
+  userAgent     String?
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedReason String?
+  createdAt     DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, familyId])
+}
+
+model OtpChallenge {
+  id           String    @id @default(uuid())
+  phone        String
+  codeHash     String
+  attempts     Int       @default(0)
+  maxAttempts  Int       @default(5)
+  expiresAt    DateTime
+  consumedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([phone, createdAt])
+}
+
+model LoginAttempt {
+  id         String   @id @default(uuid())
+  identifier String
+  userId     String?
+  ipAddress  String?
+  succeeded  Boolean
+  reason     String?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([identifier, createdAt])
+}
+
+// ============================================================================
+// 2. DIGITAL IDENTITY & MULTI-LEVEL VERIFICATION WORKFLOW
+// ============================================================================
+
+model VerificationCase {
+  id             String             @id @default(uuid())
+  applicantId    String
+  requestedLevel VerificationLevel
+  status         VerificationStatus @default(PENDING)
+  notes          String?
+  submittedAt    DateTime           @default(now())
+  reviewedAt     DateTime?
+  expiresAt      DateTime?
+
+  applicant User                   @relation("CaseApplicant", fields: [applicantId], references: [id], onDelete: Cascade)
+  documents VerificationDocument[]
+  decisions VerificationDecision[]
+
+  @@index([applicantId, status])
+}
+
+model VerificationDocument {
+  id            String   @id @default(uuid())
+  caseId        String
+  documentKind  String   // IDENTITY_DOC | SHOP_LICENCE | GST_CERT | CPCB_AUTH
+  storageKey    String   @unique // Private non-public storage object key
+  detectedMime  String
+  sizeBytes     Int
+  sha256Digest  String
+  uploadedAt    DateTime @default(now())
+
+  verificationCase VerificationCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+}
+
+model BusinessRegistration {
+  id                 String   @id @default(uuid())
+  organizationId     String   @unique
+  registrationType   String   // SHOP_ACT_UDYAM | GSTIN | MUNICIPAL_TRADE
+  registrationNumber String
+  issuingAuthority   String
+  verifiedAt         DateTime?
+  validUntil         DateTime?
+  createdAt          DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}
+
+model RecyclerRegistration {
+  id                  String   @id @default(uuid())
+  organizationId      String   @unique
+  authorityName       String   // e.g., CPCB / Punjab SPCB
+  registrationNumber  String   @unique
+  permittedStreams    String[]
+  authorisedCapacityT Int?
+  cpcbPortalChecked   Boolean  @default(false)
+  evidenceSourceUrl   String?
+  verifiedAt          DateTime?
+  validUntil          DateTime?
+  createdAt           DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}
+
+model VerificationDecision {
+  id             String             @id @default(uuid())
+  caseId         String
+  reviewerId     String
+  previousStatus VerificationStatus
+  newStatus      VerificationStatus
+  grantedLevel   VerificationLevel?
+  reason         String
+  createdAt      DateTime           @default(now())
+
+  verificationCase VerificationCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  reviewer         User             @relation("DecisionAdmin", fields: [reviewerId], references: [id])
+}
+
+// ============================================================================
+// 3. MATERIAL CATALOG, DEVICE X-RAY BOM, STOREFRONTS & VERSIONED RATE CARDS
+// ============================================================================
+
+model MaterialCategory {
+  id                        String            @id @default(uuid())
+  slug                      String            @unique
+  nameEn                    String
+  nameHi                    String
+  namePa                    String
+  nameMr                    String            @default("")
+  streamGroup               String            // PAPER | PLASTIC | FERROUS | NON_FERROUS | EWASTE | APPLIANCE | BATTERY
+  defaultUnit               MaterialUnit      @default(KG)
+  isRegulatedHazardous      Boolean           @default(false)
+  minBuyerVerificationLevel VerificationLevel @default(LEVEL_1_CONTACT_VERIFIED)
+  handlingGuidance          String
+  isActive                  Boolean           @default(true)
+  createdAt                 DateTime          @default(now())
+
+  rateItems     StorefrontRateItem[]
+  listingItems  ListingItem[]
+  orderItems    OrderItem[]
+  inventoryBins InventoryBin[]
+  priceHistory  PriceHistory[]
+}
+
+model DeviceReferenceBOM {
+  id                     String   @id @default(uuid())
+  slug                   String   @unique
+  deviceCategory         String   // SMARTPHONE | LAPTOP | SPLIT_AC | WASHING_MACHINE | ROUTER
+  brandPattern           String
+  modelName              String
+  typicalTotalGrams      Int
+  coilType               String?  // COPPER | ALUMINUM
+  componentsJson         Json     // [{ materialSlug, label, grams, spareValuePaise }]
+  refurbishRangeMinPaise Int
+  refurbishRangeMaxPaise Int
+  partsHarvestMinPaise   Int
+  partsHarvestMaxPaise   Int
+  safetyNotes            String
+  createdAt              DateTime @default(now())
+}
+
+model Storefront {
+  id                 String   @id @default(uuid())
+  organizationId     String   @unique
+  slug               String   @unique
+  shopTitle          String
+  tagline            String?
+  isOpen             Boolean  @default(true)
+  pickupAvailable    Boolean  @default(true)
+  dropoffAvailable   Boolean  @default(true)
+  minPickupGrams     Int      @default(5000)
+  servicePincodes    String[]
+  ratingAvg          Float    @default(4.8)
+  completedOrdersCnt Int      @default(0)
+  updatedAt          DateTime @updatedAt
+
+  organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  rateItems    StorefrontRateItem[]
+  orders       TransactionOrder[]
+}
+
+model StorefrontRateItem {
+  id               String       @id @default(uuid())
+  storefrontId     String
+  materialId       String
+  pickupRatePaise  Int          // Exact integer paise per KG or PIECE
+  dropoffRatePaise Int
+  minWeightGrams   Int          @default(1000)
+  purityGrade      PurityGrade  @default(CLEAN_SORTED)
+  version          Int          @default(1)
+  isActive         Boolean      @default(true)
+  effectiveFrom    DateTime     @default(now())
+  supersededAt     DateTime?
+
+  storefront Storefront       @relation(fields: [storefrontId], references: [id], onDelete: Cascade)
+  material   MaterialCategory @relation(fields: [materialId], references: [id])
+
+  @@index([storefrontId, materialId, isActive])
+}
+
+model PriceHistory {
+  id              String          @id @default(uuid())
+  city            String
+  tier            SupplyChainTier
+  materialId      String
+  medianRatePaise Int
+  minRatePaise    Int
+  maxRatePaise    Int
+  sampleCount     Int
+  recordedAt      DateTime        @default(now())
+
+  material MaterialCategory @relation(fields: [materialId], references: [id])
+
+  @@index([city, materialId, recordedAt])
+}
+
+// ============================================================================
+// 4. LISTINGS, OFFERS, MULTI-TIER ORDERS, WEIGHING, HANDOVERS & PAYMENTS
+// ============================================================================
+
+model MaterialListing {
+  id                       String            @id @default(uuid())
+  ownerId                  String
+  title                    String
+  sellerTier               SupplyChainTier
+  pickupCity               String
+  pickupPincode            String
+  pickupAddressPrivate     String            // Shared ONLY with accepted buyer
+  preferredMode            String            @default("BUYER_PICKUP")
+  indicativeEstimatePaise  Int
+  status                   TransactionStatus @default(LISTED)
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+
+  owner  User            @relation("ListingOwner", fields: [ownerId], references: [id])
+  items  ListingItem[]
+  photos ListingPhoto[]
+  offers PurchaseOffer[]
+  order  TransactionOrder?
+
+  @@index([ownerId, status])
+  @@index([pickupPincode, status])
+}
+
+model ListingItem {
+  id                      String       @id @default(uuid())
+  listingId               String
+  materialId              String
+  estimatedGrams          Int
+  indicativeRatePaise     Int
+  indicativeSubtotalPaise Int
+  conditionNote           String?
+
+  listing  MaterialListing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  material MaterialCategory @relation(fields: [materialId], references: [id])
+}
+
+model ListingPhoto {
+  id         String   @id @default(uuid())
+  listingId  String
+  storageKey String
+  phash      String?
+  createdAt  DateTime @default(now())
+
+  listing MaterialListing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+}
+
+model PurchaseOffer {
+  id               String    @id @default(uuid())
+  listingId        String
+  buyerId          String
+  priceType        PriceType @default(STOREFRONT_RATE_OR_OFFER)
+  offeredTotalPaise Int
+  version          Int       @default(1)
+  notes            String?
+  status           String    @default("OPEN") // OPEN | ACCEPTED | SUPERSEDED | REJECTED
+  createdAt        DateTime  @default(now())
+  acceptedAt       DateTime?
+
+  listing MaterialListing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  buyer   User            @relation("OfferBuyer", fields: [buyerId], references: [id])
+}
+
+model TransactionOrder {
+  id                      String            @id @default(uuid())
+  orderNumber             String            @unique // e.g., KC-ORD-20261023-1001
+  listingId               String?           @unique
+  sellerId                String
+  buyerId                 String
+  storefrontId            String?
+  sellerTier              SupplyChainTier
+  buyerTier               SupplyChainTier
+  fulfillmentMode         String            @default("BUYER_PICKUP")
+  status                  TransactionStatus @default(REQUESTED)
+  indicativeTotalPaise    Int
+  agreedTotalPaise        Int
+  finalSettlementPaise    Int?
+  priceAdjustmentReason   String?
+  qrTraceToken            String            @unique
+  scheduledAt             DateTime?
+  completedAt             DateTime?
+  createdAt               DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
+
+  listing            MaterialListing? @relation(fields: [listingId], references: [id])
+  seller             User             @relation("OrderSeller", fields: [sellerId], references: [id])
+  buyer              User             @relation("OrderBuyer", fields: [buyerId], references: [id])
+  storefront         Storefront?      @relation(fields: [storefrontId], references: [id])
+  items              OrderItem[]
+  weighingRecords    WeighingRecord[]
+  handoverRecords    HandoverRecord[]
+  paymentRecords     PaymentRecord[]
+  disputes           Dispute[]
+  childLineageLinks  BatchLineage[]   @relation("ParentBulkOrder")
+  parentLineageLinks BatchLineage[]   @relation("ChildSourceOrder")
+
+  @@index([sellerId, status])
+  @@index([buyerId, status])
+}
+
+model OrderItem {
+  id                  String      @id @default(uuid())
+  orderId             String
+  materialId          String
+  lockedRatePaise     Int
+  purityGrade         PurityGrade @default(CLEAN_SORTED)
+  estimatedGrams      Int
+  actualGrams         Int?
+  agreedSubtotalPaise Int
+  finalSubtotalPaise  Int?
+
+  order    TransactionOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  material MaterialCategory @relation(fields: [materialId], references: [id])
+}
+
+model WeighingRecord {
+  id                 String   @id @default(uuid())
+  orderId            String
+  recordedById       String
+  totalEstimatedGrams Int
+  totalActualGrams   Int
+  scaleOcrGrams      Int?
+  ocrDiscrepancyFlag Boolean  @default(false)
+  scalePhotoKey      String?
+  notes              String?
+  createdAt          DateTime @default(now())
+
+  order TransactionOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model HandoverRecord {
+  id                  String   @id @default(uuid())
+  orderId             String
+  sellerConfirmedAt   DateTime?
+  buyerConfirmedAt    DateTime?
+  handoverPincode     String
+  evidenceHashSha256  String
+  disclaimerNote      String   @default("Platform handover receipt — not a statutory government recycling certificate.")
+  createdAt           DateTime @default(now())
+
+  order TransactionOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model PaymentRecord {
+  id            String        @id @default(uuid())
+  orderId       String
+  amountPaise   Int
+  method        PaymentMethod @default(CASH)
+  status        PaymentStatus @default(PENDING)
+  externalRef   String?
+  recordedById  String
+  paidAt        DateTime?
+  createdAt     DateTime      @default(now())
+
+  order TransactionOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model Dispute {
+  id               String        @id @default(uuid())
+  orderId          String
+  raisedById       String
+  resolvedById     String?
+  reasonCategory   String        // WEIGHT_DISCREPANCY | PRICE_CHANGE | PAYMENT_PENDING | GRADE_DISPUTE
+  description      String
+  status           DisputeStatus @default(OPEN)
+  resolutionNotes  String?
+  createdAt        DateTime      @default(now())
+  resolvedAt       DateTime?
+
+  order      TransactionOrder @relation(fields: [orderId], references: [id])
+  raisedBy   User             @relation("DisputeRaiser", fields: [raisedById], references: [id])
+  resolvedBy User?            @relation("DisputeResolver", fields: [resolvedById], references: [id])
+}
+
+// ============================================================================
+// 5. SHOP INVENTORY BINS, DISMANTLING & MULTI-TIER BATCH LINEAGE
+// ============================================================================
+
+model InventoryBin {
+  id                   String   @id @default(uuid())
+  organizationId       String
+  materialId           String
+  availableGrams       Int      @default(0)
+  weightedAvgCostPaise Int      @default(0)
+  updatedAt            DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  material     MaterialCategory @relation(fields: [materialId], references: [id])
+
+  @@unique([organizationId, materialId])
+}
+
+model DismantlingRecord {
+  id                String   @id @default(uuid())
+  organizationId    String
+  inputDescription  String
+  inputGrams        Int
+  outputsJson       Json     // [{ materialSlug, outputGrams }]
+  residueGrams      Int      @default(0)
+  createdAt         DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}
+
+model BatchLineage {
+  id                 String   @id @default(uuid())
+  parentBulkOrderId  String
+  childSourceOrderId String
+  attributedGrams    Int
+  createdAt          DateTime @default(now())
+
+  parentBulkOrder  TransactionOrder @relation("ParentBulkOrder", fields: [parentBulkOrderId], references: [id])
+  childSourceOrder TransactionOrder @relation("ChildSourceOrder", fields: [childSourceOrderId], references: [id])
+
+  @@unique([parentBulkOrderId, childSourceOrderId])
+}
+
+model KhataLedgerEntry {
+  id                String   @id @default(uuid())
+  lenderId          String
+  borrowerId        String
+  entryType         String   // CASH_ADVANCE_GIVEN | ORDER_EARNINGS_OFFSET | CASH_REPAYMENT
+  amountPaise       Int
+  balanceAfterPaise Int
+  relatedOrderId    String?
+  notes             String?
+  createdAt         DateTime @default(now())
+
+  lender   User @relation("KhataLender", fields: [lenderId], references: [id])
+  borrower User @relation("KhataBorrower", fields: [borrowerId], references: [id])
+
+  @@index([lenderId, borrowerId, createdAt])
+}
+
+// ============================================================================
+// 6. AI CLASSIFICATION, OFFLINE SYNC IDEMPOTENCY & APPEND-ONLY AUDIT LOG
+// ============================================================================
+
+model AIScanRecord {
+  id                    String   @id @default(uuid())
+  actorId               String
+  scanType              String   // DEVICE_XRAY | MATERIAL_CLASSIFICATION | SCALE_OCR_CHECK
+  modelVersion          String
+  confidence            Float
+  requiresHumanConfirm  Boolean  @default(true)
+  humanConfirmedAt      DateTime?
+  imageSha256           String?
+  perceptualHash        String?
+  mediaStorageKey       String?
+  structuredResultJson  Json
+  indicativeMinPaise    Int?
+  indicativeMaxPaise    Int?
+  createdAt             DateTime @default(now())
+
+  actor User @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@index([imageSha256])
+}
+
+model SyncOperation {
+  id              String   @id @default(uuid())
+  actorId         String
+  idempotencyKey  String
+  operationType   String
+  clientEntityId  String
+  payloadJson     Json
+  status          String   @default("APPLIED")
+  createdAt       DateTime @default(now())
+
+  actor User @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@unique([actorId, idempotencyKey])
+}
+
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String
+  title     String
+  body      String    // Never include sensitive PII
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+model AuditEvent {
+  id             String   @id @default(uuid())
+  actorId        String?
+  actorRole      String?
+  action         String   // AUTH_LOGIN_SUCCESS | AUTH_LOGIN_FAILED | BOLA_DENIED | VERIFICATION_APPROVED | ...
+  resourceType   String
+  resourceId     String?
+  outcome        String   // SUCCESS | DENIED | FAILURE
+  reason         String?
+  metadataJson   Json?    // Automatically scrubbed of passwords, tokens, OTPs & raw IDs
+  correlationId  String
+  ipAddress      String?
+  createdAt      DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([action, createdAt])
+  @@index([resourceType, resourceId])
+  @@index([actorId, createdAt])
+}
