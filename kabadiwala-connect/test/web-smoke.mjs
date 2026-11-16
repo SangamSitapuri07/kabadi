@@ -8,7 +8,7 @@ test('web foundation serves an honest placeholder', async () => {
   const response = await fetch(new URL('/', baseUrl), { signal: AbortSignal.timeout(5000) });
   assert.equal(response.status, 200);
   const html = await response.text();
-  for (const text of ['Kabadiwala Connect', 'Under development', 'Collection requests and accounts']) {
+  for (const text of ['Kabadiwala Connect', 'Under development', 'Collection requests aren']) {
     assert.ok(html.includes(text), `Missing expected text: ${text}`);
   }
 });

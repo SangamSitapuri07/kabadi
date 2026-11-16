@@ -18,7 +18,7 @@
     "typecheck:api": "tsc --noEmit -p apps/api/tsconfig.json",
     "start:api": "node apps/api/dist/server.js",
     "test:api": "npm run build:api && node --test test/api/*.test.mjs",
-    "test:unit": "node --test test/*.test.mjs",
+    "test:unit": "node --test test/*.test.mjs test/web/*.test.mjs",
     "test:connection": "node --test test/integration/connection.test.mjs",
     "migrate:auth": "npm run build:api && node apps/api/dist/migrate-auth.js"
   },
@@ -36,6 +36,7 @@
     "@types/pg": "8.23.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "jsdom": "26.1.0",
     "typescript": "7.0.2"
   }
 }

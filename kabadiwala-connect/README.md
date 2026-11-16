@@ -103,6 +103,10 @@ server-side revocation, browser behavior and production security still require
 independent review. No OTP has been implemented; it is deferred until production
 readiness. Google may separately ask users for its own security checks.
 
+The development sign-in UI checks the session on load, shows signed-in status,
+and offers sign-out with a follow-up session check. If the check fails, it shows
+an unavailable state rather than assuming success. The status is only a UI hint,
+not authorization; it may become stale if a session changes in another tab.
 The app exposes only Google initiation/callback, session lookup and sign-out.
 The web session endpoint returns only `{ "authenticated": true/false }` rather
 than session tokens or account details. The API's direct Better Auth endpoint
@@ -174,7 +178,9 @@ origins and invalid state, and checks fail-closed behavior. It also creates a
 synthetic local session to test sign-out, database removal and cookie replay. It
 does not visit Google or use a real account. See the experiment README for
 prerequisites. To test Next's development request logging, run
-`node --test test/integration/auth-logging.test.mjs` separately.
+`node --test test/integration/auth-logging.test.mjs` separately. `npm test`
+includes sign-in UI interaction tests using a simulated DOM with mocked auth
+responses; these are not browser automation or Google OAuth tests.
 
 ### Isolated Google-auth / PostgreSQL feasibility (14 November 2026)
 
