@@ -115,7 +115,13 @@ The web and API session endpoints return only `{ "authenticated": true/false }`
 rather than session tokens or account details. Both changes must be deployed
 together: old web and new API session response formats are incompatible. The
 API binds to IPv4 loopback, but the web server can still be network-accessible;
-restrict it to trusted users and networks. Next development request logging
+restrict it to trusted users and networks. A server-only session identity resolver
+is groundwork for future authorization: it returns the validated session's user
+ID internally, not a role or permission, and reports lookup errors as failures.
+There are no protected marketplace endpoints, role management, or account-status
+checks yet. Future handlers must forward refresh cookies and enforce server-side
+roles, ownership, and account status without trusting browser-supplied claims.
+Next development request logging
 ignores `/api/auth` paths, but other loggers,
 proxies and infrastructure may still capture callback URLs; review them and never
 share OAuth codes, cookies, tokens, or session responses. This is not a complete
@@ -180,9 +186,10 @@ npm run test:integration --prefix experiments/google-auth-proof
 The test starts a disposable local database and actual web/API components,
 checks migration, Google URL/state/PKCE and cookie generation, rejects untrusted
 origins and invalid state, and checks fail-closed behavior. It also creates a
-synthetic local session to test minimal direct API and web responses, session
-refresh cookie forwarding, sign-out, database removal and cookie replay. It does
-not visit Google or use a real account. See the experiment README for
+synthetic local session to test minimal direct API and web responses, server-only
+identity resolution, session refresh cookie forwarding, sign-out, database
+removal, expiration, cookie replay, and database failure. It does not visit
+Google or use a real account. See the experiment README for
 prerequisites. To test Next's development request logging, run
 `node --test test/integration/auth-logging.test.mjs` separately. `npm test`
 includes sign-in UI interaction tests using a simulated DOM with mocked auth

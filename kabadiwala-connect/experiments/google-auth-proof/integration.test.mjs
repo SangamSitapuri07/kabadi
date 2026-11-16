@@ -115,11 +115,17 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       await client.query('INSERT INTO "session" (id, "userId", token, "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, $3, NOW() + INTERVAL \'1 hour\', NOW() - INTERVAL \'2 days\', NOW() - INTERVAL \'2 days\')', [randomBytes(16).toString('hex'), userId, token]);
       const signature = createHmac('sha256', secret).update(token).digest('base64');
       const cookie = `better-auth.session_token=${encodeURIComponent(`${token}.${signature}`)}`;
+      // The server-side resolver gets identity only from the validated session;
+      // it is not a role or account authorization decision.
+      assert.equal((await runtime.resolveIdentity()).userId, null);
+      assert.equal((await runtime.resolveIdentity('better-auth.session_token=invalid')).userId, null);
       const sessionWithCookie = () => fetch(publicOrigin + '/api/auth/get-session', { headers: { cookie } });
       const validSession = await sessionWithCookie();
       assert.equal(validSession.status, 200);
       assert.deepEqual(await validSession.json(), { authenticated: true });
       assert.ok(validSession.headers.getSetCookie().some(value => value.includes('better-auth.session_token=')), 'session refresh cookie must cross both layers');
+      const identity = await runtime.resolveIdentity(cookie);
+      assert.equal(identity.userId, userId);
       // The directly reachable API must not expose the bearer token or user.
       const directSession = await fetch(apiOrigin + '/api/auth/get-session', { headers: { cookie } });
       assert.equal(directSession.status, 200);
@@ -134,6 +140,12 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       assert.equal(signOut.status, 200);
       assert.equal((await client.query('SELECT count(*)::int AS count FROM "session" WHERE token = $1', [token])).rows[0].count, 0);
       assert.deepEqual(await (await sessionWithCookie()).json(), { authenticated: false }, 'replayed old cookie must not authenticate');
+      assert.equal((await runtime.resolveIdentity(cookie)).userId, null, 'revoked session must not resolve an identity');
+      const expiredToken = randomBytes(32).toString('hex');
+      await client.query('INSERT INTO "session" (id, "userId", token, "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, $3, NOW() - INTERVAL \'1 hour\', NOW() - INTERVAL \'2 days\', NOW() - INTERVAL \'2 days\')', [randomBytes(16).toString('hex'), userId, expiredToken]);
+      const expiredSignature = createHmac('sha256', secret).update(expiredToken).digest('base64');
+      const expiredCookie = `better-auth.session_token=${encodeURIComponent(`${expiredToken}.${expiredSignature}`)}`;
+      assert.equal((await runtime.resolveIdentity(expiredCookie)).userId, null, 'expired session must not resolve an identity');
     } finally { await client.end(); }
     const wrongProvider = await fetch(publicOrigin + '/api/auth/sign-in/email', { method: 'POST', headers: { origin: publicOrigin }, body: '{}' });
     assert.equal(wrongProvider.status, 404);
@@ -173,6 +185,21 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       mode = 'error';
       assert.equal((await fetch(publicOrigin + '/api/auth/get-session')).status, 503);
     } finally { await new Promise(resolve => mock.close(resolve)); }
+    // A failed database lookup must not be converted to an anonymous identity.
+    const failureToken = randomBytes(32).toString('hex');
+    const failureSignature = createHmac('sha256', secret).update(failureToken).digest('base64');
+    const failureCookie = `better-auth.session_token=${encodeURIComponent(`${failureToken}.${failureSignature}`)}`;
+    const closedRuntime = runtime;
+    await closedRuntime.close();
+    runtime = undefined;
+    await assert.rejects(closedRuntime.resolveIdentity(failureCookie));
+    const failedApi = createApp({ origin: publicOrigin, handler: closedRuntime.handler }).listen(0, '127.0.0.1');
+    await once(failedApi, 'listening');
+    try {
+      const response = await fetch(`http://127.0.0.1:${failedApi.address().port}/api/auth/get-session`, { headers: { cookie: failureCookie } });
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), { error: { code: 'AUTH_UNAVAILABLE', message: 'Sign-in is unavailable.' } });
+    } finally { await new Promise(resolve => failedApi.close(resolve)); }
   } finally {
     await stop(web);
     await stop(serverProcess);

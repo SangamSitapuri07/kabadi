@@ -56,7 +56,27 @@ export function createAuthRuntime(config: AuthConfig) {
   };
   const auth = betterAuth(options);
   const nodeHandler = toNodeHandler(auth);
+  // Server-only identity for future authorization. The caller must treat errors
+  // as unavailable, not as anonymous, and never trust identity/roles from the
+  // request body or headers. No role or account authorization is implied.
+  async function resolveIdentity(cookie?: string): Promise<{ userId: string | null; cookies: string[] }> {
+    const headers = new Headers();
+    if (cookie) headers.set('cookie', cookie);
+    const result = await auth.api.getSession({ headers, asResponse: true });
+    if (!result.ok) throw new Error('Session lookup failed');
+    const data: unknown = await result.json();
+    if (data === null) return { userId: null, cookies: result.headers.getSetCookie() };
+    if (typeof data !== 'object' || Array.isArray(data) || !('session' in data) || !('user' in data) ||
+        !data.session || typeof data.session !== 'object' || Array.isArray(data.session) ||
+        !data.user || typeof data.user !== 'object' || Array.isArray(data.user) ||
+        !('id' in data.user) || typeof data.user.id !== 'string' || !data.user.id.trim() ||
+        !('userId' in data.session) || data.session.userId !== data.user.id) {
+      throw new Error('Invalid session response');
+    }
+    return { userId: data.user.id, cookies: result.headers.getSetCookie() };
+  }
   return {
+    resolveIdentity,
     async handler(request: IncomingMessage, response: ServerResponse) {
       // Better Auth's standard session response includes a bearer token. Even
       // direct API clients must receive only the minimal status, not that data.
@@ -64,21 +84,12 @@ export function createAuthRuntime(config: AuthConfig) {
         return nodeHandler(request, response);
       }
       try {
-        const headers = new Headers();
-        if (request.headers.cookie) headers.set('cookie', request.headers.cookie);
-        const result = await auth.api.getSession({ headers, asResponse: true });
-        if (!result.ok) throw new Error('Session lookup failed');
-        const data: unknown = await result.json();
-        if (data !== null && (typeof data !== 'object' || !('session' in data) || !('user' in data) ||
-            !data.session || typeof data.session !== 'object' || !data.user || typeof data.user !== 'object')) {
-          throw new Error('Invalid session response');
-        }
-        const cookies = result.headers.getSetCookie();
-        if (cookies.length) response.setHeader('Set-Cookie', cookies);
+        const identity = await resolveIdentity(request.headers.cookie);
+        if (identity.cookies.length) response.setHeader('Set-Cookie', identity.cookies);
         response.statusCode = 200;
         response.setHeader('Content-Type', 'application/json');
         response.setHeader('Cache-Control', 'no-store');
-        response.end(JSON.stringify({ authenticated: data !== null }));
+        response.end(JSON.stringify({ authenticated: identity.userId !== null }));
       } catch {
         response.statusCode = 503;
         response.setHeader('Content-Type', 'application/json');
