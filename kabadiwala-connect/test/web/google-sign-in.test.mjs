@@ -37,6 +37,11 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
   };
   const unmount = async () => { await act(async () => root.unmount()); root = undefined; };
   const click = async () => { await act(async () => { document.querySelector('button').click(); }); };
+  const clickButton = async text => {
+    const button = [...document.querySelectorAll('button')].find(item => item.textContent === text);
+    assert.ok(button, `button not found: ${text}`);
+    await act(async () => { button.click(); });
+  };
   try {
     await t.test('signed-out state and rejected unexpected sign-in redirect', async () => {
       const requests = [];
@@ -82,6 +87,87 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.match(document.body.textContent, /Sign-in status is unavailable/);
       await click();
       assert.equal(document.querySelector('button').textContent, 'Continue with Google');
+      await unmount();
+    });
+    await t.test('customer setup posts no identity or role and clears after sign-out', async () => {
+      let session = true, calls = 0;
+      await mount(async (url, init) => {
+        if (url.endsWith('/account/customer')) {
+          calls++; assert.equal(init.method, 'POST'); assert.equal(init.body, '{}');
+          assert.equal(init.headers['Content-Type'], 'application/json');
+          return json({ data: { customer: 'ready' } });
+        }
+        if (url.endsWith('sign-out')) { session = false; return json({ success: true }); }
+        return json({ authenticated: session });
+      });
+      await clickButton('Set up customer account');
+      assert.match(document.body.textContent, /Customer setup completed/);
+      assert.equal(calls, 1);
+      await clickButton('Set up customer account');
+      assert.equal(calls, 2);
+      await clickButton('Sign out');
+      assert.doesNotMatch(document.body.textContent, /Customer setup completed|Set up customer account/);
+      await unmount();
+    });
+    await t.test('customer setup errors fail closed and can be retried', async () => {
+      let result = json({ error: { code: 'ACCOUNT_UNAVAILABLE' } }, 503);
+      await mount(async url => url.endsWith('/account/customer') ? result : json({ authenticated: true }));
+      await clickButton('Set up customer account');
+      assert.match(document.querySelector('[role="alert"]').textContent, /could not be confirmed/i);
+      assert.doesNotMatch(document.body.textContent, /Customer setup completed/);
+      result = json({ error: { code: 'FORBIDDEN' } }, 403);
+      await clickButton('Set up customer account');
+      assert.match(document.querySelector('[role="alert"]').textContent, /not allowed/i);
+      result = json({ data: { customer: 'wrong' } });
+      await clickButton('Set up customer account');
+      assert.match(document.querySelector('[role="alert"]').textContent, /could not be confirmed/i);
+      result = new Response('not json', { status: 200 });
+      await clickButton('Set up customer account');
+      assert.match(document.querySelector('[role="alert"]').textContent, /could not be confirmed/i);
+      result = json({ data: { customer: 'ready' } });
+      await clickButton('Set up customer account');
+      assert.match(document.body.textContent, /Customer setup completed/);
+      assert.equal(document.querySelector('[role="alert"]'), null);
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      await act(async () => { document.dispatchEvent(new dom.window.Event('visibilitychange')); });
+      assert.doesNotMatch(document.body.textContent, /Customer setup completed/);
+      delete document.visibilityState;
+      await unmount();
+    });
+    await t.test('interrupted customer setup does not claim a result', async () => {
+      await mount(async url => {
+        if (url.endsWith('/account/customer')) throw new Error('synthetic network failure');
+        return json({ authenticated: true });
+      });
+      await clickButton('Set up customer account');
+      assert.match(document.querySelector('[role="alert"]').textContent, /could not be confirmed/i);
+      assert.doesNotMatch(document.body.textContent, /Customer setup completed/);
+      assert.ok(![...document.querySelectorAll('button')].some(item => item.disabled));
+      await unmount();
+    });
+    await t.test('expired session requires a fresh sign-in check', async () => {
+      let signedIn = true;
+      await mount(async url => url.endsWith('/account/customer') ? json({ error: { code: 'SIGN_IN_REQUIRED' } }, 401) : json({ authenticated: signedIn }));
+      await clickButton('Set up customer account');
+      assert.match(document.body.textContent, /sign-in could not be confirmed/i);
+      assert.doesNotMatch(document.body.textContent, /Customer setup completed/);
+      signedIn = false;
+      await clickButton('Try again');
+      assert.equal(document.querySelector('button').textContent, 'Continue with Google');
+      await unmount();
+    });
+    await t.test('hiding the tab discards an in-flight customer setup result', async () => {
+      let finish;
+      const pending = new Promise(resolve => { finish = resolve; });
+      await mount(async url => url.endsWith('/account/customer') ? pending : json({ authenticated: true }));
+      const button = [...document.querySelectorAll('button')].find(item => item.textContent === 'Set up customer account');
+      await act(async () => { button.click(); });
+      assert.ok([...document.querySelectorAll('button')].every(item => item.disabled));
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      await act(async () => { document.dispatchEvent(new dom.window.Event('visibilitychange')); });
+      await act(async () => { finish(json({ data: { customer: 'ready' } })); await pending; });
+      assert.doesNotMatch(document.body.textContent, /Customer setup completed/);
+      delete document.visibilityState;
       await unmount();
     });
     await t.test('a still-active session after sign-out is not presented as signed out', async () => {

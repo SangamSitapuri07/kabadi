@@ -18,5 +18,7 @@ footer { color: #71877a; font-size: .8rem; padding: 25px 0; border-top: 1px soli
 .auth-action button:disabled { cursor: wait; opacity: .65; }
 .auth-action button:focus-visible { outline: 3px solid #21815b; outline-offset: 3px; }
 .auth-status { font-size: .95rem; color: #294f3d; font-weight: 700; margin: 0 0 12px; }
+.customer-setup { margin-top: 20px; padding-top: 4px; color: #536a5e; font-size: .9rem; line-height: 1.5; max-width: 420px; }
+.customer-setup [role="status"] p { color: #294f3d; font-weight: 700; }
 .auth-note, .auth-error { font-size: .8rem; color: #536a5e; max-width: 420px; line-height: 1.5; }
 .auth-error { color: #9b3434; }

@@ -199,7 +199,12 @@ customer succeed without duplicating data; suspended accounts and existing
 accounts without a customer grant are denied and never modified. No admin or
 collector grants are created. Errors are sanitized and responses are no-store.
 A separate narrowly scoped web bridge preserves refreshed cookies and projects
-the response. There is currently no onboarding button, profile, or pickup UI.
+the response. The signed-in development page offers a customer-setup button and
+shows a confirmation only after a validated success response. It clears that
+confirmation on sign-out or when the tab is hidden; it is an action result, not
+an authoritative account-status or authorization check. On interrupted requests,
+setup cannot be confirmed and can safely be retried. There is no profile or
+pickup UI yet.
 
 Synthetic PostgreSQL and HTTP integration tests cover concurrent retries,
 transaction rollback, invalid origins and payloads, forged role/ID headers,

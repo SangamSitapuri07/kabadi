@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 type SessionStatus = 'checking' | 'signed-out' | 'signed-in' | 'unavailable';
 
@@ -16,8 +16,24 @@ async function getSession(signal?: AbortSignal): Promise<boolean> {
 
 export function GoogleSignIn() {
   const [status, setStatus] = useState<SessionStatus>('checking');
-  const [busy, setBusy] = useState<'sign-in' | 'sign-out' | null>(null);
+  const [busy, setBusy] = useState<'sign-in' | 'sign-out' | 'customer-setup' | null>(null);
   const [error, setError] = useState('');
+  // This is the outcome of an action, not a durable authorization status.
+  const [customerSetup, setCustomerSetup] = useState<'none' | 'completed'>('none');
+  const setupGeneration = useRef(0);
+
+  // Another tab may change the session. Discard a previous result and ignore
+  // any in-flight result if this page was hidden; it isn't an identity check.
+  useEffect(() => {
+    const invalidate = () => {
+      if (document.visibilityState === 'hidden') {
+        setupGeneration.current++;
+        setCustomerSetup('none');
+      }
+    };
+    document.addEventListener('visibilitychange', invalidate);
+    return () => { setupGeneration.current++; document.removeEventListener('visibilitychange', invalidate); };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -32,6 +48,8 @@ export function GoogleSignIn() {
   async function retrySession() {
     setStatus('checking');
     setError('');
+    setupGeneration.current++;
+    setCustomerSetup('none');
     try { setStatus(await getSession() ? 'signed-in' : 'signed-out'); }
     catch { setStatus('unavailable'); }
   }
@@ -58,6 +76,8 @@ export function GoogleSignIn() {
   async function signOut() {
     setBusy('sign-out');
     setError('');
+    setupGeneration.current++;
+    setCustomerSetup('none');
     try {
       const response = await fetch('/api/auth/sign-out', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
@@ -74,6 +94,41 @@ export function GoogleSignIn() {
     } finally { setBusy(null); }
   }
 
+  async function setupCustomer() {
+    setBusy('customer-setup');
+    setError('');
+    setCustomerSetup('none');
+    const generation = ++setupGeneration.current;
+    try {
+      const response = await fetch('/api/v1/account/customer', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const data: unknown = await response.json();
+      if (generation !== setupGeneration.current) return;
+      if (response.status === 401) {
+        setStatus('unavailable');
+        setError('Your sign-in could not be confirmed. Please check it and try again.');
+        return;
+      }
+      if (response.status === 403 && data && typeof data === 'object' && 'error' in data &&
+          data.error && typeof data.error === 'object' && 'code' in data.error && data.error.code === 'FORBIDDEN') {
+        setError('Customer setup is not allowed for this account.');
+        return;
+      }
+      if (!response.ok || !data || typeof data !== 'object' || !('data' in data) || !data.data ||
+          typeof data.data !== 'object' || !('customer' in data.data) || data.data.customer !== 'ready') {
+        throw new Error('Customer setup not confirmed');
+      }
+      setCustomerSetup('completed');
+    } catch {
+      if (generation === setupGeneration.current) {
+        // A timed-out request may have succeeded. Retrying is safe and does not
+        // promise that this attempt failed or that an account is active.
+        setError('Customer setup could not be confirmed. Please try again later.');
+      }
+    } finally { setBusy(null); }
+  }
+
   return <div className="auth-action">
     <div aria-live="polite" role="status">
       {status === 'checking' && <p className="auth-status">Checking sign-in status…</p>}
@@ -81,7 +136,14 @@ export function GoogleSignIn() {
       {status === 'unavailable' && <p className="auth-status">Sign-in status is unavailable.</p>}
     </div>
     {status === 'signed-out' && <button type="button" onClick={signIn} disabled={busy !== null}>{busy === 'sign-in' ? 'Opening Google…' : 'Continue with Google'}</button>}
-    {status === 'signed-in' && <button type="button" onClick={signOut} disabled={busy !== null}>{busy === 'sign-out' ? 'Signing out…' : 'Sign out'}</button>}
+    {status === 'signed-in' && <>
+      <button type="button" onClick={signOut} disabled={busy !== null}>{busy === 'sign-out' ? 'Signing out…' : 'Sign out'}</button>
+      <div className="customer-setup">
+        <p>Set up a customer account to prepare for future pickup requests.</p>
+        <button type="button" onClick={setupCustomer} disabled={busy !== null}>{busy === 'customer-setup' ? 'Setting up…' : 'Set up customer account'}</button>
+        <div role="status" aria-live="polite">{customerSetup === 'completed' && <p>Customer setup completed for this sign-in. Pickup requests are not available yet.</p>}</div>
+      </div>
+    </>}
     {status === 'unavailable' && <button type="button" onClick={retrySession}>Try again</button>}
     <p className="auth-note">Development only. Sign-in and security are not ready for production.</p>
     {error && <p role="alert" className="auth-error">{error}</p>}
