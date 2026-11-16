@@ -57,6 +57,24 @@ test('web-origin liveness forwards safely and reports upstream failures', { time
     assert.equal(home.status, 200);
     assert.match(html, /Under development/);
     assert.match(html, /href="\/api\/v1\/health\/live"/);
+    // Callback error details, including untrusted provider text, must never be
+    // reflected into the destination or page.
+    const marker = 'synthetic-sensitive-error-marker';
+    const authError = await fetch(`${origin}/api/auth/error?error=${marker}&error_description=${marker}`, { redirect: 'manual' });
+    assert.equal(authError.status, 303);
+    assert.equal(authError.headers.get('location'), '/auth/error');
+    assert.equal(authError.headers.get('cache-control'), 'no-store');
+    assert.equal(authError.headers.get('referrer-policy'), 'no-referrer');
+    assert.ok(!(await authError.text()).includes(marker));
+    const errorPage = await fetch(`${origin}${authError.headers.get('location')}?untrusted=${marker}`);
+    assert.equal(errorPage.status, 200);
+    assert.match(errorPage.headers.get('cache-control'), /no-store/);
+    assert.equal(errorPage.headers.get('referrer-policy'), 'no-referrer');
+    const errorHtml = await errorPage.text();
+    assert.match(errorHtml, /could not complete/);
+    assert.match(errorHtml, /Return to sign-in/);
+    assert.match(errorHtml, /href="\/"/);
+    assert.ok(!errorHtml.includes(marker));
     const path = `${origin}/api/v1/health/live`;
     let response = await fetch(path);
     assert.equal(response.status, 200);

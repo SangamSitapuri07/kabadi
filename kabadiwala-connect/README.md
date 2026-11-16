@@ -121,8 +121,10 @@ ID internally, not a role or permission, and reports lookup errors as failures.
 There are no protected marketplace endpoints, role management, or account-status
 checks yet. Future handlers must forward refresh cookies and enforce server-side
 roles, ownership, and account status without trusting browser-supplied claims.
-Next development request logging
-ignores `/api/auth` paths, but other loggers,
+A failed Google callback is redirected to a generic sign-in error page with a
+link back to start a new attempt; provider error details are discarded rather
+than displayed. Next development request logging ignores `/api/auth` and the
+error page path, but other loggers,
 proxies and infrastructure may still capture callback URLs; review them and never
 share OAuth codes, cookies, tokens, or session responses. This is not a complete
 logging or security solution. The web bridge forwards paths to the trusted API origin, restricts POSTs

@@ -158,7 +158,13 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       badCallback = await fetch(`${publicOrigin}/api/auth/callback/google?code=fake&state=${sensitiveState}`, { redirect: 'manual' });
     } finally { console.error = originalError; }
     assert.ok(badCallback.status >= 300 && badCallback.status < 400);
-    assert.equal(new URL(badCallback.headers.get('location')).origin, publicOrigin);
+    const failureLocation = new URL(badCallback.headers.get('location'));
+    assert.equal(failureLocation.origin, publicOrigin);
+    assert.equal(failureLocation.pathname, '/api/auth/error');
+    const errorRedirect = await fetch(failureLocation, { redirect: 'manual' });
+    assert.equal(errorRedirect.status, 303);
+    assert.equal(errorRedirect.headers.get('location'), '/auth/error');
+    assert.equal((await fetch(publicOrigin + errorRedirect.headers.get('location'))).status, 200);
     assert.ok(captured.length > 0, 'invalid state should produce a sanitized diagnostic');
     assert.ok(!captured.join('\n').includes(sensitiveState));
     const tooLarge = await fetch(publicOrigin + signInPath, { method: 'POST', headers: { origin: publicOrigin, 'content-type': 'application/json' }, body: 'x'.repeat(8193) });

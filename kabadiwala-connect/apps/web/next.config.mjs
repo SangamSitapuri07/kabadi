@@ -8,9 +8,9 @@ const nextConfig = {
   // The new workspace must not pick up the legacy repository's lockfile.
   turbopack: { root: resolve(webRoot, '../..') },
   allowedDevOrigins: ['*.e2b.app'],
-  // OAuth callback URLs contain short-lived credentials; don't log auth requests.
-  // Other infrastructure and libraries may still log URLs and need review.
-  logging: { incomingRequests: { ignore: [/^\/api\/auth(?:\/|\?|$)/] } },
+  // OAuth callbacks and error URLs may contain sensitive data. Other
+  // infrastructure and libraries may still log URLs and need review.
+  logging: { incomingRequests: { ignore: [/^\/api\/auth(?:\/|\?|$)/, /^\/auth\/error(?:\/|\?|$)/] } },
 };
 
 export default nextConfig;

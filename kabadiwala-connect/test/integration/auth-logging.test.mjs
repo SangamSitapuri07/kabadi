@@ -36,6 +36,10 @@ test('development request logs omit auth callback URLs', { timeout: 90000 }, asy
     const origin = `http://127.0.0.1:${webPort}`;
     // No upstream, so this cannot contact Google or create a session.
     assert.equal((await fetch(`${origin}/api/auth/callback/google?code=${marker}&state=${marker}`)).status, 503);
+    const error = await fetch(`${origin}/api/auth/error?error_description=${marker}`, { redirect: 'manual' });
+    assert.equal(error.status, 303);
+    assert.equal(error.headers.get('location'), '/auth/error');
+    assert.equal((await fetch(`${origin}/auth/error?untrusted=${marker}`)).status, 200);
     assert.equal((await fetch(origin)).status, 200);
     await new Promise((resolve, reject) => {
       if (/GET \/ 200/.test(logs)) return resolve();
@@ -43,7 +47,7 @@ test('development request logs omit auth callback URLs', { timeout: 90000 }, asy
       const check = () => { if (/GET \/ 200/.test(logs)) { clearTimeout(timer); resolve(); } };
       child.stdout.on('data', check); child.stderr.on('data', check);
     });
-    assert.ok(!logs.includes(marker), 'callback query must not appear in Next development request logs');
+    assert.ok(!logs.includes(marker), 'auth callback and error queries must not appear in Next development request logs');
   } finally {
     if (child.exitCode === null && child.signalCode === null) {
       const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited;
