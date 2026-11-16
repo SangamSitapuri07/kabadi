@@ -43,6 +43,9 @@ export function createAuthRuntime(config: AuthConfig) {
   const options = {
     baseURL: config.origin,
     secret: config.secret,
+    // Better Auth errors can contain OAuth state and URLs. Keep diagnostics
+    // intentionally generic until a reviewed redacting logger is available.
+    logger: { level: 'warn' as const, log(level: string) { console.error(`Authentication library ${level}.`); } },
     database: pool,
     trustedOrigins: [config.origin],
     advanced: { disableOriginCheck: false, disableCSRFCheck: false, useSecureCookies: config.origin.startsWith('https://') },

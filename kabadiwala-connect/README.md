@@ -96,13 +96,21 @@ of API/database integration, deployment readiness, or production security.
 
 A first Google-only integration is implemented, but is **disabled by default**
 and explicitly rejects API startup with auth enabled when `NODE_ENV=production`.
-Do not deploy it or use real user data. Real Google sign-in, token validation,
-account creation, session lifecycle, browser behavior and production security
-are not yet verified. No OTP has been implemented; it is deferred until
-production readiness. Google may separately ask users for its own security checks.
+Do not deploy it or use production user data. The owner reported a successful
+Google callback and session creation on their Windows development machine, and
+no browser session after sign-out. This is not a security audit: token validation,
+server-side revocation, browser behavior and production security still require
+independent review. No OTP has been implemented; it is deferred until production
+readiness. Google may separately ask users for its own security checks.
 
 The app exposes only Google initiation/callback, session lookup and sign-out.
-The web bridge forwards these paths to the trusted API origin, restricts POSTs
+The web session endpoint returns only `{ "authenticated": true/false }` rather
+than session tokens or account details. The API's direct Better Auth endpoint
+still returns sensitive session data: do not expose the API to untrusted clients.
+Next development request logging ignores `/api/auth` paths, but other loggers,
+proxies and infrastructure may still capture callback URLs; review them and never
+share OAuth codes, cookies, tokens, or session responses. This is not a complete
+logging or security solution. The web bridge forwards paths to the trusted API origin, restricts POSTs
 to the configured web origin even without cookies, limits request sizes, and
 preserves auth cookies. The API repeats the origin check and rejects unavailable
 or unconfigured auth. The configured origin must be identical for web and API;
@@ -130,9 +138,18 @@ npm run build:api
 # target first; never point it at production. Migrations are not run at startup.
 AUTH_MIGRATION_CONFIRM=yes node --env-file=.env apps/api/dist/migrate-auth.js
 node --env-file=.env apps/api/dist/server.js
-# In a second terminal, start the web server with the same .env:
-node --env-file=.env node_modules/next/dist/bin/next dev apps/web --hostname 0.0.0.0
+# In a second terminal, the web needs only the public origin and API address.
+# Don't pass --env-file to Next dev: it can propagate the flag via NODE_OPTIONS.
+AUTH_PUBLIC_ORIGIN=http://localhost:3000 API_INTERNAL_ORIGIN=http://127.0.0.1:4000 node node_modules/next/dist/bin/next dev apps/web --hostname 127.0.0.1
 ```
+
+On Windows PowerShell, set `$env:AUTH_MIGRATION_CONFIRM="yes"` before the
+migration and remove it afterwards with `Remove-Item Env:AUTH_MIGRATION_CONFIRM`.
+In the web terminal, use `$env:AUTH_PUBLIC_ORIGIN="http://localhost:3000"` and
+`$env:API_INTERNAL_ORIGIN="http://127.0.0.1:4000"`, then run the same `node`
+command above without its shell-style variable assignments. Browser origin,
+web/API config, and Google callback must match exactly. Do not set
+`NODE_TLS_REJECT_UNAUTHORIZED=0`: it disables TLS verification.
 
 The API fails closed when configuration or auth tables are missing. Migration
 uses Better Auth's built-in PostgreSQL migration on explicit confirmation; it
@@ -153,8 +170,11 @@ npm run test:integration --prefix experiments/google-auth-proof
 
 The test starts a disposable local database and actual web/API components,
 checks migration, Google URL/state/PKCE and cookie generation, rejects untrusted
-origins and invalid state, and checks fail-closed behavior. It does not visit
-Google or create a real user/session. See the experiment README for prerequisites.
+origins and invalid state, and checks fail-closed behavior. It also creates a
+synthetic local session to test sign-out, database removal and cookie replay. It
+does not visit Google or use a real account. See the experiment README for
+prerequisites. To test Next's development request logging, run
+`node --test test/integration/auth-logging.test.mjs` separately.
 
 ### Isolated Google-auth / PostgreSQL feasibility (14 November 2026)
 
@@ -171,8 +191,8 @@ Never use production data for development or commit `.env` files or secrets.
 
 The web app is an under-development placeholder, not a functioning marketplace.
 The API has liveness and an opt-in, development-only Google authentication
-integration. Authentication is disabled by default, prohibited when the API's
-`NODE_ENV` is `production`, and has not been validated with Google or real
-accounts. There is no marketplace database schema, collection, notification,
-OTP or payment functionality. Policy decisions, full security review and
+integration. Authentication is disabled by default and prohibited when the API's
+`NODE_ENV` is `production`. An initial owner-run local Google login succeeded;
+security and production readiness have not been established. There is no
+marketplace database schema, collection, notification, OTP or payment functionality. Policy decisions, full security review and
 zero-cost provider suitability remain pending. Phase 1 is not complete.

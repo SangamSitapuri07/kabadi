@@ -5,8 +5,9 @@ or a production configuration. `integration.test.mjs` separately exercises the
 actual development-only app integration through a disposable database and web
 bridge. Neither test is an authentication bypass or production-ready setup.
 Both use random local database/auth secrets and fake Google client values; no
-external Google service is contacted, no actual login is performed, and no user
-account is created. They do not use an existing application database or credentials.
+external Google service is contacted and no actual Google login is performed.
+The integration test inserts a synthetic user and session to exercise lookup and
+revocation. Neither test uses an existing application database or credentials.
 
 ## Reproduce
 
@@ -54,11 +55,10 @@ Never add real secrets, real users, or production data to this experiment.
 The development-only application now uses the pinned Better Auth and pg
 packages; embedded-postgres remains an experiment/test dependency only. The
 integration test exercises the actual API/web bridge with a synthetic Google
-request, validates state and PKCE generation, tests a no-cookie cross-origin
-rejection and an invalid callback, and checks the startup/migration gates.
-It still cannot validate a real login or session. Neither package selection nor
-this test constitutes production approval. In particular,
-protecting state/PKCE, actual token validation, secure sessions, account linking,
-authorization, app proxy behavior, transport security, and operational setup
-still need implementation and security tests. Google OAuth configuration is
-still needed for an eventual live test. OTP remains deferred as requested.
+request, validates state and PKCE generation, tests origin rejection and invalid
+callback, checks the startup/migration gates, and uses a synthetic DB session to
+check sign-out and replay. It does not contact Google or perform real OAuth.
+The owner separately reported an initial real Google login on Windows. Neither
+package selection nor these tests constitute production approval: browser CSRF,
+token validation, account linking, authorization, transport, logging and
+operations still need independent security review. OTP remains deferred.

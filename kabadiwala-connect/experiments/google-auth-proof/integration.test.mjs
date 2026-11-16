@@ -1,7 +1,8 @@
 // Synthetic integration: disposable DB, real app API and web bridge, no Google calls.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
+import pg from 'pg';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join, resolve } from 'node:path';
@@ -101,12 +102,44 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(googleURL.searchParams.get('code_challenge_method'), 'S256');
     assert.ok(googleURL.searchParams.get('code_challenge'));
     const session = await fetch(publicOrigin + '/api/auth/get-session');
-    assert.equal(session.status, 200); assert.equal(await session.json(), null);
+    assert.equal(session.status, 200); assert.deepEqual(await session.json(), { authenticated: false });
+    // A synthetic DB user/session and signed cookie exercise real server-side
+    // lookup and sign-out without an external identity provider or real data.
+    const client = new pg.Client({ connectionString: databaseURL });
+    await client.connect();
+    try {
+      const userId = randomBytes(16).toString('hex');
+      const token = randomBytes(32).toString('hex');
+      await client.query('INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt") VALUES ($1, $2, $3, false, NOW(), NOW())', [userId, 'Synthetic', `${userId}@example.test`]);
+      await client.query('INSERT INTO "session" (id, "userId", token, "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, $3, NOW() + INTERVAL \'1 hour\', NOW(), NOW())', [randomBytes(16).toString('hex'), userId, token]);
+      const signature = createHmac('sha256', secret).update(token).digest('base64');
+      const cookie = `better-auth.session_token=${encodeURIComponent(`${token}.${signature}`)}`;
+      const sessionWithCookie = () => fetch(publicOrigin + '/api/auth/get-session', { headers: { cookie } });
+      const validSession = await sessionWithCookie();
+      assert.equal(validSession.status, 200);
+      assert.deepEqual(await validSession.json(), { authenticated: true });
+      const badSignOut = await fetch(publicOrigin + '/api/auth/sign-out', { method: 'POST', headers: { origin: 'https://evil.example', cookie, 'content-type': 'application/json' }, body: '{}' });
+      assert.equal(badSignOut.status, 403);
+      assert.deepEqual(await (await sessionWithCookie()).json(), { authenticated: true });
+      const signOut = await fetch(publicOrigin + '/api/auth/sign-out', { method: 'POST', headers: { origin: publicOrigin, cookie, 'content-type': 'application/json' }, body: '{}' });
+      assert.equal(signOut.status, 200);
+      assert.equal((await client.query('SELECT count(*)::int AS count FROM "session" WHERE token = $1', [token])).rows[0].count, 0);
+      assert.deepEqual(await (await sessionWithCookie()).json(), { authenticated: false }, 'replayed old cookie must not authenticate');
+    } finally { await client.end(); }
     const wrongProvider = await fetch(publicOrigin + '/api/auth/sign-in/email', { method: 'POST', headers: { origin: publicOrigin }, body: '{}' });
     assert.equal(wrongProvider.status, 404);
-    const badCallback = await fetch(publicOrigin + '/api/auth/callback/google?code=fake&state=invalid', { redirect: 'manual' });
+    const sensitiveState = `synthetic-${randomBytes(16).toString('hex')}`;
+    const captured = [];
+    const originalError = console.error;
+    let badCallback;
+    try {
+      console.error = (...args) => captured.push(args.map(String).join(' '));
+      badCallback = await fetch(`${publicOrigin}/api/auth/callback/google?code=fake&state=${sensitiveState}`, { redirect: 'manual' });
+    } finally { console.error = originalError; }
     assert.ok(badCallback.status >= 300 && badCallback.status < 400);
     assert.equal(new URL(badCallback.headers.get('location')).origin, publicOrigin);
+    assert.ok(captured.length > 0, 'invalid state should produce a sanitized diagnostic');
+    assert.ok(!captured.join('\n').includes(sensitiveState));
     const tooLarge = await fetch(publicOrigin + signInPath, { method: 'POST', headers: { origin: publicOrigin, 'content-type': 'application/json' }, body: 'x'.repeat(8193) });
     assert.equal(tooLarge.status, 413);
     await new Promise(resolve => api.close(resolve)); api = undefined;

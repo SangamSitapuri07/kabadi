@@ -44,6 +44,17 @@ async function forward(request: Request): Promise<Response> {
     }
     const result = await fetch(upstream, { method: request.method, headers, body, redirect: 'manual', cache: 'no-store', signal: AbortSignal.timeout(5000) });
     const out = new Headers({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    // Never expose Better Auth's bearer session token or user details to the
+    // browser via this convenience endpoint. A failed or malformed upstream
+    // response must not be mistaken for an authenticated session.
+    if (url.pathname === '/api/auth/get-session') {
+      if (!result.ok) return fail();
+      const data: unknown = await result.json();
+      if (data !== null && (typeof data !== 'object' || !('session' in data) || !('user' in data) ||
+          !data.session || typeof data.session !== 'object' || !data.user || typeof data.user !== 'object')) return fail();
+      for (const cookie of result.headers.getSetCookie()) out.append('set-cookie', cookie);
+      return Response.json({ authenticated: data !== null }, { headers: out });
+    }
     const contentType = result.headers.get('content-type');
     if (contentType) out.set('content-type', contentType);
     const location = result.headers.get('location');
