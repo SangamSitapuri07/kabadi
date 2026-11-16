@@ -1,0 +1,19 @@
+{
+  "name": "kabadi-google-auth-proof",
+  "private": true,
+  "type": "module",
+  "description": "Disposable local-only Google auth database experiment, not application code",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test proof.test.mjs",
+    "test:integration": "node --test integration.test.mjs"
+  },
+  "dependencies": {
+    "better-auth": "1.7.24",
+    "embedded-postgres": "18.6.0-beta.19",
+    "express": "5.3.0",
+    "pg": "8.23.1"
+  }
+}
