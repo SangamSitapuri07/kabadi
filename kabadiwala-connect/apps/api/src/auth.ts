@@ -1,6 +1,7 @@
 import { betterAuth } from 'better-auth';
 import { getMigrations } from 'better-auth/db/migration';
 import { toNodeHandler } from 'better-auth/node';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import pg from 'pg';
 
 export type AuthConfig = {
@@ -54,8 +55,37 @@ export function createAuthRuntime(config: AuthConfig) {
     socialProviders: { google: { clientId: config.googleClientId, clientSecret: config.googleClientSecret } },
   };
   const auth = betterAuth(options);
+  const nodeHandler = toNodeHandler(auth);
   return {
-    handler: toNodeHandler(auth),
+    async handler(request: IncomingMessage, response: ServerResponse) {
+      // Better Auth's standard session response includes a bearer token. Even
+      // direct API clients must receive only the minimal status, not that data.
+      if (request.method !== 'GET' || request.url?.split('?')[0] !== '/api/auth/get-session') {
+        return nodeHandler(request, response);
+      }
+      try {
+        const headers = new Headers();
+        if (request.headers.cookie) headers.set('cookie', request.headers.cookie);
+        const result = await auth.api.getSession({ headers, asResponse: true });
+        if (!result.ok) throw new Error('Session lookup failed');
+        const data: unknown = await result.json();
+        if (data !== null && (typeof data !== 'object' || !('session' in data) || !('user' in data) ||
+            !data.session || typeof data.session !== 'object' || !data.user || typeof data.user !== 'object')) {
+          throw new Error('Invalid session response');
+        }
+        const cookies = result.headers.getSetCookie();
+        if (cookies.length) response.setHeader('Set-Cookie', cookies);
+        response.statusCode = 200;
+        response.setHeader('Content-Type', 'application/json');
+        response.setHeader('Cache-Control', 'no-store');
+        response.end(JSON.stringify({ authenticated: data !== null }));
+      } catch {
+        response.statusCode = 503;
+        response.setHeader('Content-Type', 'application/json');
+        response.setHeader('Cache-Control', 'no-store');
+        response.end(JSON.stringify({ error: { code: 'AUTH_UNAVAILABLE', message: 'Sign-in is unavailable.' } }));
+      }
+    },
     async schemaStatus() {
       const migration = await getMigrations(options);
       return { missing: migration.toBeCreated.length + migration.toBeAdded.length + migration.toBeAddedIndexes.length, problems: migration.schemaProblems.length + migration.unsafeChanges.length };

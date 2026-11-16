@@ -1,5 +1,6 @@
 import { createApp } from './app.js';
 import { createAuthRuntime, readAuthConfig } from './auth.js';
+import { listenLocally } from './listen.js';
 
 const rawPort = process.env.PORT ?? '4000';
 if (!/^[0-9]+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535) {
@@ -22,8 +23,9 @@ try {
   if (runtime) await runtime.close();
   process.exit(1);
 }
-const server = createApp(mount).listen(port, '0.0.0.0', () => {
-  console.log(`API listening on port ${port}`);
+const server = listenLocally(createApp(mount), port);
+server.once('listening', () => {
+  console.log(`API listening on port ${port} (loopback only)`);
 });
 server.on('error', async () => {
   console.error('API server failed to listen.');

@@ -41,10 +41,13 @@ separate review before production; these local defaults are not a deployment pla
 With the web server running, use another terminal to run `npm run test:web:smoke`.
 It defaults to `http://127.0.0.1:3000`; set `WEB_BASE_URL` to test a different
 local server. For development use `npm run dev:web` instead of the production
-build/start commands. The scripts bind to `0.0.0.0` for preview access; restrict
-network access appropriately when running locally. The development origin
-configuration allows preview subdomains under `e2b.app`; it is not a production
-security policy.
+build/start commands. The web scripts bind to `0.0.0.0` for preview access;
+restrict web network access appropriately when running locally. The development
+API binds only to IPv4 loopback (`127.0.0.1`) and must run on the same machine as
+the web server. This limits network exposure, but does not protect it from other
+local processes or replace authentication, authorization, or a firewall. The
+development origin configuration allows preview subdomains under `e2b.app`; it
+is not a production security policy.
 
 The isolated lockfile pins Next.js 16.4.6, React/React DOM 19.3.1, Express
 5.3.0, TypeScript 7.0.2, and corresponding type packages. The npm registry
@@ -108,10 +111,12 @@ and offers sign-out with a follow-up session check. If the check fails, it shows
 an unavailable state rather than assuming success. The status is only a UI hint,
 not authorization; it may become stale if a session changes in another tab.
 The app exposes only Google initiation/callback, session lookup and sign-out.
-The web session endpoint returns only `{ "authenticated": true/false }` rather
-than session tokens or account details. The API's direct Better Auth endpoint
-still returns sensitive session data: do not expose the API to untrusted clients.
-Next development request logging ignores `/api/auth` paths, but other loggers,
+The web and API session endpoints return only `{ "authenticated": true/false }`
+rather than session tokens or account details. Both changes must be deployed
+together: old web and new API session response formats are incompatible. The
+API binds to IPv4 loopback, but the web server can still be network-accessible;
+restrict it to trusted users and networks. Next development request logging
+ignores `/api/auth` paths, but other loggers,
 proxies and infrastructure may still capture callback URLs; review them and never
 share OAuth codes, cookies, tokens, or session responses. This is not a complete
 logging or security solution. The web bridge forwards paths to the trusted API origin, restricts POSTs
@@ -175,8 +180,9 @@ npm run test:integration --prefix experiments/google-auth-proof
 The test starts a disposable local database and actual web/API components,
 checks migration, Google URL/state/PKCE and cookie generation, rejects untrusted
 origins and invalid state, and checks fail-closed behavior. It also creates a
-synthetic local session to test sign-out, database removal and cookie replay. It
-does not visit Google or use a real account. See the experiment README for
+synthetic local session to test minimal direct API and web responses, session
+refresh cookie forwarding, sign-out, database removal and cookie replay. It does
+not visit Google or use a real account. See the experiment README for
 prerequisites. To test Next's development request logging, run
 `node --test test/integration/auth-logging.test.mjs` separately. `npm test`
 includes sign-in UI interaction tests using a simulated DOM with mocked auth

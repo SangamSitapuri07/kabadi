@@ -5,6 +5,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
@@ -65,7 +66,7 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     });
     const serverSession = await fetch(`http://127.0.0.1:${env.PORT}/api/auth/get-session`);
     assert.equal(serverSession.status, 200);
-    assert.equal(await serverSession.json(), null);
+    assert.deepEqual(await serverSession.json(), { authenticated: false });
     await stop(serverProcess);
     api = createApp({ origin: publicOrigin, handler: runtime.handler }).listen(0, '127.0.0.1');
     await once(api, 'listening');
@@ -111,13 +112,21 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       const userId = randomBytes(16).toString('hex');
       const token = randomBytes(32).toString('hex');
       await client.query('INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt") VALUES ($1, $2, $3, false, NOW(), NOW())', [userId, 'Synthetic', `${userId}@example.test`]);
-      await client.query('INSERT INTO "session" (id, "userId", token, "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, $3, NOW() + INTERVAL \'1 hour\', NOW(), NOW())', [randomBytes(16).toString('hex'), userId, token]);
+      await client.query('INSERT INTO "session" (id, "userId", token, "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, $3, NOW() + INTERVAL \'1 hour\', NOW() - INTERVAL \'2 days\', NOW() - INTERVAL \'2 days\')', [randomBytes(16).toString('hex'), userId, token]);
       const signature = createHmac('sha256', secret).update(token).digest('base64');
       const cookie = `better-auth.session_token=${encodeURIComponent(`${token}.${signature}`)}`;
       const sessionWithCookie = () => fetch(publicOrigin + '/api/auth/get-session', { headers: { cookie } });
       const validSession = await sessionWithCookie();
       assert.equal(validSession.status, 200);
       assert.deepEqual(await validSession.json(), { authenticated: true });
+      assert.ok(validSession.headers.getSetCookie().some(value => value.includes('better-auth.session_token=')), 'session refresh cookie must cross both layers');
+      // The directly reachable API must not expose the bearer token or user.
+      const directSession = await fetch(apiOrigin + '/api/auth/get-session', { headers: { cookie } });
+      assert.equal(directSession.status, 200);
+      assert.equal(directSession.headers.get('cache-control'), 'no-store');
+      assert.deepEqual(await directSession.json(), { authenticated: true });
+      const invalidCookie = await fetch(apiOrigin + '/api/auth/get-session', { headers: { cookie: 'better-auth.session_token=invalid' } });
+      assert.deepEqual(await invalidCookie.json(), { authenticated: false });
       const badSignOut = await fetch(publicOrigin + '/api/auth/sign-out', { method: 'POST', headers: { origin: 'https://evil.example', cookie, 'content-type': 'application/json' }, body: '{}' });
       assert.equal(badSignOut.status, 403);
       assert.deepEqual(await (await sessionWithCookie()).json(), { authenticated: true });
@@ -146,6 +155,24 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     const unavailable = await fetch(publicOrigin + '/api/auth/get-session');
     assert.equal(unavailable.status, 503);
     assert.ok(!(await unavailable.text()).includes(password));
+    // Verify the bridge projects only the boolean and rejects malformed status.
+    let mode = 'valid';
+    const mock = createHttpServer((_req, res) => {
+      if (mode === 'error') { res.writeHead(500); res.end('{}'); return; }
+      res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'synthetic=refresh; HttpOnly; SameSite=Lax' });
+      res.end(JSON.stringify(mode === 'valid' ? { authenticated: true, token: 'synthetic-secret', user: { name: 'private' } } : { authenticated: 'yes' }));
+    });
+    mock.listen(Number(new URL(apiOrigin).port), '127.0.0.1');
+    await once(mock, 'listening');
+    try {
+      const projected = await fetch(publicOrigin + '/api/auth/get-session');
+      assert.deepEqual(await projected.json(), { authenticated: true });
+      assert.ok(projected.headers.getSetCookie().some(value => value.includes('synthetic=refresh')));
+      mode = 'invalid';
+      assert.equal((await fetch(publicOrigin + '/api/auth/get-session')).status, 503);
+      mode = 'error';
+      assert.equal((await fetch(publicOrigin + '/api/auth/get-session')).status, 503);
+    } finally { await new Promise(resolve => mock.close(resolve)); }
   } finally {
     await stop(web);
     await stop(serverProcess);
