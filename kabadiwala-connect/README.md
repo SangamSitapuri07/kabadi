@@ -115,12 +115,26 @@ The web and API session endpoints return only `{ "authenticated": true/false }`
 rather than session tokens or account details. Both changes must be deployed
 together: old web and new API session response formats are incompatible. The
 API binds to IPv4 loopback, but the web server can still be network-accessible;
-restrict it to trusted users and networks. A server-only session identity resolver
-is groundwork for future authorization: it returns the validated session's user
-ID internally, not a role or permission, and reports lookup errors as failures.
-There are no protected marketplace endpoints, role management, or account-status
-checks yet. Future handlers must forward refresh cookies and enforce server-side
-roles, ownership, and account status without trusting browser-supplied claims.
+restrict it to trusted users and networks. A server-only session identity resolver returns the validated session's user ID
+internally, not a role or permission, and reports lookup errors as failures.
+An authorization guard in `apps/api/src/authorization.ts` is groundwork for
+protected API routes: it resolves the session, fetches current account status and
+roles through a trusted server-side lookup, requires an active account and an
+explicit allowed role, and forwards refreshed cookies. It denies missing accounts
+and roles, and fails closed on lookup errors or malformed records. The current
+application does **not** mount this guard on any marketplace route, provide an
+account/role store, or grant roles. Tests use a synthetic store and a test-only
+route, not a real marketplace endpoint. Do not interpret sign-in as authorization.
+
+Before adding protected endpoints, implement and review an authoritative account
+store, safe provisioning/revocation and admin bootstrap, and mount the guard on
+every protected route. A role check alone is not sufficient: handlers must also
+enforce record ownership or assignment, collector verification, workflow state,
+and appropriate CSRF/origin protections for mutations. Authorization and the
+mutation must avoid races with revocation or ownership changes (e.g. via suitable
+transactional database constraints/locking). Review the web bridge, refresh-cookie
+handling, privacy, and security tests for each new route. No production or security
+readiness is implied.
 A failed Google callback is redirected to a generic sign-in error page with a
 link back to start a new attempt; provider error details are discarded rather
 than displayed. Next development request logging ignores `/api/auth` and the

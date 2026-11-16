@@ -12,6 +12,8 @@ import { once } from 'node:events';
 import EmbeddedPostgres from 'embedded-postgres';
 import { createAuthRuntime } from '../../apps/api/dist/auth.js';
 import { createApp } from '../../apps/api/dist/app.js';
+import { requireRoles } from '../../apps/api/dist/authorization.js';
+import express from 'express';
 
 async function port() {
   const server = createServer().listen(0, '127.0.0.1');
@@ -126,6 +128,29 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       assert.ok(validSession.headers.getSetCookie().some(value => value.includes('better-auth.session_token=')), 'session refresh cookie must cross both layers');
       const identity = await runtime.resolveIdentity(cookie);
       assert.equal(identity.userId, userId);
+      // Test-only route: real Better Auth session plus synthetic, server-owned
+      // account lookup. No production account store or route is exposed here.
+      let record = { status: 'active', roles: ['customer'] };
+      const protectedApp = express();
+      protectedApp.get('/protected', requireRoles({ resolveIdentity: runtime.resolveIdentity,
+        lookupAccount: async id => id === userId ? record : null }, ['customer']),
+      (_req, res) => res.json({ ok: true }));
+      const protectedServer = protectedApp.listen(0, '127.0.0.1');
+      await once(protectedServer, 'listening');
+      try {
+        const url = `http://127.0.0.1:${protectedServer.address().port}/protected`;
+        assert.equal((await fetch(url)).status, 401);
+        // Earlier session lookups refreshed it; age it again to exercise the
+        // guard's refresh-cookie forwarding through a real session lookup.
+        await client.query('UPDATE "session" SET "updatedAt" = NOW() - INTERVAL \'2 days\', "expiresAt" = NOW() + INTERVAL \'1 hour\' WHERE token = $1', [token]);
+        const allowed = await fetch(url, { headers: { cookie } });
+        assert.equal(allowed.status, 200);
+        assert.ok(allowed.headers.getSetCookie().some(value => value.includes('better-auth.session_token=')));
+        record = { status: 'suspended', roles: ['customer'] };
+        assert.equal((await fetch(url, { headers: { cookie } })).status, 403);
+        record = { status: 'active', roles: ['admin'] };
+        assert.equal((await fetch(url, { headers: { cookie, 'x-role': 'customer' } })).status, 403);
+      } finally { await new Promise(resolve => protectedServer.close(resolve)); }
       // The directly reachable API must not expose the bearer token or user.
       const directSession = await fetch(apiOrigin + '/api/auth/get-session', { headers: { cookie } });
       assert.equal(directSession.status, 200);
