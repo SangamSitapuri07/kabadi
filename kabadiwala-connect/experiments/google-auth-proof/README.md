@@ -57,7 +57,15 @@ packages; embedded-postgres remains an experiment/test dependency only. The
 integration test exercises the actual API/web bridge with a synthetic Google
 request, validates state and PKCE generation, tests origin rejection and invalid
 callback, checks the startup/migration gates, and uses a synthetic DB session to
-check sign-out and replay. It does not contact Google or perform real OAuth.
+check sign-out and replay. It also exercises the separate development authorization
+schema migration and real PostgreSQL account lookup through a test-only protected
+route, with synthetic accounts and role grants. It tests missing accounts,
+status/role changes, constraints, a lookup failure and migration gates. The
+actual customer self-onboarding API and web bridge are also exercised using a
+synthetic session, including concurrent retries, rollback and forged inputs. It
+does not test privileged-role provisioning, marketplace endpoints, real browser
+CSRF or production schema upgrades. It does not contact Google or perform real
+OAuth.
 The owner separately reported an initial real Google login on Windows. Neither
 package selection nor these tests constitute production approval: browser CSRF,
 token validation, account linking, authorization, transport, logging and

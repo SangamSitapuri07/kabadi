@@ -4,7 +4,7 @@ import type { RequestHandler } from 'express';
 export type Role = 'customer' | 'collector' | 'admin';
 export type Principal = Readonly<{ userId: string; roles: readonly Role[] }>;
 export type IdentityResolver = (cookie?: string) => Promise<{ userId: string | null; cookies: string[] }>;
-// A future adapter must read current status and grants from a trusted server-side
+// The adapter must read current status and grants from a trusted server-side
 // store by this user ID on every request. Null means no application account.
 export type AccountLookup = (userId: string) => Promise<unknown>;
 

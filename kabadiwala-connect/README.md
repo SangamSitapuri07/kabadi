@@ -122,13 +122,16 @@ protected API routes: it resolves the session, fetches current account status an
 roles through a trusted server-side lookup, requires an active account and an
 explicit allowed role, and forwards refreshed cookies. It denies missing accounts
 and roles, and fails closed on lookup errors or malformed records. The current
-application does **not** mount this guard on any marketplace route, provide an
-account/role store, or grant roles. Tests use a synthetic store and a test-only
-route, not a real marketplace endpoint. Do not interpret sign-in as authorization.
+application does **not** mount this guard on any marketplace route. A development-
+only PostgreSQL account/role lookup and separate schema migration are implemented.
+The only account write is the limited customer self-onboarding endpoint described
+below; privileged roles are not assigned through it. Tests use a disposable database
+and a test-only guarded route, not a real marketplace endpoint. Do not interpret
+sign-in as authorization.
 
-Before adding protected endpoints, implement and review an authoritative account
-store, safe provisioning/revocation and admin bootstrap, and mount the guard on
-every protected route. A role check alone is not sufficient: handlers must also
+Before adding protected endpoints, review the account store, implement safe
+provisioning/revocation and admin bootstrap, and mount the guard on every protected
+route. A role check alone is not sufficient: handlers must also
 enforce record ownership or assignment, collector verification, workflow state,
 and appropriate CSRF/origin protections for mutations. Authorization and the
 mutation must avoid races with revocation or ownership changes (e.g. via suitable
@@ -150,6 +153,61 @@ preview origin explicitly if using a preview, and configure the corresponding
 Google callback. Non-local HTTP origins are rejected. Network isolation, TLS to
 the database/API, rate limiting, security review, and browser CSRF tests are
 still needed before real deployment.
+
+### Development authorization store (not required for sign-in)
+
+`apps/api/src/account-store.ts` provides a PostgreSQL lookup by the validated
+Better Auth user ID, reading status and role grants together on each request.
+The separate migration creates `kabadi_authz.accounts` and
+`kabadi_authz.role_grants` with constrained values and a foreign key to the
+Better Auth `public."user"` table. It grants no roles and creates no accounts.
+There is no administrative grant/revoke API, no audit trail, and no
+verified-collector or ownership checks. Deleting a Better Auth
+user cascades to its authorization account and grants. These choices need review
+before introducing real application data. The migration assumes Better Auth tables
+are in `public`; it refuses an unrecognized existing `kabadi_authz` schema and
+is transactional. Its version marker supports a repeat invocation but does not
+verify against all possible schema drift. Existing databases, upgrades, backup,
+and rollback procedures have not been tested. Database permissions, TLS and
+least-privilege separation need review; the development connection is not a
+production privilege boundary.
+
+The app does not migrate on startup. Sign-in does not require this schema, but
+customer onboarding returns unavailable until it has been migrated. Before
+specifically testing onboarding, first back up and inspect a **disposable development**
+database, run the existing Better Auth migration, then explicitly run:
+
+```sh
+npm run build:api
+AUTHORIZATION_MIGRATION_CONFIRM=yes node --env-file=.env apps/api/dist/migrate-account-store.js
+```
+
+On PowerShell set `$env:AUTHORIZATION_MIGRATION_CONFIRM='yes'`, then run
+`node --env-file=.env apps/api/dist/migrate-account-store.js`; remove the variable
+with `Remove-Item Env:AUTHORIZATION_MIGRATION_CONFIRM` afterward. The command
+requires enabled development auth configuration and rejects production mode. It
+makes persistent schema changes and should never target production data. Do not
+manually grant roles or share user IDs, credentials or session data in chat.
+
+### Customer self-onboarding (development API)
+
+`POST /api/v1/account/customer` accepts only an empty JSON object, requires an
+exact configured Origin at both web and API boundaries, and uses the validated
+session's user ID, not a supplied ID or role. If no account exists, it atomically
+creates an active account and its **customer** grant. Repeated calls for an active
+customer succeed without duplicating data; suspended accounts and existing
+accounts without a customer grant are denied and never modified. No admin or
+collector grants are created. Errors are sanitized and responses are no-store.
+A separate narrowly scoped web bridge preserves refreshed cookies and projects
+the response. There is currently no onboarding button, profile, or pickup UI.
+
+Synthetic PostgreSQL and HTTP integration tests cover concurrent retries,
+transaction rollback, invalid origins and payloads, forged role/ID headers,
+revocation and suspended accounts. They are not a real-browser CSRF assessment
+or security audit. Before protected business writes exist, design transactional
+coordination with all future account/role changes (including revocation),
+ownership/assignment and collector verification. Privileged role bootstrap,
+audit, rate limiting, session transport and production deployment remain open.
 
 To eventually test locally, prepare a **disposable development** PostgreSQL DB
 and a Google OAuth client in a controlled test project. The Google web-client

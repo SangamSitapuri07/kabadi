@@ -20,7 +20,8 @@
     "test:api": "npm run build:api && node --test test/api/*.test.mjs",
     "test:unit": "node --test test/*.test.mjs test/web/*.test.mjs",
     "test:connection": "node --test test/integration/connection.test.mjs",
-    "migrate:auth": "npm run build:api && node apps/api/dist/migrate-auth.js"
+    "migrate:auth": "npm run build:api && node apps/api/dist/migrate-auth.js",
+    "migrate:authorization": "npm run build:api && node apps/api/dist/migrate-account-store.js"
   },
   "dependencies": {
     "better-auth": "1.7.24",
