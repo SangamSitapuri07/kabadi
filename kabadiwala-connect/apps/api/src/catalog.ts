@@ -19,14 +19,13 @@ export function utcTimestamp(input: unknown): string | null {
 export function rateValue(input: unknown): number | null {
   return typeof input === 'number' && Number.isInteger(input) && input >= 0 && input <= MAX_RATE_PAISE_PER_KG ? input : null;
 }
-// Never silently choose a half-paise tie rule before policy is approved.
+// Round each nonnegative item to the nearest paise, with exact ties up.
 // Decimal strings prevent precision loss even when a product exceeds 2^53.
-export function calculateEstimate(grams: unknown, paisePerKg: unknown): { amountPaise: string } | { roundingRequired: true } | null {
+export function calculateEstimate(grams: unknown, paisePerKg: unknown): { amountPaise: string } | null {
   if (typeof grams !== 'number' || !Number.isInteger(grams) || grams < 1 || grams > MAX_GRAMS || rateValue(paisePerKg) === null) return null;
   const product = BigInt(grams) * BigInt(paisePerKg as number);
   const whole = product / 1000n, remainder = product % 1000n;
-  if (remainder === 500n) return { roundingRequired: true };
-  return { amountPaise: (whole + (remainder > 500n ? 1n : 0n)).toString() };
+  return { amountPaise: (whole + (remainder >= 500n ? 1n : 0n)).toString() };
 }
 
 export async function migrateCatalog(pool: pg.Pool): Promise<void> {

@@ -242,9 +242,10 @@ category deactivation, rate locality, historical retention and production
 security all remain unresolved. The schema restricts deletion of creator accounts.
 
 The separate arithmetic helper uses integer grams and exact big-integer
-arithmetic, returning decimal paise strings. It returns `roundingRequired` for
-an exact half-paise tie rather than silently choosing an unapproved policy.
-A future production request must select the applicable rate at request time on
+arithmetic, returning decimal paise strings. Per owner approval, it rounds each
+item to the nearest paise, with exact half-paise ties rounded up. The same
+per-item rule is intended for estimates and final amounts; neither pricing flow
+is implemented yet. A future production request must select the applicable rate at request time on
 the server inside its transaction and persist a rate/amount snapshot; the
 current free-text test request has no categories, rates, or price estimate.
 The lookup helper's supplied timestamp is for internal testing, not a trusted

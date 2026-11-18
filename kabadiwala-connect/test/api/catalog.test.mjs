@@ -10,11 +10,13 @@ test('category and rate inputs are bounded and timestamps are unambiguous UTC', 
   assert.equal(utcTimestamp('2030-01-01T00:00:00.000Z'), '2030-01-01T00:00:00.000Z');
   for (const value of ['2030-01-01', '2030-01-01T00:00:00Z', '2030-02-30T00:00:00.000Z', '2030-01-01T00:00:00.000+05:30', null]) assert.equal(utcTimestamp(value), null);
 });
-test('estimate uses exact integer arithmetic and refuses unapproved half-paise ties', () => {
+test('estimate uses exact integer arithmetic and rounds each half-paise tie up', () => {
   assert.deepEqual(calculateEstimate(1000, 1200), {amountPaise:'1200'});
   assert.deepEqual(calculateEstimate(1499, 1), {amountPaise:'1'});
   assert.deepEqual(calculateEstimate(1501, 1), {amountPaise:'2'});
-  assert.deepEqual(calculateEstimate(1500, 1), {roundingRequired:true});
+  assert.deepEqual(calculateEstimate(1500, 1), {amountPaise:'2'});
+  assert.deepEqual(calculateEstimate(500, 1), {amountPaise:'1'});
+  assert.deepEqual(calculateEstimate(10005, 100), {amountPaise:'1001'}); // ₹10.005 → ₹10.01
   assert.deepEqual(calculateEstimate(10000000, 1000000000), {amountPaise:'10000000000000'});
   assert.deepEqual(calculateEstimate(9999999, 999999999), {amountPaise:'9999998990000'});
   assert.deepEqual(calculateEstimate(5, 0), {amountPaise:'0'});
