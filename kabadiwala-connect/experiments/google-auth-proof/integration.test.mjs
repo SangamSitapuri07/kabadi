@@ -14,6 +14,7 @@ import { createAuthRuntime } from '../../apps/api/dist/auth.js';
 import { createApp } from '../../apps/api/dist/app.js';
 import { requireRoles } from '../../apps/api/dist/authorization.js';
 import { createAccountLookup, migrateAccountStore } from '../../apps/api/dist/account-store.js';
+import { createCustomerDetailsStore, migrateCustomerDetails } from '../../apps/api/dist/customer-details.js';
 import express from 'express';
 
 async function port() {
@@ -50,9 +51,14 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       DATABASE_URL: databaseURL, BETTER_AUTH_SECRET: secret, GOOGLE_CLIENT_ID: 'fake-google-client', GOOGLE_CLIENT_SECRET: 'fake-google-secret', PORT: String(await port()) };
     delete env.AUTH_MIGRATION_CONFIRM;
     delete env.AUTHORIZATION_MIGRATION_CONFIRM;
+    delete env.CUSTOMER_DETAILS_MIGRATION_CONFIRM;
     accountPool = new pg.Pool({ connectionString: databaseURL, max: 2 });
     const accountMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-account-store.js'],
       { cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 20000 });
+    const detailsMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-customer-details.js'],
+      { cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 20000 });
+    assert.equal(detailsMigration().status, 1);
+    assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 1);
     assert.equal(accountMigration().status, 1, 'authorization migration must require explicit confirmation');
     assert.equal(accountMigration({ AUTHORIZATION_MIGRATION_CONFIRM: 'yes' }).status, 1, 'auth schema must already exist');
     assert.equal(accountMigration({ AUTHORIZATION_MIGRATION_CONFIRM: 'yes', NODE_ENV: 'production' }).status, 1);
@@ -69,6 +75,8 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(migration.status, 0, 'explicit isolated migration should succeed');
     assert.deepEqual(await runtime.schemaStatus(), { missing: 0, problems: 0 });
     await runtime.migrate();
+    assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 1, 'authorization schema is required');
+    assert.equal((await accountPool.query("SELECT to_regnamespace('kabadi_customer') AS schema")).rows[0].schema, null);
     // Refuse an unrelated preexisting schema rather than adopting or overwriting it.
     await accountPool.query('CREATE SCHEMA kabadi_authz');
     assert.equal(accountMigration({ AUTHORIZATION_MIGRATION_CONFIRM: 'yes' }).status, 1);
@@ -78,6 +86,13 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(accountMigration({ AUTHORIZATION_MIGRATION_CONFIRM: 'yes' }).status, 0);
     assert.equal((await accountPool.query('SELECT count(*)::int AS count FROM kabadi_authz.accounts')).rows[0].count, 0);
     assert.equal((await accountPool.query('SELECT count(*)::int AS count FROM kabadi_authz.role_grants')).rows[0].count, 0);
+    assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes', NODE_ENV: 'production' }).status, 1);
+    await accountPool.query('CREATE SCHEMA kabadi_customer');
+    assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 1);
+    await accountPool.query('DROP SCHEMA kabadi_customer');
+    assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 0);
+    assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 0);
+    assert.equal((await accountPool.query('SELECT count(*)::int AS count FROM kabadi_customer.details')).rows[0].count, 0);
     serverProcess = spawn(process.execPath, ['apps/api/dist/server.js'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('API startup timed out')), 10000);
@@ -201,6 +216,39 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       assert.deepEqual(await lookupAccount(userId), { status: 'active', roles: ['customer'] });
       await migrateAccountStore(accountPool);
       assert.deepEqual(await lookupAccount(userId), { status: 'active', roles: ['customer'] }, 're-run must retain data');
+      // Storage is not exposed by any HTTP route. Owner identity is supplied only
+      // by the caller in this test; production route/session wiring is future work.
+      const details = createCustomerDetailsStore(accountPool);
+      const record = { name: ' Test person ', addressLine: '12 Example Road', city: 'Ludhiana', state: 'Punjab', postalCode: '141001' };
+      assert.equal(await details.read(userId), null);
+      assert.equal(await details.read('missing-user'), 'forbidden');
+      assert.equal(await details.write(userId, record), 'saved');
+      assert.deepEqual(await details.read(userId), { ...record, name: 'Test person' });
+      assert.throws(() => details.write(userId, { ...record, userId: 'forged' }));
+      const otherId = randomBytes(16).toString('hex');
+      await client.query('INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt") VALUES ($1, $2, $3, false, NOW(), NOW())', [otherId, 'Other', `${otherId}@example.test`]);
+      await client.query("INSERT INTO kabadi_authz.accounts VALUES ($1, 'active')", [otherId]);
+      await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1, 'customer')", [otherId]);
+      assert.equal(await details.read(otherId), null, 'a different owner ID reads its own empty record');
+      assert.equal(await details.write(otherId, { ...record, name: 'Other person' }), 'saved');
+      assert.equal((await details.read(userId)).name, 'Test person');
+      await client.query("ALTER TABLE kabadi_customer.details ADD CONSTRAINT test_write_failure CHECK (name <> 'Fail write')");
+      try {
+        await assert.rejects(details.write(userId, { ...record, name: 'Fail write' }));
+        assert.equal((await details.read(userId)).name, 'Test person');
+      } finally { await client.query('ALTER TABLE kabadi_customer.details DROP CONSTRAINT test_write_failure'); }
+      await client.query("UPDATE kabadi_authz.accounts SET status = 'suspended' WHERE user_id = $1", [userId]);
+      assert.equal(await details.read(userId), 'forbidden');
+      assert.equal(await details.write(userId, record), 'forbidden');
+      await client.query("UPDATE kabadi_authz.accounts SET status = 'active' WHERE user_id = $1", [userId]);
+      await client.query("DELETE FROM kabadi_authz.role_grants WHERE user_id = $1 AND role = 'customer'", [userId]);
+      assert.equal(await details.read(userId), 'forbidden');
+      assert.equal(await details.write(userId, record), 'forbidden');
+      await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1, 'customer')", [userId]);
+      await migrateCustomerDetails(accountPool);
+      assert.equal((await details.read(userId)).name, 'Test person');
+      await client.query('DELETE FROM kabadi_authz.accounts WHERE user_id = $1', [otherId]);
+      assert.equal((await client.query('SELECT count(*)::int AS count FROM kabadi_customer.details WHERE user_id = $1', [otherId])).rows[0].count, 0);
       const protectedApp = express();
       protectedApp.get('/protected', requireRoles({ resolveIdentity: runtime.resolveIdentity, lookupAccount }, ['customer']),
       (_req, res) => res.json({ ok: true }));

@@ -189,6 +189,32 @@ requires enabled development auth configuration and rejects production mode. It
 makes persistent schema changes and should never target production data. Do not
 manually grant roles or share user IDs, credentials or session data in chat.
 
+### Customer details storage groundwork (development only)
+
+The development-only `customer-details.ts` draft stores a customer name and one
+editable pickup address (address line, city, state and postal code). Bounds are
+technical defaults, not final product policy; no phone verification is implied.
+The store validates inputs, scopes queries to the caller-provided user ID, and
+checks active customer membership under database locks for each operation. The
+caller **must** obtain that ID from a validated server-side session: the store
+cannot authenticate it. All future grant/revocation writers must coordinate on
+the same account-row lock. Address snapshots, multiple addresses, retention and
+production privacy/security are not implemented.
+
+A separate opt-in migration exists but is **not run at startup**. It requires the
+existing authentication and authorization schemas, creates no customer records,
+and refuses an unrecognized customer schema. Use only after independently
+checking and backing up a disposable development database; marker version checks
+do not detect every form of schema drift and restore/upgrade procedures have not
+been verified. This slice is not wired to any HTTP route or UI; do not enter real
+personal data. User-facing profiles and addresses are not yet available.
+
+To run explicitly on an approved disposable development DB after build:
+`CUSTOMER_DETAILS_MIGRATION_CONFIRM=yes node --env-file=.env apps/api/dist/migrate-customer-details.js`
+(on PowerShell set and later remove the environment variable as with the
+authorization migration). This command is not necessary for current sign-in or
+customer setup. There is no reason to run it until the rest of the flow exists.
+
 ### Customer self-onboarding (development API)
 
 `POST /api/v1/account/customer` accepts only an empty JSON object, requires an
