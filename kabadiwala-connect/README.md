@@ -241,7 +241,7 @@ be missed or appear during a scan, so restart inspection if changes are possible
 Rate times returned are UTC milliseconds, matching the application write format;
 direct SQL writes are outside these assumptions. Read responses use `no-store`.
 There is no web bridge or UI. These listings can assist manual investigation
-but do not prove who caused a matching write or make retries idempotent.
+but do not prove who caused a matching write.
 
 The development-only API exposes `POST /api/v1/admin/catalog/categories`
 (`{"name":"..."}`) and `POST /api/v1/admin/catalog/categories/:categoryId/rates`
@@ -249,10 +249,26 @@ The development-only API exposes `POST /api/v1/admin/catalog/categories`
 a validated session, exact configured Origin, and an active admin grant checked
 within the write transaction. They return only the new ID on success; malformed
 requests, unauthorized accounts, duplicates and unavailable storage fail closed.
-No Next.js bridge or UI exists. They do not provision administrators, run
-migrations or populate data. Writes have no idempotency key: after an uncertain
-response do not blindly retry; inspection/reconciliation tooling is still needed.
-The application is development-only and this is not a production security audit.
+Both writes require an `Idempotency-Key` header containing a client-generated
+UUID v4. For an uncertain response, retry the **same operation and normalized
+payload with the same key and same signed-in admin**, not a new key. A committed
+success returns the original ID again; reusing a successful key for a different
+payload or endpoint returns `409 KEY_CONFLICT`. Matching ignores surrounding
+category-name whitespace and UUID letter case; category names otherwise remain
+case-sensitive for key comparison. Keys are scoped per actor. The active admin
+grant is rechecked even on a replay. Duplicate, invalid-time, forbidden and
+other failed outcomes are not recorded and can change on a later retry. The
+success record and mutation commit or roll back together. These guarantees assume
+all writers use the adapter, stored retry records remain intact, and clients
+retain their key/payload; there is no UI to retain them across refreshes.
+
+No Next.js bridge or UI exists. These routes do not provision administrators,
+run migrations or populate data. They now require the separately migrated retry
+schema; when it is missing, writes return unavailable rather than falling back
+to unsafe behavior. Read-only listings do not require the retry schema. The
+retry records reference actors and catalog rows with restricted deletion; a
+retention, cleanup, backup/restore and audit policy is not designed. Direct SQL
+can bypass these guarantees. This is not a production security audit.
 
 Categories have bounded names; rate events store integer paise per kg, creator
 and UTC effective start. Each event applies until the next one. For this draft,
@@ -283,6 +299,15 @@ inspection, a fresh backup, and explicit owner approval may a disposable
 `CATALOG_MIGRATION_CONFIRM=yes node --env-file=.env apps/api/dist/migrate-catalog.js`.
 In PowerShell set and later remove that environment variable. It creates schema
 and tables but no categories or rates. Restore and upgrades are untested.
+
+A separate explicit retry-schema migration also exists and has not been run on
+the owner's database. It requires the authorization and catalog schemas and
+creates no retry entries or catalog data. Its confirmation variable is
+`CATALOG_RETRY_MIGRATION_CONFIRM=yes` and its compiled script is
+`apps/api/dist/migrate-catalog-retries.js`; do not run it against an owner
+database without inspecting the target, a fresh backup and explicit approval.
+It refuses unrecognized schemas but version markers do not detect all drift.
+
 
 ### Test pickup request prototype (development only)
 

@@ -84,6 +84,21 @@ export function createCatalogStore(pool: pg.Pool) {
       const result = await action(c); await c.query('COMMIT'); return result;
     } catch (error) { try { await c.query('ROLLBACK'); } catch {} throw error; } finally { c.release(); }
   }
+  // Called only after the actor row and current admin grant are locked. This
+  // serializes same-actor retries; the operation and normalized payload bind
+  // the key across both endpoints. Successful writes and this record commit
+  // together, and failed attempts reserve nothing.
+  async function previous(c: pg.PoolClient, actorId: string, key: string, operation: 'category' | 'rate', payload: object): Promise<{id:string} | 'conflict' | null> {
+    const found = await c.query<{operation:string; matches:boolean; category_id:string; rate_id:string | null}>(
+      'SELECT operation, payload=$3::jsonb AS matches, category_id, rate_id FROM kabadi_catalog_retry.successes WHERE actor_id=$1 AND request_key=$2',
+      [actorId,key,JSON.stringify(payload)]);
+    const row=found.rows[0];
+    if (!row) return null;
+    if (row.operation !== operation || !row.matches) return 'conflict';
+    const id = operation === 'category' ? row.category_id : row.rate_id;
+    if (!id || !UUID.test(id)) throw Error('Invalid retry record');
+    return {id};
+  }
   return {
     listCategories(actorId: string, after: string | null): Promise<CategoryPage | 'forbidden'> {
       if (after !== null && (typeof after !== 'string' || !UUID.test(after))) throw Error('Invalid cursor');
@@ -105,18 +120,25 @@ export function createCatalogStore(pool: pg.Pool) {
         return {rates, nextAfter:result.rows.length > PAGE_SIZE ? rates[rates.length - 1]!.id : null};
       });
     },
-    createCategory(actorId: string, rawName: unknown): Promise<{id:string} | 'duplicate' | 'forbidden'> {
-      const name = categoryName(rawName); if (!name) throw Error('Invalid category');
+    createCategory(actorId: string, rawName: unknown, key: string): Promise<{id:string} | 'duplicate' | 'conflict' | 'forbidden'> {
+      const name = categoryName(rawName); if (!name || typeof key !== 'string' || !UUID.test(key)) throw Error('Invalid category or key');
+      const payload = {name};
       return asAdmin(actorId, async c => {
+        const replay = await previous(c,actorId,key,'category',payload); if (replay) return replay;
         const id = randomUUID();
         const result = await c.query('INSERT INTO kabadi_catalog.categories (id,name,created_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id', [id,name,actorId]);
-        return result.rowCount === 1 ? {id} : 'duplicate' as const;
+        if (result.rowCount !== 1) return 'duplicate' as const;
+        await c.query("INSERT INTO kabadi_catalog_retry.successes (actor_id,request_key,operation,payload,category_id) VALUES ($1,$2,'category',$3::jsonb,$4)", [actorId,key,JSON.stringify(payload),id]);
+        return {id};
       });
     },
-    addRate(actorId: string, categoryId: string, effectiveFrom: unknown, rawRate: unknown): Promise<{id:string} | 'invalid-time' | 'not-found' | 'forbidden'> {
+    addRate(actorId: string, categoryId: string, effectiveFrom: unknown, rawRate: unknown, key: string): Promise<{id:string} | 'invalid-time' | 'not-found' | 'conflict' | 'forbidden'> {
       const at = utcTimestamp(effectiveFrom), rate = rateValue(rawRate);
-      if (typeof categoryId !== 'string' || !UUID.test(categoryId) || !at || rate === null) throw Error('Invalid rate');
+      if (typeof categoryId !== 'string' || !UUID.test(categoryId) || !at || rate === null || typeof key !== 'string' || !UUID.test(key)) throw Error('Invalid rate or key');
+      categoryId = categoryId.toLowerCase();
+      const payload = {categoryId,effectiveFrom:at,paisePerKg:rate};
       return asAdmin(actorId, async c => {
+        const replay = await previous(c,actorId,key,'rate',payload); if (replay) return replay;
         const category = await c.query<{active:boolean}>('SELECT active FROM kabadi_catalog.categories WHERE id=$1 FOR UPDATE', [categoryId]);
         if (!category.rows[0]?.active) return 'not-found' as const;
         // A separate query after acquiring the lock sees a committed preceding
@@ -126,6 +148,7 @@ export function createCatalogStore(pool: pg.Pool) {
         if (!check.rows[0]?.allowed) return 'invalid-time' as const;
         const id = randomUUID();
         await c.query('INSERT INTO kabadi_catalog.rates (id,category_id,effective_from,paise_per_kg,created_by) VALUES ($1,$2,$3,$4,$5)', [id,categoryId,at,rate,actorId]);
+        await c.query("INSERT INTO kabadi_catalog_retry.successes (actor_id,request_key,operation,payload,category_id,rate_id) VALUES ($1,$2,'rate',$3::jsonb,$4,$5)", [actorId,key,JSON.stringify(payload),categoryId,id]);
         return {id};
       });
     },

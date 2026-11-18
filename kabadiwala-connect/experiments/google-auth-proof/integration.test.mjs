@@ -17,6 +17,7 @@ import { createAccountLookup, migrateAccountStore } from '../../apps/api/dist/ac
 import { createCustomerDetailsStore, migrateCustomerDetails } from '../../apps/api/dist/customer-details.js';
 import { migratePickups, createPickupStore } from '../../apps/api/dist/pickups.js';
 import { migrateCatalog, createCatalogStore } from '../../apps/api/dist/catalog.js';
+import { migrateCatalogRetries } from '../../apps/api/dist/catalog-retries.js';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 
@@ -57,6 +58,7 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     delete env.CUSTOMER_DETAILS_MIGRATION_CONFIRM;
     delete env.PICKUP_MIGRATION_CONFIRM;
     delete env.CATALOG_MIGRATION_CONFIRM;
+    delete env.CATALOG_RETRY_MIGRATION_CONFIRM;
     accountPool = new pg.Pool({ connectionString: databaseURL, max: 2 });
     const accountMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-account-store.js'],
       { cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 20000 });
@@ -65,6 +67,9 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(detailsMigration().status, 1);
     assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 1);
     const catalogMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-catalog.js'], { cwd:root, env:{...env,...overrides}, encoding:'utf8', timeout:20000 });
+    const retryMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-catalog-retries.js'], {cwd:root,env:{...env,...overrides},encoding:'utf8',timeout:20000});
+    assert.equal(retryMigration().status,1);
+    assert.equal(retryMigration({CATALOG_RETRY_MIGRATION_CONFIRM:'yes'}).status,1);
     assert.equal(catalogMigration().status, 1);
     assert.equal(catalogMigration({CATALOG_MIGRATION_CONFIRM:'yes'}).status, 1);
     assert.equal(accountMigration().status, 1, 'authorization migration must require explicit confirmation');
@@ -118,6 +123,14 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(catalogMigration({CATALOG_MIGRATION_CONFIRM:'yes'}).status, 0);
     assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.categories')).rows[0].n, 0);
     assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.rates')).rows[0].n, 0);
+    assert.equal(retryMigration({CATALOG_RETRY_MIGRATION_CONFIRM:'yes',NODE_ENV:'production'}).status,1);
+    await accountPool.query('CREATE SCHEMA kabadi_catalog_retry');
+    assert.equal(retryMigration({CATALOG_RETRY_MIGRATION_CONFIRM:'yes'}).status,1);
+    await accountPool.query('DROP SCHEMA kabadi_catalog_retry');
+    assert.equal(retryMigration({CATALOG_RETRY_MIGRATION_CONFIRM:'yes'}).status,0);
+    assert.equal(retryMigration({CATALOG_RETRY_MIGRATION_CONFIRM:'yes'}).status,0);
+    assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog_retry.successes')).rows[0].n,0);
+
     // This setup directly grants synthetic admins in the disposable DB only.
     const admins = [randomUUID(), randomUUID()];
     for (const id of admins) {
@@ -125,13 +138,40 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       await accountPool.query("INSERT INTO kabadi_authz.accounts VALUES ($1,'active')",[id]);
       await accountPool.query("INSERT INTO kabadi_authz.role_grants VALUES ($1,'admin')",[id]);
     }
-    const catalog = createCatalogStore(accountPool);
+    const rawCatalog = createCatalogStore(accountPool);
+    const catalog = {...rawCatalog,
+      createCategory:(actor,name,key=randomUUID())=>rawCatalog.createCategory(actor,name,key),
+      addRate:(actor,category,at,rate,key=randomUUID())=>rawCatalog.addRate(actor,category,at,rate,key)};
     assert.equal(await catalog.listCategories('missing', null), 'forbidden');
     assert.equal(await catalog.listRates('missing', randomUUID(), null), 'forbidden');
     assert.equal(await catalog.createCategory('missing', 'Paper'), 'forbidden');
     const category = await catalog.createCategory(admins[0], 'Paper');
     assert.ok(category.id);
     assert.equal(await catalog.createCategory(admins[0], 'paper'), 'duplicate');
+    const retryKey=randomUUID();
+    const retryCategory=await catalog.createCategory(admins[0], 'Retry synthetic',retryKey);
+    assert.deepEqual(await catalog.createCategory(admins[0], '  Retry synthetic  ',retryKey),retryCategory);
+    assert.equal(await catalog.createCategory(admins[0], 'Different',retryKey),'conflict');
+    assert.equal(await catalog.addRate(admins[0], retryCategory.id, '2099-01-01T00:00:00.000Z',123,retryKey),'conflict');
+    const otherActorCategory=await catalog.createCategory(admins[1], 'Different actor same key',retryKey);
+    assert.ok(otherActorCategory.id); assert.notEqual(otherActorCategory.id,retryCategory.id);
+    await accountPool.query("ALTER TABLE kabadi_catalog_retry.successes ADD CONSTRAINT reject_test_retry CHECK (payload->>'name' <> 'Rollback synthetic')");
+    const rollbackKey=randomUUID();
+    try {
+      await assert.rejects(catalog.createCategory(admins[0],'Rollback synthetic',rollbackKey));
+      assert.equal((await accountPool.query("SELECT count(*)::int AS n FROM kabadi_catalog.categories WHERE name='Rollback synthetic'")).rows[0].n,0);
+      assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog_retry.successes WHERE request_key=$1',[rollbackKey])).rows[0].n,0);
+    } finally { await accountPool.query('ALTER TABLE kabadi_catalog_retry.successes DROP CONSTRAINT reject_test_retry'); }
+    const afterRollback=await catalog.createCategory(admins[0],'Rollback synthetic',rollbackKey);
+    assert.ok(afterRollback.id);
+
+    const raceKey=randomUUID();
+    const retryRace=await Promise.all(Array.from({length:5},()=>catalog.createCategory(admins[0], 'Concurrent retry',raceKey)));
+    assert.ok(retryRace.every(r=>r.id === retryRace[0].id));
+    assert.equal((await accountPool.query("SELECT count(*)::int AS n FROM kabadi_catalog.categories WHERE name='Concurrent retry'")).rows[0].n,1);
+    await accountPool.query('DELETE FROM kabadi_catalog_retry.successes WHERE request_key=ANY($1::uuid[])',[[retryKey,raceKey,rollbackKey]]);
+    await accountPool.query('DELETE FROM kabadi_catalog.categories WHERE id=ANY($1::uuid[])',[[retryCategory.id,retryRace[0].id,otherActorCategory.id,afterRollback.id]]);
+
     await accountPool.query("UPDATE kabadi_authz.accounts SET status='suspended' WHERE user_id=$1",[admins[1]]);
     assert.equal(await catalog.createCategory(admins[1], 'Plastic'), 'forbidden');
     await accountPool.query("UPDATE kabadi_authz.accounts SET status='active' WHERE user_id=$1",[admins[1]]);
@@ -146,7 +186,22 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     const rate1 = race.find(x => typeof x === 'object');
     assert.equal(await catalog.lookupAt(category.id, '2098-12-31T23:59:59.999Z'), null);
     assert.deepEqual(await catalog.lookupAt(category.id, '2099-01-01T00:00:00.000Z'), {rateId:rate1.id, paisePerKg:100});
-    const rate2 = await catalog.addRate(admins[0], category.id, '2099-02-01T00:00:00.000Z', 200);
+    const rateKey = randomUUID();
+    await accountPool.query("ALTER TABLE kabadi_catalog_retry.successes ADD CONSTRAINT reject_rate_retry CHECK (operation <> 'rate' OR payload->>'paisePerKg' <> '200')");
+    try {
+      await assert.rejects(catalog.addRate(admins[0], category.id, '2099-02-01T00:00:00.000Z', 200, rateKey));
+      assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.rates WHERE category_id=$1',[category.id])).rows[0].n,1);
+      assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog_retry.successes WHERE request_key=$1',[rateKey])).rows[0].n,0);
+    } finally { await accountPool.query('ALTER TABLE kabadi_catalog_retry.successes DROP CONSTRAINT reject_rate_retry'); }
+    const rateAttempts=await Promise.all(Array.from({length:4},()=>catalog.addRate(admins[0], category.id, '2099-02-01T00:00:00.000Z', 200, rateKey)));
+    const rate2=rateAttempts[0]; assert.ok(rateAttempts.every(r=>r.id === rate2.id));
+    assert.deepEqual(await catalog.addRate(admins[0], category.id.toUpperCase(), '2099-02-01T00:00:00.000Z', 200, rateKey),rate2);
+    assert.equal(await catalog.addRate(admins[0], category.id, '2099-02-01T00:00:00.000Z', 201, rateKey),'conflict');
+    assert.equal(await catalog.addRate(admins[0], randomUUID(), '2099-02-01T00:00:00.000Z', 200, rateKey),'conflict');
+    await accountPool.query("UPDATE kabadi_authz.accounts SET status='suspended' WHERE user_id=$1",[admins[0]]);
+    assert.equal(await catalog.addRate(admins[0], category.id, '2099-02-01T00:00:00.000Z', 200, rateKey),'forbidden');
+    await accountPool.query("UPDATE kabadi_authz.accounts SET status='active' WHERE user_id=$1",[admins[0]]);
+
     assert.deepEqual(await catalog.lookupAt(category.id, '2099-01-31T23:59:59.999Z'), {rateId:rate1.id, paisePerKg:100});
     assert.deepEqual(await catalog.lookupAt(category.id, '2099-02-01T00:00:00.000Z'), {rateId:rate2.id, paisePerKg:200});
     assert.equal(await catalog.addRate(admins[0], category.id, '2099-01-15T00:00:00.000Z', 150), 'invalid-time');
@@ -176,9 +231,11 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.rates')).rows[0].n, 2);
     } finally { await accountPool.query('ALTER TABLE kabadi_catalog.rates DROP CONSTRAINT test_rate_failure'); }
     await migrateCatalog(accountPool);
+    await migrateCatalogRetries(accountPool);
     assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.rates')).rows[0].n, 2);
     await assert.rejects(accountPool.query('DELETE FROM kabadi_authz.accounts WHERE user_id=$1',[admins[0]]), {code:'23001'});
     // Synthetic cleanup only; no application deletion operation is provided.
+    await accountPool.query('DELETE FROM kabadi_catalog_retry.successes'); // synthetic cleanup only
     await accountPool.query('DELETE FROM kabadi_catalog.rates');
     await accountPool.query('DELETE FROM kabadi_catalog.categories');
     for (const id of admins) await accountPool.query('DELETE FROM "user" WHERE id=$1', [id]);
@@ -197,7 +254,7 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     });
     assert.equal(serverOnboarding.status, 401, 'actual API process must resolve the session');
     assert.equal((await fetch(`http://127.0.0.1:${env.PORT}/api/v1/account/customer/details`)).status, 401, 'actual API process must wire details');
-    assert.equal((await fetch(`http://127.0.0.1:${env.PORT}/api/v1/admin/catalog/categories`, {method:'POST', headers:{origin:publicOrigin,'content-type':'application/json'}, body:JSON.stringify({name:'Synthetic'})})).status, 401, 'actual API process must wire catalog');
+    assert.equal((await fetch(`http://127.0.0.1:${env.PORT}/api/v1/admin/catalog/categories`, {method:'POST', headers:{origin:publicOrigin,'content-type':'application/json','idempotency-key':randomUUID()}, body:JSON.stringify({name:'Synthetic'})})).status, 401, 'actual API process must wire catalog');
     assert.equal((await fetch(`http://127.0.0.1:${env.PORT}/api/v1/admin/catalog/categories`)).status, 401, 'actual API process must wire catalog reads');
     await stop(serverProcess);
     api = createApp({ origin: publicOrigin, handler: runtime.handler, resolveIdentity: runtime.resolveIdentity, onboardCustomer: runtime.onboardCustomer, customerDetails: runtime.customerDetails, pickups: runtime.pickups, catalog: runtime.catalog }).listen(0, '127.0.0.1');
@@ -429,8 +486,8 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       // Direct API catalog mutations use a synthetic session and actual PostgreSQL
       // grant checks; no role is taken from headers or the request body.
       const catalogPath = '/api/v1/admin/catalog/categories';
-      const catalogPost = (path, body, selectedCookie = cookie, origin = publicOrigin) => fetch(apiOrigin + path, {
-        method:'POST', headers:{origin, cookie:selectedCookie, 'content-type':'application/json', 'x-role':'admin'}, body:JSON.stringify(body)
+      const catalogPost = (path, body, selectedCookie = cookie, origin = publicOrigin, key = randomUUID()) => fetch(apiOrigin + path, {
+        method:'POST', headers:{origin, cookie:selectedCookie, 'content-type':'application/json', 'x-role':'admin','idempotency-key':key}, body:JSON.stringify(body)
       });
       assert.equal((await catalogPost(catalogPath, {name:'Synthetic HTTP'}, '')).status, 401);
       assert.equal((await catalogPost(catalogPath, {name:'Synthetic HTTP'})).status, 403);
@@ -459,13 +516,21 @@ test('app integration: migration, web bridge and Google-only initiation', { time
         await client.query("DELETE FROM kabadi_authz.role_grants WHERE user_id = $1 AND role = 'customer'", [userId]);
         await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1, 'admin')", [userId]);
         assert.equal((await fetch(url, { headers: { cookie, 'x-role': 'customer' } })).status, 403);
-        const catResponse = await catalogPost(catalogPath, {name:'Synthetic HTTP'});
+        const httpKey=randomUUID();
+        const catResponse = await catalogPost(catalogPath, {name:'Synthetic HTTP'},cookie,publicOrigin,httpKey);
         assert.equal(catResponse.status,201);
         const catId = (await catResponse.json()).data.id;
+        const replay = await catalogPost(catalogPath,{name:'Synthetic HTTP'},cookie,publicOrigin,httpKey);
+        assert.equal(replay.status,201); assert.deepEqual(await replay.json(),{data:{id:catId}});
+        assert.equal((await catalogPost(catalogPath,{name:'Different'},cookie,publicOrigin,httpKey)).status,409);
         assert.equal((await catalogPost(catalogPath, {name:'Synthetic HTTP'})).status,409);
-        const rateResponse = await catalogPost(`${catalogPath}/${catId}/rates`, {effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:123});
+        const httpRateKey=randomUUID(), httpRate={effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:123};
+        const rateResponse = await catalogPost(`${catalogPath}/${catId}/rates`, httpRate,cookie,publicOrigin,httpRateKey);
         assert.equal(rateResponse.status,201);
         const rateId=(await rateResponse.json()).data.id;
+        const replayRate=await catalogPost(`${catalogPath}/${catId}/rates`,httpRate,cookie,publicOrigin,httpRateKey);
+        assert.equal(replayRate.status,201); assert.deepEqual(await replayRate.json(),{data:{id:rateId}});
+        assert.equal((await catalogPost(`${catalogPath}/${catId}/rates`,{...httpRate,paisePerKg:124},cookie,publicOrigin,httpRateKey)).status,409);
         assert.deepEqual(await catalog.lookupAt(catId, '2099-01-01T00:00:00.000Z'), {rateId,paisePerKg:123});
         let catalogRead=await catalogGet(catalogPath); assert.equal(catalogRead.status,200); assert.equal(catalogRead.headers.get('cache-control'),'no-store');
         assert.deepEqual(await catalogRead.json(),{data:{categories:[{id:catId,name:'Synthetic HTTP',active:true}],nextAfter:null}});
@@ -475,12 +540,19 @@ test('app integration: migration, web bridge and Google-only initiation', { time
 
         await client.query("UPDATE kabadi_authz.accounts SET status='suspended' WHERE user_id=$1",[userId]);
         assert.equal((await catalogPost(catalogPath, {name:'Denied'})).status,403);
+        assert.equal((await catalogPost(catalogPath,{name:'Synthetic HTTP'},cookie,publicOrigin,httpKey)).status,403);
         assert.equal((await catalogGet(catalogPath)).status,403);
         await client.query("UPDATE kabadi_authz.accounts SET status='active' WHERE user_id=$1",[userId]);
         await client.query("DELETE FROM kabadi_authz.role_grants WHERE user_id=$1 AND role='admin'",[userId]);
         assert.equal((await catalogPost(`${catalogPath}/${catId}/rates`, {effectiveFrom:'2099-02-01T00:00:00.000Z',paisePerKg:456})).status,403);
         assert.equal((await catalogGet(`${catalogPath}/${catId}/rates`)).status,403);
         await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1,'admin')",[userId]);
+        await client.query('ALTER SCHEMA kabadi_catalog_retry RENAME TO kabadi_catalog_retry_unavailable');
+        try {
+          assert.equal((await catalogPost(catalogPath,{name:'Unavailable retry'},cookie,publicOrigin,randomUUID())).status,503);
+          assert.equal((await catalogGet(catalogPath)).status,200); // reads do not rely on retry schema
+        } finally { await client.query('ALTER SCHEMA kabadi_catalog_retry_unavailable RENAME TO kabadi_catalog_retry'); }
+        await client.query('DELETE FROM kabadi_catalog_retry.successes WHERE actor_id=$1',[userId]); // synthetic cleanup only
         await client.query('DELETE FROM kabadi_catalog.rates WHERE category_id=$1',[catId]);
         await client.query('DELETE FROM kabadi_catalog.categories WHERE id=$1',[catId]); // disposable test cleanup only
         await client.query('ALTER SCHEMA kabadi_catalog RENAME TO kabadi_catalog_unavailable');

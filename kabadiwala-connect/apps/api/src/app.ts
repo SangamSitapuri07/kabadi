@@ -14,7 +14,7 @@ type AuthMount = {
   resolveIdentity?: (cookie?: string) => Promise<{ userId: string | null; cookies: string[] }>;
   onboardCustomer?: (userId: string) => Promise<'ready' | 'forbidden'>;
   pickups?: { create: (userId: string, input: unknown) => Promise<'created' | 'missing-profile' | 'conflict' | 'forbidden'>; list: (userId: string) => Promise<Pickup[] | 'forbidden'> };
-  catalog?: { listCategories: (actorId:string, after:string | null) => Promise<CategoryPage | 'forbidden'>; listRates: (actorId:string, categoryId:string, after:string | null) => Promise<RatePage | 'not-found' | 'forbidden'>; createCategory: (actorId: string, name: unknown) => Promise<{id:string} | 'duplicate' | 'forbidden'>; addRate: (actorId: string, categoryId: string, effectiveFrom: unknown, rate: unknown) => Promise<{id:string} | 'invalid-time' | 'not-found' | 'forbidden'> };
+  catalog?: { listCategories: (actorId:string, after:string | null) => Promise<CategoryPage | 'forbidden'>; listRates: (actorId:string, categoryId:string, after:string | null) => Promise<RatePage | 'not-found' | 'forbidden'>; createCategory: (actorId: string, name: unknown, key:string) => Promise<{id:string} | 'duplicate' | 'conflict' | 'forbidden'>; addRate: (actorId: string, categoryId: string, effectiveFrom: unknown, rate: unknown, key:string) => Promise<{id:string} | 'invalid-time' | 'not-found' | 'conflict' | 'forbidden'> };
   customerDetails?: { read: (userId: string) => Promise<CustomerDetails | null | 'forbidden'>; write: (userId: string, input: unknown) => Promise<'saved' | 'forbidden'> };
 };
 
@@ -242,25 +242,29 @@ export function createApp(auth?: AuthMount) {
   });
   const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
   app.post('/api/v1/admin/catalog/categories', catalogWrite, express.json({limit:'4kb',strict:true}), async (req, res) => {
-    const body: unknown = req.body;
+    const body: unknown = req.body, key = req.get('idempotency-key');
+    if (!key || !uuid.test(key)) { res.status(400).json({error:{code:'INVALID_KEY',message:'A valid idempotency key is required.'}}); return; }
     if (!record(body) || Object.keys(body).length !== 1 || !('name' in body) || !categoryName(body.name)) { res.status(400).json({error:{code:'INVALID_BODY',message:'Category is invalid.'}}); return; }
     try {
       const actor = await detailsAuth(req, res); if (actor === null) return;
-      const result = await auth!.catalog!.createCategory(actor, body.name);
+      const result = await auth!.catalog!.createCategory(actor, body.name, key.toLowerCase());
       if (result === 'forbidden') { res.status(403).json({error:{code:'FORBIDDEN',message:'Admin access is required.'}}); return; }
+      if (result === 'conflict') { res.status(409).json({error:{code:'KEY_CONFLICT',message:'This key was used for a different catalog write.'}}); return; }
       if (result === 'duplicate') { res.status(409).json({error:{code:'CATEGORY_EXISTS',message:'Category already exists.'}}); return; }
       if (!result || typeof result.id !== 'string' || !uuid.test(result.id)) throw Error('Invalid result');
       res.status(201).json({data:{id:result.id}});
     } catch { catalogUnavailable(res); }
   });
   app.post('/api/v1/admin/catalog/categories/:categoryId/rates', catalogWrite, express.json({limit:'4kb',strict:true}), async (req, res) => {
-    const body: unknown = req.body, categoryId = req.params.categoryId;
+    const body: unknown = req.body, categoryId = req.params.categoryId, key = req.get('idempotency-key');
+    if (!key || !uuid.test(key)) { res.status(400).json({error:{code:'INVALID_KEY',message:'A valid idempotency key is required.'}}); return; }
     if (typeof categoryId !== 'string' || !uuid.test(categoryId) || !record(body) || Object.keys(body).length !== 2 || !('effectiveFrom' in body) || !('paisePerKg' in body) || !utcTimestamp(body.effectiveFrom) || rateValue(body.paisePerKg) === null) { res.status(400).json({error:{code:'INVALID_BODY',message:'Rate is invalid.'}}); return; }
     try {
       const actor = await detailsAuth(req, res); if (actor === null) return;
-      const result = await auth!.catalog!.addRate(actor, categoryId, body.effectiveFrom, body.paisePerKg);
+      const result = await auth!.catalog!.addRate(actor, categoryId, body.effectiveFrom, body.paisePerKg, key.toLowerCase());
       if (result === 'forbidden') { res.status(403).json({error:{code:'FORBIDDEN',message:'Admin access is required.'}}); return; }
       if (result === 'not-found') { res.status(404).json({error:{code:'NOT_FOUND',message:'Category not found.'}}); return; }
+      if (result === 'conflict') { res.status(409).json({error:{code:'KEY_CONFLICT',message:'This key was used for a different catalog write.'}}); return; }
       if (result === 'invalid-time') { res.status(409).json({error:{code:'INVALID_RATE_TIME',message:'Rate time must be future and later than existing rates.'}}); return; }
       if (!result || typeof result.id !== 'string' || !uuid.test(result.id)) throw Error('Invalid result');
       res.status(201).json({data:{id:result.id}});
