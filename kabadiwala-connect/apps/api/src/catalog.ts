@@ -67,8 +67,12 @@ export async function migrateCatalog(pool: pg.Pool): Promise<void> {
   } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
 }
 
+export type CategoryPage = { categories: {id:string; name:string; active:boolean}[]; nextAfter:string | null };
+export type RatePage = { rates: {id:string; effectiveFrom:string; paisePerKg:number}[]; nextAfter:string | null };
+const PAGE_SIZE = 50;
+
 export function createCatalogStore(pool: pg.Pool) {
-  async function adminWrite<T>(actorId: string, action: (c: pg.PoolClient) => Promise<T>): Promise<T | 'forbidden'> {
+  async function asAdmin<T>(actorId: string, action: (c: pg.PoolClient) => Promise<T>): Promise<T | 'forbidden'> {
     if (typeof actorId !== 'string' || !actorId.trim()) throw Error('Invalid identity');
     const c = await pool.connect();
     try {
@@ -81,9 +85,29 @@ export function createCatalogStore(pool: pg.Pool) {
     } catch (error) { try { await c.query('ROLLBACK'); } catch {} throw error; } finally { c.release(); }
   }
   return {
+    listCategories(actorId: string, after: string | null): Promise<CategoryPage | 'forbidden'> {
+      if (after !== null && (typeof after !== 'string' || !UUID.test(after))) throw Error('Invalid cursor');
+      return asAdmin(actorId, async c => {
+        const result = await c.query<{id:string;name:string;active:boolean}>(
+          `SELECT id,name,active FROM kabadi_catalog.categories WHERE ($1::uuid IS NULL OR id > $1::uuid) ORDER BY id LIMIT $2`, [after, PAGE_SIZE + 1]);
+        const categories = result.rows.slice(0, PAGE_SIZE);
+        return {categories, nextAfter:result.rows.length > PAGE_SIZE ? categories[categories.length - 1]!.id : null};
+      });
+    },
+    listRates(actorId: string, categoryId: string, after: string | null): Promise<RatePage | 'not-found' | 'forbidden'> {
+      if (typeof categoryId !== 'string' || !UUID.test(categoryId) || (after !== null && (typeof after !== 'string' || !UUID.test(after)))) throw Error('Invalid cursor or category');
+      return asAdmin(actorId, async c => {
+        const exists = await c.query('SELECT 1 FROM kabadi_catalog.categories WHERE id=$1', [categoryId]);
+        if (exists.rowCount !== 1) return 'not-found' as const;
+        const result = await c.query<{id:string;effective_from:Date;paise_per_kg:number}>(
+          `SELECT id,effective_from,paise_per_kg FROM kabadi_catalog.rates WHERE category_id=$1 AND ($2::uuid IS NULL OR id > $2::uuid) ORDER BY id LIMIT $3`, [categoryId, after, PAGE_SIZE + 1]);
+        const rates = result.rows.slice(0, PAGE_SIZE).map(r => ({id:r.id, effectiveFrom:r.effective_from.toISOString(), paisePerKg:r.paise_per_kg}));
+        return {rates, nextAfter:result.rows.length > PAGE_SIZE ? rates[rates.length - 1]!.id : null};
+      });
+    },
     createCategory(actorId: string, rawName: unknown): Promise<{id:string} | 'duplicate' | 'forbidden'> {
       const name = categoryName(rawName); if (!name) throw Error('Invalid category');
-      return adminWrite(actorId, async c => {
+      return asAdmin(actorId, async c => {
         const id = randomUUID();
         const result = await c.query('INSERT INTO kabadi_catalog.categories (id,name,created_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id', [id,name,actorId]);
         return result.rowCount === 1 ? {id} : 'duplicate' as const;
@@ -92,7 +116,7 @@ export function createCatalogStore(pool: pg.Pool) {
     addRate(actorId: string, categoryId: string, effectiveFrom: unknown, rawRate: unknown): Promise<{id:string} | 'invalid-time' | 'not-found' | 'forbidden'> {
       const at = utcTimestamp(effectiveFrom), rate = rateValue(rawRate);
       if (typeof categoryId !== 'string' || !UUID.test(categoryId) || !at || rate === null) throw Error('Invalid rate');
-      return adminWrite(actorId, async c => {
+      return asAdmin(actorId, async c => {
         const category = await c.query<{active:boolean}>('SELECT active FROM kabadi_catalog.categories WHERE id=$1 FOR UPDATE', [categoryId]);
         if (!category.rows[0]?.active) return 'not-found' as const;
         // A separate query after acquiring the lock sees a committed preceding

@@ -222,14 +222,26 @@ for profile tests.
 
 ### Catalog and estimate groundwork (development only)
 
-`catalog.ts` is a development storage/math prototype. Two direct API admin
-write routes exist, but there is **no web form, admin provisioning, catalog
-listing, or connection to pickup requests**. The migration creates no categories or rates and
+`catalog.ts` is a development storage/math prototype. Direct API admin read and write routes exist, but there is **no web form,
+admin provisioning, or connection to pickup requests**. The migration creates no categories or rates and
 is never run at startup. The internal write methods require a currently active
 admin grant, checked transactionally; callers must supply an actor ID derived
 from a validated server session. There is no admin provisioning mechanism, and no identity/role may be
 self-granted from a browser. Test
 admin records in the disposable integration test are synthetic setup only.
+
+Two development-only admin read routes support inspection:
+`GET /api/v1/admin/catalog/categories` and
+`GET /api/v1/admin/catalog/categories/:categoryId/rates`. They require a
+validated session and an active admin grant checked within a transaction, and
+return at most 50 items plus `nextAfter`. Pass that value as `?after=` for the
+next page. Rows are ordered by UUID, **not** name, creation time, or effective
+time. Pagination does not provide a consistent snapshot: concurrent changes can
+be missed or appear during a scan, so restart inspection if changes are possible.
+Rate times returned are UTC milliseconds, matching the application write format;
+direct SQL writes are outside these assumptions. Read responses use `no-store`.
+There is no web bridge or UI. These listings can assist manual investigation
+but do not prove who caused a matching write or make retries idempotent.
 
 The development-only API exposes `POST /api/v1/admin/catalog/categories`
 (`{"name":"..."}`) and `POST /api/v1/admin/catalog/categories/:categoryId/rates`

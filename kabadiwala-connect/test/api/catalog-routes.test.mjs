@@ -39,3 +39,32 @@ test('development catalog routes validate writes, use session identity and fail 
   try { const res=await fetch(`http://127.0.0.1:${unavailable.address().port}/api/v1/admin/catalog/categories`,{method:'POST'}); assert.equal(res.status,503); assert.equal(res.headers.get('cache-control'),'no-store'); }
   finally { await new Promise(resolve=>unavailable.close(resolve)); }
 });
+
+test('catalog reads require session and admin, validate cursors, and project safe pages', async () => {
+  const catId=randomUUID(), rateId=randomUUID(), calls=[];
+  let identity={userId:'administrator',cookies:['fresh=1; HttpOnly']};
+  let categories={categories:[{id:catId,name:'Test',active:true,createdBy:'hidden'}],nextAfter:null};
+  let rates={rates:[{id:rateId,effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:123,createdBy:'hidden'}],nextAfter:null};
+  const auth={origin:'http://localhost:3000',handler:async()=>{},resolveIdentity:async()=>identity,catalog:{
+    listCategories:async (...args)=>{calls.push(args);return categories;},listRates:async (...args)=>{calls.push(args);return rates;}
+  }};
+  const server=createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+  try {
+    const base=`http://127.0.0.1:${server.address().port}/api/v1/admin/catalog/categories`;
+    for (const suffix of ['?after=bad','?other=1',`?after=${catId}&after=${catId}`,'?after[evil]=x']) assert.equal((await fetch(base+suffix)).status,400);
+    assert.equal((await fetch(base+'/bad/rates')).status,400); assert.equal(calls.length,0);
+    let res=await fetch(base,{headers:{'x-user-id':'forged','x-role':'admin'}});
+    assert.equal(res.status,200); assert.equal(res.headers.get('cache-control'),'no-store'); assert.deepEqual(res.headers.getSetCookie(),['fresh=1; HttpOnly']);
+    assert.deepEqual(await res.json(),{data:{categories:[{id:catId,name:'Test',active:true}],nextAfter:null}});
+    assert.deepEqual(calls.pop(),['administrator',null]);
+    res=await fetch(`${base}/${catId}/rates?after=${rateId}`); assert.equal(res.status,200);
+    assert.deepEqual(await res.json(),{data:{rates:[{id:rateId,effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:123}],nextAfter:null}});
+    assert.deepEqual(calls.pop(),['administrator',catId,rateId]);
+    identity={userId:null,cookies:[]}; assert.equal((await fetch(base)).status,401);
+    identity={userId:'administrator',cookies:[]}; categories='forbidden'; assert.equal((await fetch(base)).status,403);
+    rates='forbidden'; assert.equal((await fetch(`${base}/${catId}/rates`)).status,403);
+    rates='not-found'; assert.equal((await fetch(`${base}/${catId}/rates`)).status,404);
+    categories={categories:[{id:'bad',name:'x',active:true}],nextAfter:null}; assert.equal((await fetch(base)).status,503);
+    auth.catalog.listRates=async()=>{throw Error('database secret');}; res=await fetch(`${base}/${catId}/rates`); assert.equal(res.status,503); assert.ok(!(await res.text()).includes('secret'));
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});

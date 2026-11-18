@@ -6,6 +6,7 @@ import type { CustomerDetails } from './customer-details.js';
 import { parsePickup } from './pickups.js';
 import type { Pickup } from './pickups.js';
 import { categoryName, rateValue, utcTimestamp } from './catalog.js';
+import type { CategoryPage, RatePage } from './catalog.js';
 
 type AuthMount = {
   origin: string;
@@ -13,7 +14,7 @@ type AuthMount = {
   resolveIdentity?: (cookie?: string) => Promise<{ userId: string | null; cookies: string[] }>;
   onboardCustomer?: (userId: string) => Promise<'ready' | 'forbidden'>;
   pickups?: { create: (userId: string, input: unknown) => Promise<'created' | 'missing-profile' | 'conflict' | 'forbidden'>; list: (userId: string) => Promise<Pickup[] | 'forbidden'> };
-  catalog?: { createCategory: (actorId: string, name: unknown) => Promise<{id:string} | 'duplicate' | 'forbidden'>; addRate: (actorId: string, categoryId: string, effectiveFrom: unknown, rate: unknown) => Promise<{id:string} | 'invalid-time' | 'not-found' | 'forbidden'> };
+  catalog?: { listCategories: (actorId:string, after:string | null) => Promise<CategoryPage | 'forbidden'>; listRates: (actorId:string, categoryId:string, after:string | null) => Promise<RatePage | 'not-found' | 'forbidden'>; createCategory: (actorId: string, name: unknown) => Promise<{id:string} | 'duplicate' | 'forbidden'>; addRate: (actorId: string, categoryId: string, effectiveFrom: unknown, rate: unknown) => Promise<{id:string} | 'invalid-time' | 'not-found' | 'forbidden'> };
   customerDetails?: { read: (userId: string) => Promise<CustomerDetails | null | 'forbidden'>; write: (userId: string, input: unknown) => Promise<'saved' | 'forbidden'> };
 };
 
@@ -197,6 +198,48 @@ export function createApp(auth?: AuthMount) {
     if (!req.is('application/json')) { res.status(415).json({error:{code:'INVALID_CONTENT_TYPE',message:'JSON is required.'}}); return; }
     next();
   };
+  // Pages are UUID-ordered, not a point-in-time snapshot. The cursor is an
+  // opaque position, not a filter or authorization claim.
+  const cursor = (query: express.Request['query']): string | null | undefined => {
+    if (Object.keys(query).some(key => key !== 'after')) return undefined;
+    if (query.after === undefined) return null;
+    return typeof query.after === 'string' && uuid.test(query.after) ? query.after : undefined;
+  };
+  app.get('/api/v1/admin/catalog/categories', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (!auth?.resolveIdentity || !auth.catalog) { catalogUnavailable(res); return; }
+    const after = cursor(req.query);
+    if (after === undefined) { res.status(400).json({error:{code:'INVALID_CURSOR',message:'Catalog cursor is invalid.'}}); return; }
+    try {
+      const actor = await detailsAuth(req,res); if (actor === null) return;
+      const result = await auth.catalog.listCategories(actor, after);
+      if (result === 'forbidden') { res.status(403).json({error:{code:'FORBIDDEN',message:'Admin access is required.'}}); return; }
+      if (!result || !Array.isArray(result.categories) || result.categories.length > 50 || (result.nextAfter !== null && (typeof result.nextAfter !== 'string' || !uuid.test(result.nextAfter)))) throw Error('Invalid catalog page');
+      const categories = result.categories.map(c => {
+        if (!c || typeof c.id !== 'string' || !uuid.test(c.id) || !categoryName(c.name) || typeof c.active !== 'boolean') throw Error('Invalid category');
+        return {id:c.id, name:c.name, active:c.active};
+      });
+      res.json({data:{categories,nextAfter:result.nextAfter}});
+    } catch { catalogUnavailable(res); }
+  });
+  app.get('/api/v1/admin/catalog/categories/:categoryId/rates', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (!auth?.resolveIdentity || !auth.catalog) { catalogUnavailable(res); return; }
+    const after = cursor(req.query), categoryId = req.params.categoryId;
+    if (after === undefined || typeof categoryId !== 'string' || !uuid.test(categoryId)) { res.status(400).json({error:{code:'INVALID_CURSOR',message:'Category or catalog cursor is invalid.'}}); return; }
+    try {
+      const actor = await detailsAuth(req,res); if (actor === null) return;
+      const result = await auth.catalog.listRates(actor, categoryId, after);
+      if (result === 'forbidden') { res.status(403).json({error:{code:'FORBIDDEN',message:'Admin access is required.'}}); return; }
+      if (result === 'not-found') { res.status(404).json({error:{code:'NOT_FOUND',message:'Category not found.'}}); return; }
+      if (!result || !Array.isArray(result.rates) || result.rates.length > 50 || (result.nextAfter !== null && (typeof result.nextAfter !== 'string' || !uuid.test(result.nextAfter)))) throw Error('Invalid rate page');
+      const rates = result.rates.map(r => {
+        if (!r || typeof r.id !== 'string' || !uuid.test(r.id) || !utcTimestamp(r.effectiveFrom) || rateValue(r.paisePerKg) === null) throw Error('Invalid rate');
+        return {id:r.id,effectiveFrom:r.effectiveFrom,paisePerKg:r.paisePerKg};
+      });
+      res.json({data:{rates,nextAfter:result.nextAfter}});
+    } catch { catalogUnavailable(res); }
+  });
   const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
   app.post('/api/v1/admin/catalog/categories', catalogWrite, express.json({limit:'4kb',strict:true}), async (req, res) => {
     const body: unknown = req.body;
