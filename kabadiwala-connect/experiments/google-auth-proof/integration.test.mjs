@@ -15,6 +15,8 @@ import { createApp } from '../../apps/api/dist/app.js';
 import { requireRoles } from '../../apps/api/dist/authorization.js';
 import { createAccountLookup, migrateAccountStore } from '../../apps/api/dist/account-store.js';
 import { createCustomerDetailsStore, migrateCustomerDetails } from '../../apps/api/dist/customer-details.js';
+import { migratePickups, createPickupStore } from '../../apps/api/dist/pickups.js';
+import { randomUUID } from 'node:crypto';
 import express from 'express';
 
 async function port() {
@@ -52,6 +54,7 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     delete env.AUTH_MIGRATION_CONFIRM;
     delete env.AUTHORIZATION_MIGRATION_CONFIRM;
     delete env.CUSTOMER_DETAILS_MIGRATION_CONFIRM;
+    delete env.PICKUP_MIGRATION_CONFIRM;
     accountPool = new pg.Pool({ connectionString: databaseURL, max: 2 });
     const accountMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-account-store.js'],
       { cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 20000 });
@@ -93,6 +96,15 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 0);
     assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 0);
     assert.equal((await accountPool.query('SELECT count(*)::int AS count FROM kabadi_customer.details')).rows[0].count, 0);
+    const pickupMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-pickups.js'], { cwd:root, env:{...env, ...overrides}, encoding:'utf8', timeout:20000 });
+    assert.equal(pickupMigration().status, 1);
+    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes', NODE_ENV:'production'}).status, 1);
+    await accountPool.query('CREATE SCHEMA kabadi_pickup');
+    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 1);
+    await accountPool.query('DROP SCHEMA kabadi_pickup');
+    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
+    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
+    assert.equal((await accountPool.query('SELECT count(*)::int AS count FROM kabadi_pickup.requests')).rows[0].count, 0);
     serverProcess = spawn(process.execPath, ['apps/api/dist/server.js'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('API startup timed out')), 10000);
@@ -109,7 +121,7 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(serverOnboarding.status, 401, 'actual API process must resolve the session');
     assert.equal((await fetch(`http://127.0.0.1:${env.PORT}/api/v1/account/customer/details`)).status, 401, 'actual API process must wire details');
     await stop(serverProcess);
-    api = createApp({ origin: publicOrigin, handler: runtime.handler, resolveIdentity: runtime.resolveIdentity, onboardCustomer: runtime.onboardCustomer, customerDetails: runtime.customerDetails }).listen(0, '127.0.0.1');
+    api = createApp({ origin: publicOrigin, handler: runtime.handler, resolveIdentity: runtime.resolveIdentity, onboardCustomer: runtime.onboardCustomer, customerDetails: runtime.customerDetails, pickups: runtime.pickups }).listen(0, '127.0.0.1');
     await once(api, 'listening');
     const apiOrigin = `http://127.0.0.1:${api.address().port}`;
     web = spawn(process.execPath, ['node_modules/next/dist/bin/next', 'start', 'apps/web', '-H', '127.0.0.1', '-p', String(webPort)],
@@ -250,6 +262,43 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       assert.equal((await details.read(userId)).name, 'Test person');
       await client.query('DELETE FROM kabadi_authz.accounts WHERE user_id = $1', [otherId]);
       assert.equal((await client.query('SELECT count(*)::int AS count FROM kabadi_customer.details WHERE user_id = $1', [otherId])).rows[0].count, 0);
+      // Pickup persistence: owner isolation, retry deduplication and address snapshots.
+      const pickups = createPickupStore(accountPool);
+      const request = { requestKey:randomUUID(), material:'Paper', estimatedGrams:2500 };
+      assert.equal(await pickups.create(otherId, request), 'forbidden');
+      assert.deepEqual(await Promise.all([pickups.create(userId, request), pickups.create(userId, request)]), ['created', 'created']);
+      assert.equal(await pickups.create(userId, {...request, material:'Plastic'}), 'conflict');
+      assert.equal((await pickups.list(userId)).length, 1);
+      await details.write(userId, {...record, addressLine:'New test road'});
+      assert.equal((await pickups.list(userId))[0].address.addressLine, '12 Example Road');
+      await details.write(userId, record);
+      await migratePickups(accountPool);
+      assert.equal((await pickups.list(userId)).length, 1);
+      await client.query("UPDATE kabadi_authz.accounts SET status='suspended' WHERE user_id=$1", [userId]);
+      assert.equal(await pickups.list(userId), 'forbidden');
+      assert.equal(await pickups.create(userId, {...request, requestKey:randomUUID()}), 'forbidden');
+      await client.query("UPDATE kabadi_authz.accounts SET status='active' WHERE user_id=$1", [userId]);
+      await client.query("DELETE FROM kabadi_authz.role_grants WHERE user_id=$1 AND role='customer'", [userId]);
+      assert.equal(await pickups.list(userId), 'forbidden');
+      assert.equal(await pickups.create(userId, {...request, requestKey:randomUUID()}), 'forbidden');
+      await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1, 'customer')", [userId]);
+      await client.query("ALTER TABLE kabadi_pickup.requests ADD CONSTRAINT test_failure CHECK (material <> 'Fail insert')");
+      try {
+        await assert.rejects(pickups.create(userId, {...request, requestKey:randomUUID(), material:'Fail insert'}));
+        assert.equal((await pickups.list(userId)).length, 1);
+      } finally { await client.query('ALTER TABLE kabadi_pickup.requests DROP CONSTRAINT test_failure'); }
+      const pickupPath = '/api/v1/customer/pickups';
+      for (const base of [apiOrigin, publicOrigin]) {
+        const send = (body, origin=publicOrigin, extra={}) => fetch(base+pickupPath, {method:'POST', headers:{origin, 'content-type':'application/json', ...extra}, body:JSON.stringify(body)});
+        assert.equal((await fetch(base+pickupPath)).status, 401);
+        assert.equal((await send(request, publicOrigin, {cookie:cookie+'x'})).status, 401);
+        assert.equal((await send(request, 'https://evil.example', {cookie})).status, 403);
+        assert.equal((await send({...request, userId:otherId}, publicOrigin, {cookie})).status, 400);
+        assert.equal((await send(request, publicOrigin, {cookie,'x-user-id':otherId})).status, 200);
+        const listed = await fetch(base+pickupPath, {headers:{cookie,'x-user-id':otherId}});
+        assert.equal(listed.status, 200); assert.equal(listed.headers.get('cache-control'), 'no-store');
+        const contents = await listed.json(); assert.equal(contents.data.pickups.length, 1); assert.equal(contents.data.pickups[0].address.addressLine, '12 Example Road');
+      }
       // Real API and Next bridge with a signed synthetic session and disposable DB.
       const detailsPath = '/api/v1/account/customer/details';
       const readDetails = (base, headers = {}) => fetch(base + detailsPath, { headers });
@@ -285,6 +334,11 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       const otherSignature = createHmac('sha256', secret).update(otherToken).digest('base64');
       const otherCookie = `better-auth.session_token=${encodeURIComponent(`${otherToken}.${otherSignature}`)}`;
       assert.deepEqual(await (await readDetails(publicOrigin, { cookie: otherCookie, 'x-user-id': userId })).json(), { data: { details: null } });
+      const otherList = await (await fetch(publicOrigin + '/api/v1/customer/pickups', {headers:{cookie:otherCookie, 'x-user-id':userId}})).json();
+      assert.deepEqual(otherList.data.pickups, []);
+      const noProfile = await fetch(publicOrigin + '/api/v1/customer/pickups', {method:'POST',headers:{origin:publicOrigin, 'content-type':'application/json', cookie:otherCookie},body:JSON.stringify({...request, requestKey:randomUUID()})});
+      assert.equal(noProfile.status, 409);
+      assert.equal((await noProfile.json()).error.code, 'PROFILE_REQUIRED');
       await client.query("UPDATE kabadi_authz.accounts SET status = 'suspended' WHERE user_id = $1", [userId]);
       assert.equal((await readDetails(publicOrigin, { cookie })).status, 403);
       assert.equal((await writeDetails(publicOrigin, record, publicOrigin, { cookie })).status, 403);
@@ -320,6 +374,8 @@ test('app integration: migration, web bridge and Google-only initiation', { time
           assert.equal(unavailableAccount.status, 503);
           assert.deepEqual(await unavailableAccount.json(), { error: { code: 'AUTHORIZATION_UNAVAILABLE', message: 'Access is unavailable.' } });
         } finally { await client.query('ALTER SCHEMA kabadi_authz_unavailable RENAME TO kabadi_authz'); }
+        await assert.rejects(client.query('DELETE FROM kabadi_authz.accounts WHERE user_id = $1', [userId]), {code:'23001'});
+        await client.query('DELETE FROM kabadi_pickup.requests WHERE user_id = $1', [userId]); // synthetic test cleanup only
         await client.query('DELETE FROM kabadi_authz.accounts WHERE user_id = $1', [userId]);
         assert.equal((await fetch(url, { headers: { cookie } })).status, 403);
         assert.equal((await client.query('SELECT count(*)::int AS count FROM kabadi_authz.role_grants WHERE user_id = $1', [userId])).rows[0].count, 0);

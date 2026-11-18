@@ -199,8 +199,8 @@ inputs and checks active customer membership under database locks for each
 operation. The storage adapter itself cannot authenticate its caller: any
 future caller **must** supply an ID from a validated server-side session. All
 future grant/revocation writers must coordinate on the same account-row lock.
-Address snapshots, multiple addresses, retention and production privacy/security
-are not implemented.
+The test-pickup prototype snapshots the address; multiple addresses, retention
+and production privacy/security are not implemented.
 
 A separate opt-in migration exists but is **not run at startup**. It requires the
 existing authentication and authorization schemas, creates no customer records,
@@ -220,6 +220,40 @@ authorization migration). This command is not necessary for sign-in or customer
 setup. Back up the current database and obtain explicit approval before using it
 for profile tests.
 
+### Test pickup request prototype (development only)
+
+This is not a functioning pickup service. A signed-in active customer can save a
+single free-text material, positive whole-number estimated grams (1–10,000,000),
+and a snapshot of their previously saved customer details, then load their 50
+most recent test requests. No collector is notified or dispatched. Scheduling,
+categories, multiple items, rates and request-time price estimates, cancellation,
+collector actions and audit are not implemented. These are essential before the
+approved marketplace flow can be used. The technical bounds and this prototype
+format are not final product policy; use fictional data only.
+
+The API derives the owner from the validated session and checks active customer
+membership inside the transaction, locking the account row in the same order as
+profile writes. All future grant/status writers must coordinate on that lock.
+Mutation requires exact origin and bounded JSON. A client-generated UUID makes
+retries of the same data idempotent per customer, including concurrent requests;
+reuse with different contents is rejected. The UI retains that retry key only
+while the form is mounted. If a save is interrupted and the page is reloaded,
+hidden, or signed out, check the list before making a new request: the first
+write may have succeeded. The list is limited to 50 without pagination. Test
+requests restrict deletion of their owner account; a real retention/deletion
+policy and audited cleanup process are not designed. No automatic migration or
+production readiness/security review is implied.
+
+A new separate `kabadi_pickup` schema requires the existing auth, authorization,
+and customer schemas. It is explicitly migrated, never on startup, and creates
+no pickup requests. Version checks do not detect all schema drift; upgrades and
+restore have not been tested. Before running on any local development database,
+independently inspect the target, back it up, and obtain explicit approval. Do
+not run on production data. After `npm run build:api` the approved command is
+`PICKUP_MIGRATION_CONFIRM=yes node --env-file=.env apps/api/dist/migrate-pickups.js`;
+PowerShell users set and later remove the environment variable as for the other
+migrations. No secrets or customer data should be shared in chat.
+
 ### Customer self-onboarding (development API)
 
 `POST /api/v1/account/customer` accepts only an empty JSON object, requires an
@@ -235,7 +269,7 @@ shows a confirmation only after a validated success response. It clears that
 confirmation on sign-out or when the tab is hidden; it is an action result, not
 an authoritative account-status or authorization check. On interrupted requests,
 setup cannot be confirmed and can safely be retried. The separate profile form
-needs its own migration; pickup UI is not yet available.
+needs its own migration; the separate pickup prototype requires another migration.
 
 Synthetic PostgreSQL and HTTP integration tests cover concurrent retries,
 transaction rollback, invalid origins and payloads, forged role/ID headers,
@@ -322,6 +356,5 @@ The web app is an under-development placeholder, not a functioning marketplace.
 The API has liveness and an opt-in, development-only Google authentication
 integration. Authentication is disabled by default and prohibited when the API's
 `NODE_ENV` is `production`. An initial owner-run local Google login succeeded;
-security and production readiness have not been established. There is no
-marketplace database schema, collection, notification, OTP or payment functionality. Policy decisions, full security review and
+security and production readiness have not been established. There is a test-only pickup capture schema, but no operational collection, notification, OTP or payment functionality. Policy decisions, full security review and
 zero-cost provider suitability remain pending. Phase 1 is not complete.

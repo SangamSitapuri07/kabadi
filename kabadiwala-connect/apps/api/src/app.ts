@@ -3,12 +3,15 @@ import type { ErrorRequestHandler } from 'express';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseCustomerDetails } from './customer-details.js';
 import type { CustomerDetails } from './customer-details.js';
+import { parsePickup } from './pickups.js';
+import type { Pickup } from './pickups.js';
 
 type AuthMount = {
   origin: string;
   handler: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
   resolveIdentity?: (cookie?: string) => Promise<{ userId: string | null; cookies: string[] }>;
   onboardCustomer?: (userId: string) => Promise<'ready' | 'forbidden'>;
+  pickups?: { create: (userId: string, input: unknown) => Promise<'created' | 'missing-profile' | 'conflict' | 'forbidden'>; list: (userId: string) => Promise<Pickup[] | 'forbidden'> };
   customerDetails?: { read: (userId: string) => Promise<CustomerDetails | null | 'forbidden'>; write: (userId: string, input: unknown) => Promise<'saved' | 'forbidden'> };
 };
 
@@ -139,6 +142,44 @@ export function createApp(auth?: AuthMount) {
       if (result !== 'saved') throw new Error('Invalid store result');
       response.json({ data: { saved: true } });
     } catch { detailsUnavailable(response); }
+  });
+  const pickupUnavailable = (res: express.Response) => res.status(503).json({ error: { code: 'PICKUP_UNAVAILABLE', message: 'Test pickup requests are unavailable.' } });
+  app.use('/api/v1/customer/pickups', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  app.get('/api/v1/customer/pickups', async (req, res) => {
+    if (!auth?.resolveIdentity || !auth.pickups) { pickupUnavailable(res); return; }
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const result = await auth.pickups.list(id);
+      if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Customer access is required.' } }); return; }
+      if (!Array.isArray(result) || result.length > 50) throw Error('Invalid result');
+      const projected = result.map(r => {
+        const input = parsePickup({ requestKey: r.id, material: r.material, estimatedGrams: r.estimatedGrams });
+        const address = parseCustomerDetails(r.address);
+        if (!input || !address || r.status !== 'requested' || typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt))) throw Error('Invalid result');
+        return { id:r.id, material:input.material, estimatedGrams:input.estimatedGrams, status:r.status, createdAt:r.createdAt, address };
+      });
+      res.json({ data: { pickups: projected } });
+    } catch { pickupUnavailable(res); }
+  });
+  app.post('/api/v1/customer/pickups', (req, res, next) => {
+    if (!auth?.resolveIdentity || !auth.pickups) { pickupUnavailable(res); return; }
+    if (req.get('origin') !== auth.origin) { res.status(403).json({ error: { code: 'INVALID_ORIGIN', message: 'Request origin is not allowed.' } }); return; }
+    const length = req.get('content-length');
+    if (!length || !/^\d+$/.test(length) || Number(length) > 4096 || req.get('transfer-encoding')) { res.status(413).json({ error: { code: 'INVALID_BODY', message: 'Request body is invalid or too large.' } }); return; }
+    if (!req.is('application/json')) { res.status(415).json({ error: { code: 'INVALID_CONTENT_TYPE', message: 'JSON is required.' } }); return; }
+    next();
+  }, express.json({ limit:'4kb', strict:true }), async (req, res) => {
+    const input = parsePickup(req.body);
+    if (!input) { res.status(400).json({ error: { code: 'INVALID_BODY', message: 'Test pickup request is invalid.' } }); return; }
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const result = await auth!.pickups!.create(id, input);
+      if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Customer access is required.' } }); return; }
+      if (result === 'missing-profile') { res.status(409).json({ error: { code: 'PROFILE_REQUIRED', message: 'Save customer details first.' } }); return; }
+      if (result === 'conflict') { res.status(409).json({ error: { code: 'REQUEST_CONFLICT', message: 'This request key was already used.' } }); return; }
+      if (result !== 'created') throw Error('Invalid result');
+      res.json({ data: { created: true } });
+    } catch { pickupUnavailable(res); }
   });
   app.use(express.json({ limit: '32kb' }));
 

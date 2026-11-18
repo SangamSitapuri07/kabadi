@@ -29,3 +29,6 @@ footer { color: #71877a; font-size: .8rem; padding: 25px 0; border-top: 1px soli
 .customer-profile input { width: 100%; border: 1px solid #cfded1; border-radius: 8px; padding: 10px; color: #18362c; font: inherit; background: white; }
 .customer-profile input:focus-visible { outline: 3px solid #21815b; outline-offset: 2px; }
 .customer-profile button { justify-self: start; }
+
+.customer-profile form > button { margin-top: 12px; }
+.customer-profile li { margin: 12px 0; overflow-wrap: anywhere; }

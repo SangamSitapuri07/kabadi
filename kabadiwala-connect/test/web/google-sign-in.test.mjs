@@ -21,6 +21,12 @@ const compiled = babel.transformSync(await readFile('apps/web/app/google-sign-in
 const temp = await mkdtemp(resolve('node_modules', 'auth-ui-test-'));
 const modulePath = join(temp, 'component.cjs');
 await writeFile(modulePath, compiled.code);
+const pickupCompiled = babel.transformSync(await readFile('apps/web/app/test-pickups.tsx', 'utf8'), {
+  filename: 'test-pickups.tsx', babelrc: false, configFile: false,
+  presets: [[require('next/dist/compiled/babel/preset-typescript'), { allExtensions:true, isTSX:true }], [require('next/dist/compiled/babel/preset-react'), {runtime:'automatic'}]],
+  plugins: [require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
+});
+await writeFile(join(temp, 'test-pickups.js'), pickupCompiled.code);
 const { GoogleSignIn } = createRequire(modulePath)(modulePath);
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 
@@ -186,11 +192,11 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.equal(document.querySelector('[name="name"]').value, 'Sample');
       const input = document.querySelector('[name="name"]');
       await act(async () => { Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set.call(input, 'Changed'); input.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
-      await act(async () => { document.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
+      await act(async () => { document.querySelector('form.customer-profile').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
       assert.deepEqual(saved, { ...profile, name: 'Changed' });
       assert.match(document.body.textContent, /Customer details saved/);
       await clickButton('Sign out');
-      assert.equal(document.querySelector('form'), null);
+      assert.equal(document.querySelector('form.customer-profile'), null);
       assert.doesNotMatch(document.body.textContent, /Customer details saved/);
       await unmount();
     });
@@ -204,13 +210,13 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       });
       await clickButton('Set up customer account'); await clickButton('Open customer profile');
       assert.match(document.querySelector('[role="alert"]').textContent, /could not be loaded/i);
-      assert.equal(document.querySelector('form'), null);
+      assert.equal(document.querySelector('form.customer-profile'), null);
       mode = 'pending';
       await act(async () => { [...document.querySelectorAll('button')].find(item => item.textContent === 'Open customer profile').click(); });
       Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
       await act(async () => { document.dispatchEvent(new dom.window.Event('visibilitychange')); });
       await act(async () => { finish(json({ data: { details: { name: 'Sample', addressLine: 'Example', city: 'Ludhiana', state: 'Punjab', postalCode: '141001' } } })); await pending; });
-      assert.equal(document.querySelector('form'), null);
+      assert.equal(document.querySelector('form.customer-profile'), null);
       assert.doesNotMatch(document.body.textContent, /Customer setup completed/);
       delete document.visibilityState;
       await unmount();
@@ -226,13 +232,39 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         return json({ authenticated: true });
       });
       await clickButton('Set up customer account'); await clickButton('Open customer profile');
-      await act(async () => { document.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
+      await act(async () => { document.querySelector('form.customer-profile').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
       assert.match(document.querySelector('[role="alert"]').textContent, /could not be confirmed/i);
       assert.doesNotMatch(document.body.textContent, /Customer details saved/);
       mode = 'expired';
-      await act(async () => { document.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
-      assert.equal(document.querySelector('form'), null);
+      await act(async () => { document.querySelector('form.customer-profile').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
+      assert.equal(document.querySelector('form.customer-profile'), null);
       assert.match(document.body.textContent, /sign-in could not be confirmed/i);
+      await unmount();
+    });
+    await t.test('test pickup retries an uncertain save with the same key and loads the list', async () => {
+      const requests = []; let first = true;
+      await mount(async (url, init) => {
+        if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
+        if (url.endsWith('/customer/pickups')) {
+          if (init?.method === 'POST') { requests.push(JSON.parse(init.body)); if (first) { first = false; throw Error('interrupted'); } return json({data:{created:true}}); }
+          return json({data:{pickups:[]}});
+        }
+        return json({authenticated:true});
+      });
+      await clickButton('Set up customer account');
+      const section = [...document.querySelectorAll('section')].find(el => el.textContent.includes('Test pickup requests'));
+      const inputs = section.querySelectorAll('input');
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+        setter.call(inputs[0], 'Paper'); inputs[0].dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+        setter.call(inputs[1], '1500'); inputs[1].dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+      });
+      await act(async () => {section.querySelector('form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));});
+      assert.match(section.textContent, /could not be confirmed/i);
+      await clickButton('Retry same test request');
+      assert.deepEqual(requests[0], requests[1]); assert.equal(requests[0].estimatedGrams,1500);
+      assert.match(section.textContent, /No collector will be notified/);
+      await clickButton('Load my test requests'); assert.match(section.textContent, /No test requests found/);
       await unmount();
     });
     await t.test('a still-active session after sign-out is not presented as signed out', async () => {

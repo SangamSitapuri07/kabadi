@@ -1,7 +1,7 @@
 import type pg from 'pg';
 
-// Development-only draft: one editable pickup address per customer. No route
-// consumes this store yet. These limits are technical bounds, not final policy.
+// Development-only draft: one editable pickup address per customer.
+// These limits are technical bounds, not final policy.
 export type CustomerDetails = Readonly<{
   name: string;
   addressLine: string;

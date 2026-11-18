@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { TestPickups } from './test-pickups';
 
 type SessionStatus = 'checking' | 'signed-out' | 'signed-in' | 'unavailable';
 type Details = { name: string; addressLine: string; city: string; state: string; postalCode: string };
@@ -180,7 +181,7 @@ export function GoogleSignIn() {
       const data: unknown = await response.json();
       if (generation !== setupGeneration.current) return;
       if (!response.ok || !data || typeof data !== 'object' || !('data' in data) || !data.data || typeof data.data !== 'object' || !('saved' in data.data) || data.data.saved !== true) throw new Error('Save not confirmed');
-      setProfileMessage('Customer details saved. Pickup requests are not available yet.');
+      setProfileMessage('Customer details saved.');
     } catch { if (generation === setupGeneration.current) setError('Save could not be confirmed. Please try again.'); }
     finally { setBusy(null); }
   }
@@ -197,7 +198,7 @@ export function GoogleSignIn() {
       <div className="customer-setup">
         <p>Set up a customer account to prepare for future pickup requests.</p>
         <button type="button" onClick={setupCustomer} disabled={busy !== null}>{busy === 'customer-setup' ? 'Setting up…' : 'Set up customer account'}</button>
-        <div role="status" aria-live="polite">{customerSetup === 'completed' && <p>Customer setup completed for this sign-in. Pickup requests are not available yet.</p>}</div>
+        <div role="status" aria-live="polite">{customerSetup === 'completed' && <p>Customer setup completed for this sign-in.</p>}</div>
         {customerSetup === 'completed' && !profileOpen && <button type="button" onClick={loadProfile} disabled={busy !== null}>{busy === 'profile-load' ? 'Loading…' : 'Open customer profile'}</button>}
         {profileOpen && <form className="customer-profile" onSubmit={saveProfile}>
           <h2>Customer details</h2>
@@ -209,6 +210,7 @@ export function GoogleSignIn() {
           </fieldset>
           <p role="status" aria-live="polite">{profileMessage}</p>
         </form>}
+        {customerSetup === 'completed' && <TestPickups />}
       </div>
     </>}
     {status === 'unavailable' && <button type="button" onClick={retrySession}>Try again</button>}
