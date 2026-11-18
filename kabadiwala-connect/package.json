@@ -25,7 +25,9 @@
     "migrate:customer-details": "npm run build:api && node apps/api/dist/migrate-customer-details.js",
     "migrate:pickups": "npm run build:api && node apps/api/dist/migrate-pickups.js",
     "migrate:catalog": "npm run build:api && node apps/api/dist/migrate-catalog.js",
-    "migrate:catalog-retries": "npm run build:api && node apps/api/dist/migrate-catalog-retries.js"
+    "migrate:catalog-retries": "npm run build:api && node apps/api/dist/migrate-catalog-retries.js",
+    "migrate:role-admin": "npm run build:api && node apps/api/dist/migrate-role-admin.js",
+    "roles:dev": "node apps/api/dist/role-admin-cli.js"
   },
   "dependencies": {
     "better-auth": "1.7.24",

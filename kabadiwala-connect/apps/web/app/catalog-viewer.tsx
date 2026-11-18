@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
+import { CatalogAdmin } from './catalog-admin';
 
 type Category = {id:string;name:string;active:boolean};
 type Rate = {id:string;effectiveFrom:string;paisePerKg:number};
@@ -66,5 +67,6 @@ export function CatalogViewer({disabled=false}:{disabled?:boolean}) {
       {categories.nextAfter && <button type="button" disabled={busy || disabled} onClick={()=>loadCategories(categories.nextAfter)}>Next categories</button>}</div>}
     {selected && rates && <div><h3>Rates for {selected.name}</h3>{rates.items.length===0 ? <p>No rates on this page.</p> : <ul>{rates.items.map(rate=><li key={rate.id}>₹{(rate.paisePerKg/100).toFixed(2)} per kg — effective {rate.effectiveFrom} UTC</li>)}</ul>}
       {rates.nextAfter && <button type="button" disabled={busy || disabled} onClick={()=>loadRates(selected,rates.nextAfter)}>Next rates</button>}</div>}
+    <CatalogAdmin categoryId={selected && rates ? selected.id : null} disabled={disabled} />
   </section>;
 }

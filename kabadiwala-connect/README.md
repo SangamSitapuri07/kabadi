@@ -222,14 +222,15 @@ for profile tests.
 
 ### Catalog and estimate groundwork (development only)
 
-`catalog.ts` is a development storage/math prototype. An admin-only read-only
-web view and direct API read/write routes exist, but there is **no admin write
-form, admin provisioning, or connection to pickup requests**. The migration creates no categories or rates and
-is never run at startup. The internal write methods require a currently active
-admin grant, checked transactionally; callers must supply an actor ID derived
-from a validated server session. There is no admin provisioning mechanism, and no identity/role may be
-self-granted from a browser. Test
-admin records in the disposable integration test are synthetic setup only.
+`catalog.ts` is a development storage/math prototype. An admin-only web view,
+its same-origin read and write bridges, and direct API routes exist, but entries
+are **not connected to pickup requests or estimates**. The migration creates no
+categories or rates and is never run at startup. The internal write methods
+require a currently active admin grant, checked transactionally; callers must
+supply an actor ID derived from a validated server session. Privileged roles can
+only be granted by a local operator command (below), and no identity/role can be
+self-granted from a browser. Test admin records in the disposable integration
+test are synthetic setup only.
 
 Two development-only admin read routes support inspection:
 `GET /api/v1/admin/catalog/categories` and
@@ -267,13 +268,63 @@ success record and mutation commit or roll back together. These guarantees assum
 all writers use the adapter, stored retry records remain intact, and clients
 retain their key/payload; there is no UI to retain them across refreshes.
 
-There is no web bridge or UI for writes. These routes do not provision administrators,
+A same-origin write bridge now exists at the same two paths
+(`POST /api/v1/admin/catalog/categories` and
+`POST /api/v1/admin/catalog/categories/:categoryId/rates`), together with a
+development form under “Test catalog inspection”. The bridge adds no
+authorization of its own: it rejects a mismatched `Origin` even without cookies,
+requires a UUID v4 `Idempotency-Key`, bounds the body to 4 KB, forwards only the
+body, that key and cookies, and projects the new ID (or a fixed error message).
+The API still decides access from the validated session and an active admin
+grant inside the write transaction. The form shows a retry button only after an
+unconfirmed result and re-sends the identical payload with the identical
+in-memory key; it discards uncertain state when the tab is hidden. Keys are not
+persisted, so reloading the page loses any pending retry — check the catalog
+before making a new write. There is still no edit or delete operation, no rate
+correction path, and no audit of who changed what beyond the retry records.
+
+These routes do not provision administrators,
 run migrations or populate data. They now require the separately migrated retry
 schema; when it is missing, writes return unavailable rather than falling back
 to unsafe behavior. Read-only listings do not require the retry schema. The
 retry records reference actors and catalog rows with restricted deletion; a
 retention, cleanup, backup/restore and audit policy is not designed. Direct SQL
 can bypass these guarantees. This is not a production security audit.
+
+### Development admin grants (local operator tool, no HTTP surface)
+
+No browser or API route can grant a privileged role; self-granting is
+deliberately impossible. Instead there is a local command-line tool that resolves
+one application user by exact email and records every change in an append-only
+audit table. This is small reviewable operations tooling, not identity
+governance: there is no approval workflow, second approver, separation of duties,
+key rotation, or protection against someone who already controls the database,
+and the audit table is not tamper-proof.
+
+Both steps are explicit and never run at startup. First migrate the audit schema
+(`kabadi_admin`, requires the authorization schema):
+
+```sh
+npm run build:api
+ROLE_ADMIN_MIGRATION_CONFIRM=yes node --env-file=.env apps/api/dist/migrate-role-admin.js
+```
+
+Then, only for an approved disposable development database:
+
+```sh
+DEV_ROLE_TOOL_CONFIRM=yes node --env-file=.env apps/api/dist/role-admin-cli.js list
+DEV_ROLE_TOOL_CONFIRM=yes node --env-file=.env apps/api/dist/role-admin-cli.js grant person@example.test admin "bootstrap first local admin"
+DEV_ROLE_TOOL_CONFIRM=yes node --env-file=.env apps/api/dist/role-admin-cli.js revoke person@example.test admin "remove accidental grant"
+```
+
+On PowerShell set and later remove the variables with `Remove-Item Env:...`. The
+tool refuses `NODE_ENV=production`, refuses unknown or suspended accounts, does
+not create accounts (the person must have signed in and completed customer
+setup first), requires a 10–200 character reason, and is idempotent for repeat
+grants/revokes. It prints the active-administrator count after each change and
+warns if a revoke leaves none, because admin routes then become unusable until a
+grant is restored. Do not use real personal emails or record production data
+with this tool; it writes to whatever `DATABASE_URL` points at.
 
 Categories have bounded names; rate events store integer paise per kg, creator
 and UTC effective start. Each event applies until the next one. For this draft,
@@ -450,5 +501,9 @@ The web app is an under-development placeholder, not a functioning marketplace.
 The API has liveness and an opt-in, development-only Google authentication
 integration. Authentication is disabled by default and prohibited when the API's
 `NODE_ENV` is `production`. An initial owner-run local Google login succeeded;
-security and production readiness have not been established. There is a test-only pickup capture schema, but no operational collection, notification, OTP or payment functionality. Policy decisions, full security review and
-zero-cost provider suitability remain pending. Phase 1 is not complete.
+security and production readiness have not been established. Customer setup,
+profile, test pickup capture, a read/write development catalog and a local
+admin-grant tool exist; there is no operational collection, dispatch,
+notification, OTP, payment or estimate-to-request flow, and no collector or
+dispute handling. Policy decisions, full security review and zero-cost provider
+suitability remain pending. Phase 1 is not complete.

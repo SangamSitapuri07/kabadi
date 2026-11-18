@@ -18,6 +18,7 @@ import { createCustomerDetailsStore, migrateCustomerDetails } from '../../apps/a
 import { migratePickups, createPickupStore } from '../../apps/api/dist/pickups.js';
 import { migrateCatalog, createCatalogStore } from '../../apps/api/dist/catalog.js';
 import { migrateCatalogRetries } from '../../apps/api/dist/catalog-retries.js';
+import { createRoleAdmin, migrateRoleAdmin } from '../../apps/api/dist/role-admin.js';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 
@@ -59,6 +60,8 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     delete env.PICKUP_MIGRATION_CONFIRM;
     delete env.CATALOG_MIGRATION_CONFIRM;
     delete env.CATALOG_RETRY_MIGRATION_CONFIRM;
+    delete env.ROLE_ADMIN_MIGRATION_CONFIRM;
+    delete env.DEV_ROLE_TOOL_CONFIRM;
     accountPool = new pg.Pool({ connectionString: databaseURL, max: 2 });
     const accountMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-account-store.js'],
       { cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 20000 });
@@ -68,6 +71,8 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 1);
     const catalogMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-catalog.js'], { cwd:root, env:{...env,...overrides}, encoding:'utf8', timeout:20000 });
     const retryMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-catalog-retries.js'], {cwd:root,env:{...env,...overrides},encoding:'utf8',timeout:20000});
+    const roleAdminMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-role-admin.js'], {cwd:root,env:{...env,...overrides},encoding:'utf8',timeout:20000});
+    const roleTool = (args, overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/role-admin-cli.js', ...args], {cwd:root,env:{...env,...overrides},encoding:'utf8',timeout:20000});
     assert.equal(retryMigration().status,1);
     assert.equal(retryMigration({CATALOG_RETRY_MIGRATION_CONFIRM:'yes'}).status,1);
     assert.equal(catalogMigration().status, 1);
@@ -130,6 +135,46 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(retryMigration({CATALOG_RETRY_MIGRATION_CONFIRM:'yes'}).status,0);
     assert.equal(retryMigration({CATALOG_RETRY_MIGRATION_CONFIRM:'yes'}).status,0);
     assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog_retry.successes')).rows[0].n,0);
+    assert.equal(roleAdminMigration().status,1);
+    assert.equal(roleAdminMigration({ROLE_ADMIN_MIGRATION_CONFIRM:'yes',NODE_ENV:'production'}).status,1);
+    assert.equal(roleAdminMigration({ROLE_ADMIN_MIGRATION_CONFIRM:'yes'}).status,0);
+    assert.equal(roleAdminMigration({ROLE_ADMIN_MIGRATION_CONFIRM:'yes'}).status,0);
+    assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_admin.role_changes')).rows[0].n,0);
+    assert.equal(roleTool(['list']).status,1,'role tool must require explicit confirmation');
+    assert.equal(roleTool(['list'],{DEV_ROLE_TOOL_CONFIRM:'yes',NODE_ENV:'production'}).status,1,'role tool must refuse production');
+    assert.match(roleTool(['list'],{DEV_ROLE_TOOL_CONFIRM:'yes'}).stdout,/Active administrators: 0/);
+
+    // The local operator tool must be the only supported way to create an
+    // admin grant. It resolves a user by exact email, refuses unknown or
+    // suspended accounts, records an audit row, and never runs in production.
+    const tool = createRoleAdmin(accountPool);
+    const operatorUser = randomUUID(), operatorEmail = `operator-${operatorUser}@example.test`;
+    await accountPool.query('INSERT INTO "user" (id,name,email,"emailVerified","createdAt","updatedAt") VALUES ($1,$2,$3,false,now(),now())',[operatorUser,'Operator',operatorEmail]);
+    assert.deepEqual(await tool.grant(operatorEmail,'admin','only the audit schema exists so far'),{outcome:'no-account'});
+    await accountPool.query("INSERT INTO kabadi_authz.accounts VALUES ($1,'active')",[operatorUser]);
+    await assert.rejects(tool.grant(operatorEmail,'admin','too short'));
+    await assert.rejects(tool.grant(operatorEmail,'root','a long enough but invalid role'));
+    await assert.rejects(tool.grant('not-an-email','admin','a long enough but invalid email'));
+    assert.deepEqual(await tool.grant(`nobody-${operatorUser}@example.test`,'admin','must resolve a real user'),{outcome:'unknown-user'});
+    const granted = await tool.grant(` ${operatorEmail.toUpperCase()} `,'admin','bootstrap first local administrator');
+    assert.equal(granted.outcome,'changed'); assert.equal(granted.role,'admin');
+    assert.deepEqual(await tool.grant(operatorEmail,'admin','repeating a grant is a no-op'),{outcome:'already-granted',userId:operatorUser,role:'admin'});
+    assert.equal(await tool.activeAdminCount(),1);
+    let changes = await tool.recentChanges(5);
+    assert.equal(changes.length,1); assert.equal(changes[0].action,'grant'); assert.equal(changes[0].role,'admin');
+    assert.equal(changes[0].email,operatorEmail);
+    await accountPool.query("UPDATE kabadi_authz.accounts SET status='suspended' WHERE user_id=$1",[operatorUser]);
+    assert.equal(await tool.activeAdminCount(),0,'a suspended admin must not count');
+    assert.deepEqual(await tool.revoke(operatorEmail,'admin','cleanup of the synthetic bootstrap'),{outcome:'suspended-account'});
+    await accountPool.query("UPDATE kabadi_authz.accounts SET status='active' WHERE user_id=$1",[operatorUser]);
+    assert.equal((await tool.revoke(operatorEmail,'admin','remove the synthetic bootstrap')).outcome,'changed');
+    assert.equal(await tool.activeAdminCount(),0);
+    assert.deepEqual(await tool.revoke(operatorEmail,'admin','repeating a revoke is a no-op'),{outcome:'already-absent',userId:operatorUser,role:'admin'});
+    changes = await tool.recentChanges(5);
+    assert.deepEqual(changes.map(c=>c.action),['revoke','grant']);
+    await accountPool.query('DELETE FROM kabadi_admin.role_changes WHERE user_id=$1',[operatorUser]);
+    await accountPool.query('DELETE FROM "user" WHERE id=$1',[operatorUser]);
+    assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_admin.role_changes')).rows[0].n,0);
 
     // This setup directly grants synthetic admins in the disposable DB only.
     const admins = [randomUUID(), randomUUID()];
@@ -546,6 +591,42 @@ test('app integration: migration, web bridge and Google-only initiation', { time
         assert.equal(bridgedRates.status,200);
         assert.deepEqual(await bridgedRates.json(),{data:{rates:[{id:rateId,effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:123}],nextAfter:null}});
         assert.equal((await fetch(`${publicOrigin}${catalogPath}?after=bad`,{headers:{cookie}})).status,400);
+        // Same-origin write bridge: authorization is still decided by the API,
+        // and a cross-site or keyless write must be refused before upstream.
+        const bridgeWrite = (body, options = {}) => fetch(publicOrigin + catalogPath, {
+          method:'POST',
+          headers:{origin: publicOrigin, cookie, 'content-type':'application/json', 'idempotency-key': randomUUID(), ...options.headers},
+          body: JSON.stringify(body),
+        });
+        assert.equal((await bridgeWrite({name:'Bridged'},{headers:{origin:'https://evil.example'}})).status,403);
+        assert.equal((await bridgeWrite({name:'Bridged'},{headers:{'idempotency-key':''}})).status,400);
+        assert.equal((await bridgeWrite({name:'Bridged',userId:'forged'})).status,400);
+        assert.equal((await fetch(publicOrigin + catalogPath,{method:'POST',headers:{origin:publicOrigin,cookie,'content-type':'text/plain','idempotency-key':randomUUID()},body:'{}'})).status,415);
+        assert.equal((await fetch(publicOrigin + catalogPath,{method:'POST',headers:{origin:publicOrigin,cookie,'content-type':'application/json','idempotency-key':randomUUID()},body:'x'.repeat(4200)})).status,413);
+        const bridgeKey = randomUUID();
+        const bridgedWrite = await bridgeWrite({name:'  Bridged synthetic  '},{headers:{'idempotency-key':bridgeKey}});
+        assert.equal(bridgedWrite.status,201);
+        const bridgedId = (await bridgedWrite.json()).data.id;
+        assert.match(bridgedId,/^[0-9a-f-]{36}$/i);
+        const bridgedReplay = await bridgeWrite({name:'Bridged synthetic'},{headers:{'idempotency-key':bridgeKey}});
+        assert.equal(bridgedReplay.status,201); assert.deepEqual(await bridgedReplay.json(),{data:{id:bridgedId}});
+        assert.equal((await bridgeWrite({name:'Bridged different'},{headers:{'idempotency-key':bridgeKey}})).status,409);
+        const bridgedRateKey = randomUUID(), bridgedRate = {effectiveFrom:'2099-05-01T00:00:00.000Z',paisePerKg:5400};
+        const bridgedRateResponse = await fetch(`${publicOrigin}${catalogPath}/${bridgedId}/rates`,{method:'POST',headers:{origin:publicOrigin,cookie,'content-type':'application/json','idempotency-key':bridgedRateKey},body:JSON.stringify(bridgedRate)});
+        assert.equal(bridgedRateResponse.status,201);
+        const bridgedRateId = (await bridgedRateResponse.json()).data.id;
+        const bridgedRateReplay = await fetch(`${publicOrigin}${catalogPath}/${bridgedId}/rates`,{method:'POST',headers:{origin:publicOrigin,cookie,'content-type':'application/json','idempotency-key':bridgedRateKey},body:JSON.stringify(bridgedRate)});
+        assert.equal(bridgedRateReplay.status,201); assert.deepEqual(await bridgedRateReplay.json(),{data:{id:bridgedRateId}});
+        assert.deepEqual(await catalog.lookupAt(bridgedId,'2099-05-01T00:00:00.000Z'),{rateId:bridgedRateId,paisePerKg:5400});
+        assert.equal((await fetch(`${publicOrigin}${catalogPath}/bad/rates`,{method:'POST',headers:{origin:publicOrigin,cookie,'content-type':'application/json','idempotency-key':randomUUID()},body:JSON.stringify(bridgedRate)})).status,400);
+        // A non-admin gets a refusal, never data or a write.
+        await client.query("DELETE FROM kabadi_authz.role_grants WHERE user_id=$1 AND role='admin'",[userId]);
+        assert.equal((await bridgeWrite({name:'Bridged denied'})).status,403);
+        await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1,'admin')",[userId]);
+        await client.query('DELETE FROM kabadi_catalog_retry.successes WHERE category_id=$1',[bridgedId]); // disposable cleanup
+        await client.query('DELETE FROM kabadi_catalog.rates WHERE category_id=$1',[bridgedId]);
+        await client.query('DELETE FROM kabadi_catalog.categories WHERE id=$1',[bridgedId]);
+
         assert.equal((await fetch(`${publicOrigin}${catalogPath}/${randomUUID()}/rates`,{headers:{cookie}})).status,404);
 
 
@@ -642,9 +723,10 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     let mode = 'valid';
     const mock = createHttpServer((_req, res) => {
       if (mode === 'error') { res.writeHead(500); res.end('{}'); return; }
-      res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'synthetic=refresh; HttpOnly; SameSite=Lax' });
+      res.writeHead(mode === 'catalog-write' ? 201 : 200, { 'content-type': 'application/json', 'set-cookie': 'synthetic=refresh; HttpOnly; SameSite=Lax' });
       const body = mode === 'catalog-rate' ? {data:{rates:[{id:'123e4567-e89b-42d3-a456-426614174001',effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:125,createdBy:'secret'}],nextAfter:null},secret:'hidden'} :
         mode === 'catalog' ? {data:{categories:[{id:'123e4567-e89b-42d3-a456-426614174000',name:'Mock',active:true,createdBy:'secret'}],nextAfter:null},secret:'hidden'} :
+        mode === 'catalog-write' ? {data:{id:'123e4567-e89b-42d3-a456-426614174002',createdBy:'secret'},secret:'hidden'} :
         mode === 'valid' ? { authenticated: true, token: 'synthetic-secret', user: { name: 'private' } } :
         mode === 'customer' ? { data: { customer: 'ready', userId: 'private' }, token: 'synthetic-secret' } :
         mode === 'details' ? { data: { details: { name: 'Mock', addressLine: 'Example', city: 'Test', state: 'Test', postalCode: '123', userId: 'private' } }, token: 'synthetic-secret' } : { authenticated: 'yes' };
@@ -674,7 +756,18 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       const mockRate=await fetch(publicOrigin+'/api/v1/admin/catalog/categories/123e4567-e89b-42d3-a456-426614174000/rates?after=123e4567-e89b-42d3-a456-426614174001');
       assert.deepEqual(await mockRate.json(),{data:{rates:[{id:'123e4567-e89b-42d3-a456-426614174001',effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:125}],nextAfter:null}});
 
+      // The write bridge forwards the idempotency key and only projects the ID.
+      mode = 'catalog-write';
+      const writeHeaders = { origin: publicOrigin, 'content-type': 'application/json', 'idempotency-key': '123e4567-e89b-42d3-a456-426614174099' };
+      const projectedWrite = await fetch(publicOrigin + '/api/v1/admin/catalog/categories', { method:'POST', headers: writeHeaders, body: JSON.stringify({ name:'  Mock  ' }) });
+      assert.equal(projectedWrite.status, 201);
+      assert.deepEqual(await projectedWrite.json(), { data: { id:'123e4567-e89b-42d3-a456-426614174002' } });
+      assert.ok(projectedWrite.headers.getSetCookie().some(value => value.includes('synthetic=refresh')));
+      assert.equal((await fetch(publicOrigin + '/api/v1/admin/catalog/categories', { method:'POST', headers:{...writeHeaders, origin:'https://evil.example'}, body:'{"name":"Mock"}' })).status, 403);
+      assert.equal((await fetch(publicOrigin + '/api/v1/admin/catalog/categories', { method:'POST', headers:{...writeHeaders, 'idempotency-key':'nope'}, body:'{"name":"Mock"}' })).status, 400);
+      assert.equal((await fetch(publicOrigin + '/api/v1/admin/catalog/categories', { method:'POST', headers:writeHeaders, body:'{"name":"Mock","role":"admin"}' })).status, 400);
       mode = 'invalid';
+      assert.equal((await fetch(publicOrigin + '/api/v1/admin/catalog/categories', { method:'POST', headers:writeHeaders, body:'{"name":"Mock"}' })).status, 503);
       assert.equal((await fetch(publicOrigin + '/api/v1/admin/catalog/categories')).status, 503);
       assert.equal((await fetch(publicOrigin + '/api/v1/account/customer/details')).status, 503);
       assert.equal((await fetch(publicOrigin + '/api/v1/account/customer', { method: 'POST', headers: { origin: publicOrigin, 'content-type': 'application/json' }, body: '{}' })).status, 503);

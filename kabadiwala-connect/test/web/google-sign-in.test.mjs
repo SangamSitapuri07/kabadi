@@ -33,6 +33,12 @@ const catalogCompiled = babel.transformSync(await readFile('apps/web/app/catalog
   plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
 });
 await writeFile(join(temp,'catalog-viewer.js'),catalogCompiled.code);
+const adminCompiled = babel.transformSync(await readFile('apps/web/app/catalog-admin.tsx','utf8'), {
+  filename:'catalog-admin.tsx',babelrc:false,configFile:false,
+  presets:[[require('next/dist/compiled/babel/preset-typescript'),{allExtensions:true,isTSX:true}],[require('next/dist/compiled/babel/preset-react'),{runtime:'automatic'}]],
+  plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
+});
+await writeFile(join(temp,'catalog-admin.js'),adminCompiled.code);
 const { GoogleSignIn } = createRequire(modulePath)(modulePath);
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 
@@ -292,6 +298,93 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       Object.defineProperty(document,'visibilityState',{value:'hidden',configurable:true});
       await act(async()=>document.dispatchEvent(new dom.window.Event('visibilitychange')));
       assert.doesNotMatch(document.body.textContent,/Synthetic paper/);
+      Object.defineProperty(document,'visibilityState',{value:'visible',configurable:true});
+      await unmount();
+    });
+    await t.test('admin catalog form retries an uncertain write with the same key and inputs', async () => {
+      const category='123e4567-e89b-42d3-a456-426614174010';
+      const writes=[];
+      let failOnce=true;
+      await mount(async (url,init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (init?.method==='POST') {
+          writes.push({url,headers:init.headers,body:JSON.parse(init.body)});
+          if (failOnce) { failOnce=false; throw Error('interrupted'); }
+          return json({data:{id:category}},201);
+        }
+        if (url.endsWith('/rates')) return json({data:{rates:[],nextAfter:null}});
+        return json({data:{categories:[{id:category,name:'Synthetic metal',active:true}],nextAfter:null}});
+      });
+      const setValue=async (input,value)=>{ await act(async()=>{ Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(input,value); input.dispatchEvent(new dom.window.Event('input',{bubbles:true})); }); };
+      const submit=async form=>{ await act(async()=>{ form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true})); }); };
+      await clickButton('Load test catalog');
+      const admin=document.querySelector('.catalog-admin');
+      assert.ok(admin,'admin form must render');
+      assert.match(admin.textContent,/Choose “View rates”/);
+      await setValue(admin.querySelector('input[name="categoryName"]'),' Synthetic cards ');
+      await submit(admin.querySelectorAll('form')[0]);
+      assert.match(admin.textContent,/could not be confirmed/i);
+      await clickButton('Retry category save');
+      assert.equal(writes.length,2);
+      assert.equal(writes[0].body.name,'Synthetic cards');
+      assert.deepEqual(writes[1].body,writes[0].body);
+      assert.equal(writes[1].headers['Idempotency-Key'],writes[0].headers['Idempotency-Key']);
+      assert.match(writes[0].headers['Idempotency-Key'],/^[0-9a-f]{8}-[0-9a-f]{4}-4/i);
+      assert.match(admin.textContent,/Category saved/);
+      assert.equal(admin.querySelector('input[name="categoryName"]').value,'');
+
+      await clickButton('View rates for Synthetic metal');
+      const rateForm=document.querySelectorAll('.catalog-admin form')[1];
+      assert.ok(rateForm,'rate form appears only for a selected category');
+      await setValue(rateForm.querySelector('input[name="rupeesPerKg"]'),'32.5');
+      await submit(rateForm);
+      const rateWrite=writes.at(-1);
+      assert.equal(rateWrite.body.paisePerKg,3250);
+      assert.match(rateWrite.url,new RegExp(`/categories/${category}/rates$`));
+      assert.ok(Number.isFinite(Date.parse(rateWrite.body.effectiveFrom)));
+      assert.match(document.querySelector('.catalog-admin').textContent,/Rate saved/);
+      await unmount();
+    });
+    await t.test('admin catalog form never claims success on denial and rejects bad input locally', async () => {
+      const posted=[];
+      await mount(async (url,init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (init?.method==='POST') { posted.push({body:init.body,key:init.headers['Idempotency-Key']}); return json({error:{code:'FORBIDDEN'}},403); }
+        return json({data:{categories:[],nextAfter:null}});
+      });
+      const adminForm=()=>document.querySelector('.catalog-admin');
+      const setValue=async (input,value)=>{ await act(async()=>{ Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(input,value); input.dispatchEvent(new dom.window.Event('input',{bubbles:true})); }); };
+      await clickButton('Load test catalog');
+      const input=adminForm().querySelector('input[name="categoryName"]');
+      await setValue(input,'  ');
+      await act(async()=>{ adminForm().querySelectorAll('form')[0].dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true})); });
+      assert.equal(posted.length,0,'blank names must not be sent');
+      assert.match(adminForm().textContent,/up to 100 characters/i);
+      await setValue(input,'Synthetic denial');
+      await act(async()=>{ adminForm().querySelectorAll('form')[0].dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true})); });
+      assert.equal(posted.length,1);
+      assert.match(adminForm().textContent,/Admin access is required/);
+      assert.doesNotMatch(adminForm().textContent,/saved/i);
+      assert.equal([...document.querySelectorAll('button')].some(x=>x.textContent==='Retry category save'),false,'denial must not leave a retry state');
+      await unmount();
+    });
+    await t.test('admin catalog form discards an in-flight write when the tab hides', async () => {
+      let finish;
+      const pending=new Promise(resolve=>{finish=resolve;});
+      await mount(async (url,init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (init?.method==='POST') return pending;
+        return json({data:{categories:[],nextAfter:null}});
+      });
+      await clickButton('Load test catalog');
+      const admin=document.querySelector('.catalog-admin');
+      await act(async()=>{ Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(admin.querySelector('input[name="categoryName"]'),'Hidden write'); admin.querySelector('input[name="categoryName"]').dispatchEvent(new dom.window.Event('input',{bubbles:true})); });
+      await act(async()=>{ admin.querySelectorAll('form')[0].dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true})); });
+      Object.defineProperty(document,'visibilityState',{value:'hidden',configurable:true});
+      await act(async()=>{ document.dispatchEvent(new dom.window.Event('visibilitychange')); });
+      await act(async()=>{ finish(json({data:{id:'123e4567-e89b-42d3-a456-426614174011'}},201)); await pending; });
+      assert.doesNotMatch(document.querySelector('.catalog-admin').textContent,/Category saved/);
+      assert.equal([...document.querySelectorAll('button')].some(x=>x.textContent==='Retry category save'),false);
       Object.defineProperty(document,'visibilityState',{value:'visible',configurable:true});
       await unmount();
     });
