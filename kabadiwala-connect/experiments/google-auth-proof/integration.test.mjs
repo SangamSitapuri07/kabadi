@@ -175,8 +175,9 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     });
     assert.equal(serverOnboarding.status, 401, 'actual API process must resolve the session');
     assert.equal((await fetch(`http://127.0.0.1:${env.PORT}/api/v1/account/customer/details`)).status, 401, 'actual API process must wire details');
+    assert.equal((await fetch(`http://127.0.0.1:${env.PORT}/api/v1/admin/catalog/categories`, {method:'POST', headers:{origin:publicOrigin,'content-type':'application/json'}, body:JSON.stringify({name:'Synthetic'})})).status, 401, 'actual API process must wire catalog');
     await stop(serverProcess);
-    api = createApp({ origin: publicOrigin, handler: runtime.handler, resolveIdentity: runtime.resolveIdentity, onboardCustomer: runtime.onboardCustomer, customerDetails: runtime.customerDetails, pickups: runtime.pickups }).listen(0, '127.0.0.1');
+    api = createApp({ origin: publicOrigin, handler: runtime.handler, resolveIdentity: runtime.resolveIdentity, onboardCustomer: runtime.onboardCustomer, customerDetails: runtime.customerDetails, pickups: runtime.pickups, catalog: runtime.catalog }).listen(0, '127.0.0.1');
     await once(api, 'listening');
     const apiOrigin = `http://127.0.0.1:${api.address().port}`;
     web = spawn(process.execPath, ['node_modules/next/dist/bin/next', 'start', 'apps/web', '-H', '127.0.0.1', '-p', String(webPort)],
@@ -402,6 +403,15 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       assert.equal((await readDetails(publicOrigin, { cookie })).status, 403);
       assert.equal((await writeDetails(publicOrigin, record, publicOrigin, { cookie })).status, 403);
       await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1, 'customer')", [userId]);
+      // Direct API catalog mutations use a synthetic session and actual PostgreSQL
+      // grant checks; no role is taken from headers or the request body.
+      const catalogPath = '/api/v1/admin/catalog/categories';
+      const catalogPost = (path, body, selectedCookie = cookie, origin = publicOrigin) => fetch(apiOrigin + path, {
+        method:'POST', headers:{origin, cookie:selectedCookie, 'content-type':'application/json', 'x-role':'admin'}, body:JSON.stringify(body)
+      });
+      assert.equal((await catalogPost(catalogPath, {name:'Synthetic HTTP'}, '')).status, 401);
+      assert.equal((await catalogPost(catalogPath, {name:'Synthetic HTTP'})).status, 403);
+      assert.equal((await catalogPost(catalogPath, {name:'Synthetic HTTP'}, cookie, 'https://evil.example')).status, 403);
       const protectedApp = express();
       protectedApp.get('/protected', requireRoles({ resolveIdentity: runtime.resolveIdentity, lookupAccount }, ['customer']),
       (_req, res) => res.json({ ok: true }));
@@ -422,6 +432,28 @@ test('app integration: migration, web bridge and Google-only initiation', { time
         await client.query("DELETE FROM kabadi_authz.role_grants WHERE user_id = $1 AND role = 'customer'", [userId]);
         await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1, 'admin')", [userId]);
         assert.equal((await fetch(url, { headers: { cookie, 'x-role': 'customer' } })).status, 403);
+        const catResponse = await catalogPost(catalogPath, {name:'Synthetic HTTP'});
+        assert.equal(catResponse.status,201);
+        const catId = (await catResponse.json()).data.id;
+        assert.equal((await catalogPost(catalogPath, {name:'Synthetic HTTP'})).status,409);
+        const rateResponse = await catalogPost(`${catalogPath}/${catId}/rates`, {effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:123});
+        assert.equal(rateResponse.status,201);
+        assert.deepEqual(await catalog.lookupAt(catId, '2099-01-01T00:00:00.000Z'), {rateId:(await rateResponse.json()).data.id,paisePerKg:123});
+        await client.query("UPDATE kabadi_authz.accounts SET status='suspended' WHERE user_id=$1",[userId]);
+        assert.equal((await catalogPost(catalogPath, {name:'Denied'})).status,403);
+        await client.query("UPDATE kabadi_authz.accounts SET status='active' WHERE user_id=$1",[userId]);
+        await client.query("DELETE FROM kabadi_authz.role_grants WHERE user_id=$1 AND role='admin'",[userId]);
+        assert.equal((await catalogPost(`${catalogPath}/${catId}/rates`, {effectiveFrom:'2099-02-01T00:00:00.000Z',paisePerKg:456})).status,403);
+        await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1,'admin')",[userId]);
+        await client.query('DELETE FROM kabadi_catalog.rates WHERE category_id=$1',[catId]);
+        await client.query('DELETE FROM kabadi_catalog.categories WHERE id=$1',[catId]); // disposable test cleanup only
+        await client.query('ALTER SCHEMA kabadi_catalog RENAME TO kabadi_catalog_unavailable');
+        try {
+          const unavailableCatalog = await catalogPost(catalogPath, {name:'Unavailable'});
+          assert.equal(unavailableCatalog.status,503);
+          assert.deepEqual(await unavailableCatalog.json(), {error:{code:'CATALOG_UNAVAILABLE',message:'Catalog administration is unavailable.'}});
+        } finally { await client.query('ALTER SCHEMA kabadi_catalog_unavailable RENAME TO kabadi_catalog'); }
+
         // A missing schema must become a sanitized failure, never a grant.
         await client.query('ALTER SCHEMA kabadi_authz RENAME TO kabadi_authz_unavailable');
         try {

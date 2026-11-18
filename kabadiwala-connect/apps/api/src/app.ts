@@ -5,6 +5,7 @@ import { parseCustomerDetails } from './customer-details.js';
 import type { CustomerDetails } from './customer-details.js';
 import { parsePickup } from './pickups.js';
 import type { Pickup } from './pickups.js';
+import { categoryName, rateValue, utcTimestamp } from './catalog.js';
 
 type AuthMount = {
   origin: string;
@@ -12,6 +13,7 @@ type AuthMount = {
   resolveIdentity?: (cookie?: string) => Promise<{ userId: string | null; cookies: string[] }>;
   onboardCustomer?: (userId: string) => Promise<'ready' | 'forbidden'>;
   pickups?: { create: (userId: string, input: unknown) => Promise<'created' | 'missing-profile' | 'conflict' | 'forbidden'>; list: (userId: string) => Promise<Pickup[] | 'forbidden'> };
+  catalog?: { createCategory: (actorId: string, name: unknown) => Promise<{id:string} | 'duplicate' | 'forbidden'>; addRate: (actorId: string, categoryId: string, effectiveFrom: unknown, rate: unknown) => Promise<{id:string} | 'invalid-time' | 'not-found' | 'forbidden'> };
   customerDetails?: { read: (userId: string) => Promise<CustomerDetails | null | 'forbidden'>; write: (userId: string, input: unknown) => Promise<'saved' | 'forbidden'> };
 };
 
@@ -180,6 +182,46 @@ export function createApp(auth?: AuthMount) {
       if (result !== 'created') throw Error('Invalid result');
       res.json({ data: { created: true } });
     } catch { pickupUnavailable(res); }
+  });
+  // Development-only admin writes. Identity comes exclusively from the session;
+  // the catalog store checks the active admin grant inside the write transaction.
+  // No route here provisions roles or bypasses catalog schema migration.
+  const catalogUnavailable = (res: express.Response) => res.status(503).json({ error: { code:'CATALOG_UNAVAILABLE', message:'Catalog administration is unavailable.' } });
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const catalogWrite: express.RequestHandler = (req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    if (!auth?.resolveIdentity || !auth.catalog) { catalogUnavailable(res); return; }
+    if (req.get('origin') !== auth.origin) { res.status(403).json({error:{code:'INVALID_ORIGIN',message:'Request origin is not allowed.'}}); return; }
+    const length = req.get('content-length');
+    if (!length || !/^\d+$/.test(length) || Number(length) > 4096 || req.get('transfer-encoding')) { res.status(413).json({error:{code:'INVALID_BODY',message:'Request body is invalid or too large.'}}); return; }
+    if (!req.is('application/json')) { res.status(415).json({error:{code:'INVALID_CONTENT_TYPE',message:'JSON is required.'}}); return; }
+    next();
+  };
+  const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+  app.post('/api/v1/admin/catalog/categories', catalogWrite, express.json({limit:'4kb',strict:true}), async (req, res) => {
+    const body: unknown = req.body;
+    if (!record(body) || Object.keys(body).length !== 1 || !('name' in body) || !categoryName(body.name)) { res.status(400).json({error:{code:'INVALID_BODY',message:'Category is invalid.'}}); return; }
+    try {
+      const actor = await detailsAuth(req, res); if (actor === null) return;
+      const result = await auth!.catalog!.createCategory(actor, body.name);
+      if (result === 'forbidden') { res.status(403).json({error:{code:'FORBIDDEN',message:'Admin access is required.'}}); return; }
+      if (result === 'duplicate') { res.status(409).json({error:{code:'CATEGORY_EXISTS',message:'Category already exists.'}}); return; }
+      if (!result || typeof result.id !== 'string' || !uuid.test(result.id)) throw Error('Invalid result');
+      res.status(201).json({data:{id:result.id}});
+    } catch { catalogUnavailable(res); }
+  });
+  app.post('/api/v1/admin/catalog/categories/:categoryId/rates', catalogWrite, express.json({limit:'4kb',strict:true}), async (req, res) => {
+    const body: unknown = req.body, categoryId = req.params.categoryId;
+    if (typeof categoryId !== 'string' || !uuid.test(categoryId) || !record(body) || Object.keys(body).length !== 2 || !('effectiveFrom' in body) || !('paisePerKg' in body) || !utcTimestamp(body.effectiveFrom) || rateValue(body.paisePerKg) === null) { res.status(400).json({error:{code:'INVALID_BODY',message:'Rate is invalid.'}}); return; }
+    try {
+      const actor = await detailsAuth(req, res); if (actor === null) return;
+      const result = await auth!.catalog!.addRate(actor, categoryId, body.effectiveFrom, body.paisePerKg);
+      if (result === 'forbidden') { res.status(403).json({error:{code:'FORBIDDEN',message:'Admin access is required.'}}); return; }
+      if (result === 'not-found') { res.status(404).json({error:{code:'NOT_FOUND',message:'Category not found.'}}); return; }
+      if (result === 'invalid-time') { res.status(409).json({error:{code:'INVALID_RATE_TIME',message:'Rate time must be future and later than existing rates.'}}); return; }
+      if (!result || typeof result.id !== 'string' || !uuid.test(result.id)) throw Error('Invalid result');
+      res.status(201).json({data:{id:result.id}});
+    } catch { catalogUnavailable(res); }
   });
   app.use(express.json({ limit: '32kb' }));
 

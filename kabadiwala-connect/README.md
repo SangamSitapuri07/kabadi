@@ -222,13 +222,25 @@ for profile tests.
 
 ### Catalog and estimate groundwork (development only)
 
-`catalog.ts` is an isolated storage/math prototype, **not connected to any API,
-web form, or pickup request**. The migration creates no categories or rates and
+`catalog.ts` is a development storage/math prototype. Two direct API admin
+write routes exist, but there is **no web form, admin provisioning, catalog
+listing, or connection to pickup requests**. The migration creates no categories or rates and
 is never run at startup. The internal write methods require a currently active
 admin grant, checked transactionally; callers must supply an actor ID derived
-from a validated server session. There is no admin provisioning mechanism or
-public endpoint, and no identity/role may be self-granted from a browser. Test
+from a validated server session. There is no admin provisioning mechanism, and no identity/role may be
+self-granted from a browser. Test
 admin records in the disposable integration test are synthetic setup only.
+
+The development-only API exposes `POST /api/v1/admin/catalog/categories`
+(`{"name":"..."}`) and `POST /api/v1/admin/catalog/categories/:categoryId/rates`
+(`{"effectiveFrom":"YYYY-MM-DDTHH:mm:ss.sssZ","paisePerKg":123}`). Both require
+a validated session, exact configured Origin, and an active admin grant checked
+within the write transaction. They return only the new ID on success; malformed
+requests, unauthorized accounts, duplicates and unavailable storage fail closed.
+No Next.js bridge or UI exists. They do not provision administrators, run
+migrations or populate data. Writes have no idempotency key: after an uncertain
+response do not blindly retry; inspection/reconciliation tooling is still needed.
+The application is development-only and this is not a production security audit.
 
 Categories have bounded names; rate events store integer paise per kg, creator
 and UTC effective start. Each event applies until the next one. For this draft,

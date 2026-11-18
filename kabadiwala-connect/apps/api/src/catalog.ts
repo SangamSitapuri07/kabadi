@@ -1,8 +1,8 @@
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 
-// Isolated development foundation; not wired to any route. Callers of writes
-// MUST derive actorId from a validated server session, never a browser claim.
+// Development foundation. Callers of writes MUST derive actorId from a
+// validated server session, never a browser claim.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const MAX_GRAMS = 10_000_000;
 export const MAX_RATE_PAISE_PER_KG = 1_000_000_000;

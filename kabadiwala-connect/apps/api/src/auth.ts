@@ -6,6 +6,7 @@ import pg from 'pg';
 import { createCustomerOnboarder } from './customer-onboarding.js';
 import { createCustomerDetailsStore } from './customer-details.js';
 import { createPickupStore } from './pickups.js';
+import { createCatalogStore } from './catalog.js';
 
 export type AuthConfig = {
   origin: string;
@@ -83,6 +84,7 @@ export function createAuthRuntime(config: AuthConfig) {
     onboardCustomer: createCustomerOnboarder(pool),
     customerDetails: createCustomerDetailsStore(pool),
     pickups: createPickupStore(pool),
+    catalog: createCatalogStore(pool),
     async handler(request: IncomingMessage, response: ServerResponse) {
       // Better Auth's standard session response includes a bearer token. Even
       // direct API clients must receive only the minimal status, not that data.
