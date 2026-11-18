@@ -23,7 +23,8 @@
     "migrate:auth": "npm run build:api && node apps/api/dist/migrate-auth.js",
     "migrate:authorization": "npm run build:api && node apps/api/dist/migrate-account-store.js",
     "migrate:customer-details": "npm run build:api && node apps/api/dist/migrate-customer-details.js",
-    "migrate:pickups": "npm run build:api && node apps/api/dist/migrate-pickups.js"
+    "migrate:pickups": "npm run build:api && node apps/api/dist/migrate-pickups.js",
+    "migrate:catalog": "npm run build:api && node apps/api/dist/migrate-catalog.js"
   },
   "dependencies": {
     "better-auth": "1.7.24",

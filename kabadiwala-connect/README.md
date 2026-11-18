@@ -220,6 +220,45 @@ authorization migration). This command is not necessary for sign-in or customer
 setup. Back up the current database and obtain explicit approval before using it
 for profile tests.
 
+### Catalog and estimate groundwork (development only)
+
+`catalog.ts` is an isolated storage/math prototype, **not connected to any API,
+web form, or pickup request**. The migration creates no categories or rates and
+is never run at startup. The internal write methods require a currently active
+admin grant, checked transactionally; callers must supply an actor ID derived
+from a validated server session. There is no admin provisioning mechanism or
+public endpoint, and no identity/role may be self-granted from a browser. Test
+admin records in the disposable integration test are synthetic setup only.
+
+Categories have bounded names; rate events store integer paise per kg, creator
+and UTC effective start. Each event applies until the next one. For this draft,
+new starts must be in the future and strictly later than existing starts; this
+is a temporary restriction, **not an approved backdating or scheduling policy**.
+Insertion serializes through an account lock and category lock; all future
+writers must take the same locks, and direct SQL can bypass these rules. There is
+no update/delete operation in the adapter, but the database does not enforce
+immutability against direct SQL. DB least privilege, auditing, corrections,
+category deactivation, rate locality, historical retention and production
+security all remain unresolved. The schema restricts deletion of creator accounts.
+
+The separate arithmetic helper uses integer grams and exact big-integer
+arithmetic, returning decimal paise strings. It returns `roundingRequired` for
+an exact half-paise tie rather than silently choosing an unapproved policy.
+A future production request must select the applicable rate at request time on
+the server inside its transaction and persist a rate/amount snapshot; the
+current free-text test request has no categories, rates, or price estimate.
+The lookup helper's supplied timestamp is for internal testing, not a trusted
+client price or a request-time implementation.
+
+An explicit development migration command exists but has not been run on the
+owner's database. It checks the authz schema version and refuses an unrecognized
+catalog schema; version markers do not detect all schema drift. Only after target
+inspection, a fresh backup, and explicit owner approval may a disposable
+**development** database be migrated. After `npm run build:api`, the command is
+`CATALOG_MIGRATION_CONFIRM=yes node --env-file=.env apps/api/dist/migrate-catalog.js`.
+In PowerShell set and later remove that environment variable. It creates schema
+and tables but no categories or rates. Restore and upgrades are untested.
+
 ### Test pickup request prototype (development only)
 
 This is not a functioning pickup service. A signed-in active customer can save a

@@ -16,6 +16,7 @@ import { requireRoles } from '../../apps/api/dist/authorization.js';
 import { createAccountLookup, migrateAccountStore } from '../../apps/api/dist/account-store.js';
 import { createCustomerDetailsStore, migrateCustomerDetails } from '../../apps/api/dist/customer-details.js';
 import { migratePickups, createPickupStore } from '../../apps/api/dist/pickups.js';
+import { migrateCatalog, createCatalogStore } from '../../apps/api/dist/catalog.js';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 
@@ -55,6 +56,7 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     delete env.AUTHORIZATION_MIGRATION_CONFIRM;
     delete env.CUSTOMER_DETAILS_MIGRATION_CONFIRM;
     delete env.PICKUP_MIGRATION_CONFIRM;
+    delete env.CATALOG_MIGRATION_CONFIRM;
     accountPool = new pg.Pool({ connectionString: databaseURL, max: 2 });
     const accountMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-account-store.js'],
       { cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 20000 });
@@ -62,6 +64,9 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       { cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 20000 });
     assert.equal(detailsMigration().status, 1);
     assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 1);
+    const catalogMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-catalog.js'], { cwd:root, env:{...env,...overrides}, encoding:'utf8', timeout:20000 });
+    assert.equal(catalogMigration().status, 1);
+    assert.equal(catalogMigration({CATALOG_MIGRATION_CONFIRM:'yes'}).status, 1);
     assert.equal(accountMigration().status, 1, 'authorization migration must require explicit confirmation');
     assert.equal(accountMigration({ AUTHORIZATION_MIGRATION_CONFIRM: 'yes' }).status, 1, 'auth schema must already exist');
     assert.equal(accountMigration({ AUTHORIZATION_MIGRATION_CONFIRM: 'yes', NODE_ENV: 'production' }).status, 1);
@@ -105,6 +110,56 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
     assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
     assert.equal((await accountPool.query('SELECT count(*)::int AS count FROM kabadi_pickup.requests')).rows[0].count, 0);
+    assert.equal(catalogMigration({CATALOG_MIGRATION_CONFIRM:'yes', NODE_ENV:'production'}).status, 1);
+    await accountPool.query('CREATE SCHEMA kabadi_catalog');
+    assert.equal(catalogMigration({CATALOG_MIGRATION_CONFIRM:'yes'}).status, 1);
+    await accountPool.query('DROP SCHEMA kabadi_catalog');
+    assert.equal(catalogMigration({CATALOG_MIGRATION_CONFIRM:'yes'}).status, 0);
+    assert.equal(catalogMigration({CATALOG_MIGRATION_CONFIRM:'yes'}).status, 0);
+    assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.categories')).rows[0].n, 0);
+    assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.rates')).rows[0].n, 0);
+    // This setup directly grants synthetic admins in the disposable DB only.
+    const admins = [randomUUID(), randomUUID()];
+    for (const id of admins) {
+      await accountPool.query('INSERT INTO "user" (id,name,email,"emailVerified","createdAt","updatedAt") VALUES ($1,$2,$3,false,now(),now())',[id,'Synthetic',`${id}@example.test`]);
+      await accountPool.query("INSERT INTO kabadi_authz.accounts VALUES ($1,'active')",[id]);
+      await accountPool.query("INSERT INTO kabadi_authz.role_grants VALUES ($1,'admin')",[id]);
+    }
+    const catalog = createCatalogStore(accountPool);
+    assert.equal(await catalog.createCategory('missing', 'Paper'), 'forbidden');
+    const category = await catalog.createCategory(admins[0], 'Paper');
+    assert.ok(category.id);
+    assert.equal(await catalog.createCategory(admins[0], 'paper'), 'duplicate');
+    await accountPool.query("UPDATE kabadi_authz.accounts SET status='suspended' WHERE user_id=$1",[admins[1]]);
+    assert.equal(await catalog.createCategory(admins[1], 'Plastic'), 'forbidden');
+    await accountPool.query("UPDATE kabadi_authz.accounts SET status='active' WHERE user_id=$1",[admins[1]]);
+    await accountPool.query("DELETE FROM kabadi_authz.role_grants WHERE user_id=$1 AND role='admin'",[admins[1]]);
+    assert.equal(await catalog.addRate(admins[1], category.id, '2099-01-01T00:00:00.000Z', 500), 'forbidden');
+    await accountPool.query("INSERT INTO kabadi_authz.role_grants VALUES ($1,'admin')",[admins[1]]);
+    assert.equal(await catalog.addRate(admins[0], category.id, '2000-01-01T00:00:00.000Z', 100), 'invalid-time');
+    assert.equal(await catalog.addRate(admins[0], randomUUID(), '2099-01-01T00:00:00.000Z', 100), 'not-found');
+    const race = await Promise.all(admins.map(id => catalog.addRate(id, category.id, '2099-01-01T00:00:00.000Z', 100)));
+    assert.equal(race.filter(x => typeof x === 'object').length, 1);
+    assert.equal(race.filter(x => x === 'invalid-time').length, 1);
+    const rate1 = race.find(x => typeof x === 'object');
+    assert.equal(await catalog.lookupAt(category.id, '2098-12-31T23:59:59.999Z'), null);
+    assert.deepEqual(await catalog.lookupAt(category.id, '2099-01-01T00:00:00.000Z'), {rateId:rate1.id, paisePerKg:100});
+    const rate2 = await catalog.addRate(admins[0], category.id, '2099-02-01T00:00:00.000Z', 200);
+    assert.deepEqual(await catalog.lookupAt(category.id, '2099-01-31T23:59:59.999Z'), {rateId:rate1.id, paisePerKg:100});
+    assert.deepEqual(await catalog.lookupAt(category.id, '2099-02-01T00:00:00.000Z'), {rateId:rate2.id, paisePerKg:200});
+    assert.equal(await catalog.addRate(admins[0], category.id, '2099-01-15T00:00:00.000Z', 150), 'invalid-time');
+    await accountPool.query('ALTER TABLE kabadi_catalog.rates ADD CONSTRAINT test_rate_failure CHECK (paise_per_kg <> 1111)');
+    try {
+      await assert.rejects(catalog.addRate(admins[0], category.id, '2099-03-01T00:00:00.000Z', 1111));
+      assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.rates')).rows[0].n, 2);
+    } finally { await accountPool.query('ALTER TABLE kabadi_catalog.rates DROP CONSTRAINT test_rate_failure'); }
+    await migrateCatalog(accountPool);
+    assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.rates')).rows[0].n, 2);
+    await assert.rejects(accountPool.query('DELETE FROM kabadi_authz.accounts WHERE user_id=$1',[admins[0]]), {code:'23001'});
+    // Synthetic cleanup only; no application deletion operation is provided.
+    await accountPool.query('DELETE FROM kabadi_catalog.rates');
+    await accountPool.query('DELETE FROM kabadi_catalog.categories');
+    for (const id of admins) await accountPool.query('DELETE FROM "user" WHERE id=$1', [id]);
     serverProcess = spawn(process.execPath, ['apps/api/dist/server.js'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('API startup timed out')), 10000);
