@@ -189,31 +189,36 @@ requires enabled development auth configuration and rejects production mode. It
 makes persistent schema changes and should never target production data. Do not
 manually grant roles or share user IDs, credentials or session data in chat.
 
-### Customer details storage groundwork (development only)
+### Customer details (development only)
 
 The development-only `customer-details.ts` draft stores a customer name and one
 editable pickup address (address line, city, state and postal code). Bounds are
 technical defaults, not final product policy; no phone verification is implied.
-The store validates inputs, scopes queries to the caller-provided user ID, and
-checks active customer membership under database locks for each operation. The
-caller **must** obtain that ID from a validated server-side session: the store
-cannot authenticate it. All future grant/revocation writers must coordinate on
-the same account-row lock. Address snapshots, multiple addresses, retention and
-production privacy/security are not implemented.
+The API resolves the owner ID from the current server-side session, validates
+inputs and checks active customer membership under database locks for each
+operation. The storage adapter itself cannot authenticate its caller: any
+future caller **must** supply an ID from a validated server-side session. All
+future grant/revocation writers must coordinate on the same account-row lock.
+Address snapshots, multiple addresses, retention and production privacy/security
+are not implemented.
 
 A separate opt-in migration exists but is **not run at startup**. It requires the
 existing authentication and authorization schemas, creates no customer records,
 and refuses an unrecognized customer schema. Use only after independently
 checking and backing up a disposable development database; marker version checks
 do not detect every form of schema drift and restore/upgrade procedures have not
-been verified. This slice is not wired to any HTTP route or UI; do not enter real
-personal data. User-facing profiles and addresses are not yet available.
+been verified. The same-origin web bridge and development form expose only the
+signed-in customer’s own details. Use fictional test information only; privacy,
+retention and production security are not ready. The form clears on sign-out or tab hiding.
+Writes are last-write-wins, with no concurrent edit protection; a timed-out save
+may have succeeded and should be checked by reloading.
 
 To run explicitly on an approved disposable development DB after build:
 `CUSTOMER_DETAILS_MIGRATION_CONFIRM=yes node --env-file=.env apps/api/dist/migrate-customer-details.js`
 (on PowerShell set and later remove the environment variable as with the
-authorization migration). This command is not necessary for current sign-in or
-customer setup. There is no reason to run it until the rest of the flow exists.
+authorization migration). This command is not necessary for sign-in or customer
+setup. Back up the current database and obtain explicit approval before using it
+for profile tests.
 
 ### Customer self-onboarding (development API)
 
@@ -229,8 +234,8 @@ the response. The signed-in development page offers a customer-setup button and
 shows a confirmation only after a validated success response. It clears that
 confirmation on sign-out or when the tab is hidden; it is an action result, not
 an authoritative account-status or authorization check. On interrupted requests,
-setup cannot be confirmed and can safely be retried. There is no profile or
-pickup UI yet.
+setup cannot be confirmed and can safely be retried. The separate profile form
+needs its own migration; pickup UI is not yet available.
 
 Synthetic PostgreSQL and HTTP integration tests cover concurrent retries,
 transaction rollback, invalid origins and payloads, forged role/ID headers,

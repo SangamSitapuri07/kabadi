@@ -107,8 +107,9 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       method: 'POST', headers: { origin: publicOrigin, 'content-type': 'application/json' }, body: '{}',
     });
     assert.equal(serverOnboarding.status, 401, 'actual API process must resolve the session');
+    assert.equal((await fetch(`http://127.0.0.1:${env.PORT}/api/v1/account/customer/details`)).status, 401, 'actual API process must wire details');
     await stop(serverProcess);
-    api = createApp({ origin: publicOrigin, handler: runtime.handler, resolveIdentity: runtime.resolveIdentity, onboardCustomer: runtime.onboardCustomer }).listen(0, '127.0.0.1');
+    api = createApp({ origin: publicOrigin, handler: runtime.handler, resolveIdentity: runtime.resolveIdentity, onboardCustomer: runtime.onboardCustomer, customerDetails: runtime.customerDetails }).listen(0, '127.0.0.1');
     await once(api, 'listening');
     const apiOrigin = `http://127.0.0.1:${api.address().port}`;
     web = spawn(process.execPath, ['node_modules/next/dist/bin/next', 'start', 'apps/web', '-H', '127.0.0.1', '-p', String(webPort)],
@@ -249,6 +250,49 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       assert.equal((await details.read(userId)).name, 'Test person');
       await client.query('DELETE FROM kabadi_authz.accounts WHERE user_id = $1', [otherId]);
       assert.equal((await client.query('SELECT count(*)::int AS count FROM kabadi_customer.details WHERE user_id = $1', [otherId])).rows[0].count, 0);
+      // Real API and Next bridge with a signed synthetic session and disposable DB.
+      const detailsPath = '/api/v1/account/customer/details';
+      const readDetails = (base, headers = {}) => fetch(base + detailsPath, { headers });
+      const writeDetails = (base, data, requestOrigin = publicOrigin, headers = {}) => fetch(base + detailsPath, {
+        method: 'PUT', headers: { origin: requestOrigin, 'content-type': 'application/json', ...headers }, body: typeof data === 'string' ? data : JSON.stringify(data),
+      });
+      for (const base of [apiOrigin, publicOrigin]) {
+        assert.equal((await readDetails(base)).status, 401);
+        assert.equal((await writeDetails(base, record)).status, 401);
+        assert.equal((await writeDetails(base, record, 'https://evil.example', { cookie })).status, 403);
+        assert.equal((await writeDetails(base, { ...record, userId: otherId }, publicOrigin, { cookie })).status, 400);
+        assert.equal((await writeDetails(base, 'x'.repeat(4097), publicOrigin, { cookie })).status, 413);
+        const initial = await readDetails(base, { cookie, 'x-user-id': otherId });
+        assert.equal(initial.status, 200);
+        assert.equal(initial.headers.get('cache-control'), 'no-store');
+        assert.deepEqual(await initial.json(), { data: { details: { ...record, name: 'Test person' } } });
+        const saved = await writeDetails(base, { ...record, name: 'Updated Person' }, publicOrigin, { cookie, 'x-user-id': otherId });
+        assert.equal(saved.status, 200);
+        assert.deepEqual(await saved.json(), { data: { saved: true } });
+        assert.equal((await details.read(userId)).name, 'Updated Person');
+        await details.write(userId, record);
+      }
+      await client.query('ALTER SCHEMA kabadi_customer RENAME TO kabadi_customer_unavailable');
+      try {
+        assert.equal((await readDetails(publicOrigin, { cookie })).status, 503);
+        assert.equal((await writeDetails(publicOrigin, record, publicOrigin, { cookie })).status, 503);
+      } finally { await client.query('ALTER SCHEMA kabadi_customer_unavailable RENAME TO kabadi_customer'); }
+      // A second real session is confined to its own account, despite forged headers.
+      await client.query("INSERT INTO kabadi_authz.accounts VALUES ($1, 'active')", [otherId]);
+      await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1, 'customer')", [otherId]);
+      const otherToken = randomBytes(32).toString('hex');
+      await client.query('INSERT INTO "session" (id, "userId", token, "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, $3, NOW() + INTERVAL \'1 hour\', NOW(), NOW())', [randomBytes(16).toString('hex'), otherId, otherToken]);
+      const otherSignature = createHmac('sha256', secret).update(otherToken).digest('base64');
+      const otherCookie = `better-auth.session_token=${encodeURIComponent(`${otherToken}.${otherSignature}`)}`;
+      assert.deepEqual(await (await readDetails(publicOrigin, { cookie: otherCookie, 'x-user-id': userId })).json(), { data: { details: null } });
+      await client.query("UPDATE kabadi_authz.accounts SET status = 'suspended' WHERE user_id = $1", [userId]);
+      assert.equal((await readDetails(publicOrigin, { cookie })).status, 403);
+      assert.equal((await writeDetails(publicOrigin, record, publicOrigin, { cookie })).status, 403);
+      await client.query("UPDATE kabadi_authz.accounts SET status = 'active' WHERE user_id = $1", [userId]);
+      await client.query("DELETE FROM kabadi_authz.role_grants WHERE user_id = $1 AND role = 'customer'", [userId]);
+      assert.equal((await readDetails(publicOrigin, { cookie })).status, 403);
+      assert.equal((await writeDetails(publicOrigin, record, publicOrigin, { cookie })).status, 403);
+      await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1, 'customer')", [userId]);
       const protectedApp = express();
       protectedApp.get('/protected', requireRoles({ resolveIdentity: runtime.resolveIdentity, lookupAccount }, ['customer']),
       (_req, res) => res.json({ ok: true }));
@@ -296,6 +340,8 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       assert.deepEqual(await (await sessionWithCookie()).json(), { authenticated: false }, 'replayed old cookie must not authenticate');
       assert.equal((await runtime.resolveIdentity(cookie)).userId, null, 'revoked session must not resolve an identity');
       assert.equal((await post(publicOrigin, '{}', publicOrigin, { cookie })).status, 401, 'revoked session cannot onboard');
+      assert.equal((await readDetails(publicOrigin, { cookie })).status, 401);
+      assert.equal((await writeDetails(publicOrigin, record, publicOrigin, { cookie })).status, 401);
       const expiredToken = randomBytes(32).toString('hex');
       await client.query('INSERT INTO "session" (id, "userId", token, "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, $3, NOW() - INTERVAL \'1 hour\', NOW() - INTERVAL \'2 days\', NOW() - INTERVAL \'2 days\')', [randomBytes(16).toString('hex'), userId, expiredToken]);
       const expiredSignature = createHmac('sha256', secret).update(expiredToken).digest('base64');
@@ -334,7 +380,8 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       if (mode === 'error') { res.writeHead(500); res.end('{}'); return; }
       res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'synthetic=refresh; HttpOnly; SameSite=Lax' });
       const body = mode === 'valid' ? { authenticated: true, token: 'synthetic-secret', user: { name: 'private' } } :
-        mode === 'customer' ? { data: { customer: 'ready', userId: 'private' }, token: 'synthetic-secret' } : { authenticated: 'yes' };
+        mode === 'customer' ? { data: { customer: 'ready', userId: 'private' }, token: 'synthetic-secret' } :
+        mode === 'details' ? { data: { details: { name: 'Mock', addressLine: 'Example', city: 'Test', state: 'Test', postalCode: '123', userId: 'private' } }, token: 'synthetic-secret' } : { authenticated: 'yes' };
       res.end(JSON.stringify(body));
     });
     mock.listen(Number(new URL(apiOrigin).port), '127.0.0.1');
@@ -347,7 +394,12 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       const customerProjection = await fetch(publicOrigin + '/api/v1/account/customer', { method: 'POST', headers: { origin: publicOrigin, 'content-type': 'application/json' }, body: '{}' });
       assert.deepEqual(await customerProjection.json(), { data: { customer: 'ready' } });
       assert.ok(customerProjection.headers.getSetCookie().some(value => value.includes('synthetic=refresh')));
+      mode = 'details';
+      const projectedDetails = await fetch(publicOrigin + '/api/v1/account/customer/details');
+      assert.deepEqual(await projectedDetails.json(), { data: { details: { name: 'Mock', addressLine: 'Example', city: 'Test', state: 'Test', postalCode: '123' } } });
+      assert.ok(projectedDetails.headers.getSetCookie().some(value => value.includes('synthetic=refresh')));
       mode = 'invalid';
+      assert.equal((await fetch(publicOrigin + '/api/v1/account/customer/details')).status, 503);
       assert.equal((await fetch(publicOrigin + '/api/v1/account/customer', { method: 'POST', headers: { origin: publicOrigin, 'content-type': 'application/json' }, body: '{}' })).status, 503);
       assert.equal((await fetch(publicOrigin + '/api/auth/get-session')).status, 503);
       mode = 'error';

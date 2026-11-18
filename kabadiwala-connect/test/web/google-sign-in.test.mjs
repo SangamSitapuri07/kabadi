@@ -6,7 +6,6 @@ import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { JSDOM } from 'jsdom';
 import React, { act } from 'react';
-import { createRoot } from 'react-dom/client';
 
 const require = createRequire(import.meta.url);
 // Use the compiler shipped with pinned Next to execute the actual TSX in jsdom.
@@ -29,6 +28,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
   const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost:3000/' });
   const previous = { window: globalThis.window, document: globalThis.document, fetch: globalThis.fetch, act: globalThis.IS_REACT_ACT_ENVIRONMENT };
   globalThis.window = dom.window; globalThis.document = dom.window.document; globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import('react-dom/client');
   let root;
   const mount = async (mockFetch) => {
     globalThis.fetch = mockFetch;
@@ -168,6 +168,71 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       await act(async () => { finish(json({ data: { customer: 'ready' } })); await pending; });
       assert.doesNotMatch(document.body.textContent, /Customer setup completed/);
       delete document.visibilityState;
+      await unmount();
+    });
+    await t.test('profile loads, saves and clears on sign-out', async () => {
+      let session = true, saved;
+      const profile = { name: 'Sample', addressLine: '12 Example', city: 'Ludhiana', state: 'Punjab', postalCode: '141001' };
+      await mount(async (url, init) => {
+        if (url.endsWith('/account/customer/details')) {
+          if (init?.method === 'PUT') { saved = JSON.parse(init.body); return json({ data: { saved: true } }); }
+          return json({ data: { details: profile } });
+        }
+        if (url.endsWith('/account/customer')) return json({ data: { customer: 'ready' } });
+        if (url.endsWith('sign-out')) { session = false; return json({ success: true }); }
+        return json({ authenticated: session });
+      });
+      await clickButton('Set up customer account'); await clickButton('Open customer profile');
+      assert.equal(document.querySelector('[name="name"]').value, 'Sample');
+      const input = document.querySelector('[name="name"]');
+      await act(async () => { Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set.call(input, 'Changed'); input.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+      await act(async () => { document.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
+      assert.deepEqual(saved, { ...profile, name: 'Changed' });
+      assert.match(document.body.textContent, /Customer details saved/);
+      await clickButton('Sign out');
+      assert.equal(document.querySelector('form'), null);
+      assert.doesNotMatch(document.body.textContent, /Customer details saved/);
+      await unmount();
+    });
+    await t.test('profile errors and stale load results do not show personal data', async () => {
+      let mode = 'bad'; let finish;
+      const pending = new Promise(resolve => { finish = resolve; });
+      await mount(async (url) => {
+        if (url.endsWith('/account/customer/details')) return mode === 'bad' ? json({ data: { details: { name: 'Incomplete' } } }) : pending;
+        if (url.endsWith('/account/customer')) return json({ data: { customer: 'ready' } });
+        return json({ authenticated: true });
+      });
+      await clickButton('Set up customer account'); await clickButton('Open customer profile');
+      assert.match(document.querySelector('[role="alert"]').textContent, /could not be loaded/i);
+      assert.equal(document.querySelector('form'), null);
+      mode = 'pending';
+      await act(async () => { [...document.querySelectorAll('button')].find(item => item.textContent === 'Open customer profile').click(); });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      await act(async () => { document.dispatchEvent(new dom.window.Event('visibilitychange')); });
+      await act(async () => { finish(json({ data: { details: { name: 'Sample', addressLine: 'Example', city: 'Ludhiana', state: 'Punjab', postalCode: '141001' } } })); await pending; });
+      assert.equal(document.querySelector('form'), null);
+      assert.doesNotMatch(document.body.textContent, /Customer setup completed/);
+      delete document.visibilityState;
+      await unmount();
+    });
+    await t.test('profile save failure and expired session fail closed', async () => {
+      let mode = 'save-fail';
+      await mount(async (url, init) => {
+        if (url.endsWith('/account/customer/details')) {
+          if (init?.method === 'PUT') return mode === 'save-fail' ? json({ error: { code: 'DETAILS_UNAVAILABLE' } }, 503) : json({ error: { code: 'SIGN_IN_REQUIRED' } }, 401);
+          return json({ data: { details: { name: 'Sample', addressLine: 'Example', city: 'Ludhiana', state: 'Punjab', postalCode: '141001' } } });
+        }
+        if (url.endsWith('/account/customer')) return json({ data: { customer: 'ready' } });
+        return json({ authenticated: true });
+      });
+      await clickButton('Set up customer account'); await clickButton('Open customer profile');
+      await act(async () => { document.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
+      assert.match(document.querySelector('[role="alert"]').textContent, /could not be confirmed/i);
+      assert.doesNotMatch(document.body.textContent, /Customer details saved/);
+      mode = 'expired';
+      await act(async () => { document.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
+      assert.equal(document.querySelector('form'), null);
+      assert.match(document.body.textContent, /sign-in could not be confirmed/i);
       await unmount();
     });
     await t.test('a still-active session after sign-out is not presented as signed out', async () => {

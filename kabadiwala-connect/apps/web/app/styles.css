@@ -22,3 +22,10 @@ footer { color: #71877a; font-size: .8rem; padding: 25px 0; border-top: 1px soli
 .customer-setup [role="status"] p { color: #294f3d; font-weight: 700; }
 .auth-note, .auth-error { font-size: .8rem; color: #536a5e; max-width: 420px; line-height: 1.5; }
 .auth-error { color: #9b3434; }
+.customer-profile { margin-top: 20px; max-width: 420px; }
+.customer-profile h2 { color: #18362c; font-size: 1.1rem; }
+.customer-profile fieldset { padding: 0; margin: 0; border: 0; display: grid; gap: 12px; }
+.customer-profile label { display: grid; gap: 5px; color: #294f3d; font-weight: 700; }
+.customer-profile input { width: 100%; border: 1px solid #cfded1; border-radius: 8px; padding: 10px; color: #18362c; font: inherit; background: white; }
+.customer-profile input:focus-visible { outline: 3px solid #21815b; outline-offset: 2px; }
+.customer-profile button { justify-self: start; }
