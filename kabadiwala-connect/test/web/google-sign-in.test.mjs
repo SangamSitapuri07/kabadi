@@ -345,6 +345,61 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.match(document.querySelector('.catalog-admin').textContent,/Rate saved/);
       await unmount();
     });
+    await t.test('an untouched start time is refreshed at submit so it cannot go stale', async () => {
+      const category='123e4567-e89b-42d3-a456-426614174020';
+      const writes=[];
+      await mount(async (url,init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (init?.method==='POST') { writes.push(JSON.parse(init.body)); return json({data:{id:category}},201); }
+        if (url.endsWith('/rates')) return json({data:{rates:[],nextAfter:null}});
+        return json({data:{categories:[{id:category,name:'Synthetic glass',active:true}],nextAfter:null}});
+      });
+      await clickButton('Load test catalog');
+      await clickButton('View rates for Synthetic glass');
+      const form=document.querySelectorAll('.catalog-admin form')[1];
+      const rate=form.querySelector('input[name="rupeesPerKg"]');
+      await act(async()=>{
+        Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(rate,'10');
+        rate.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+      });
+      // The displayed value was computed on mount; submitting must not reuse it.
+      const displayed=Date.parse(form.querySelector('input[name="effectiveFrom"]').value);
+      await act(async()=>{ form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true})); });
+      assert.equal(writes.length,1);
+      const sent=Date.parse(writes[0].effectiveFrom);
+      assert.ok(sent>Date.now(),'an untouched default must still be in the future when sent');
+      assert.ok(sent>=displayed,'the submitted default is re-derived, never earlier than shown');
+      assert.equal(writes[0].paisePerKg,1000);
+      assert.match(document.querySelector('.catalog-admin').textContent,/Rate saved/);
+      await unmount();
+    });
+    await t.test('an operator-chosen past start is refused by the API and never reported as saved', async () => {
+      const category='123e4567-e89b-42d3-a456-426614174021';
+      const writes=[];
+      await mount(async (url,init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (init?.method==='POST') { writes.push(JSON.parse(init.body)); return json({error:{code:'INVALID_RATE_TIME'}},409); }
+        if (url.endsWith('/rates')) return json({data:{rates:[],nextAfter:null}});
+        return json({data:{categories:[{id:category,name:'Synthetic steel',active:true}],nextAfter:null}});
+      });
+      await clickButton('Load test catalog');
+      await clickButton('View rates for Synthetic steel');
+      const form=document.querySelectorAll('.catalog-admin form')[1];
+      const setter=Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set;
+      await act(async()=>{
+        setter.call(form.querySelector('input[name="effectiveFrom"]'),'2020-01-01T00:00:00.000Z');
+        form.querySelector('input[name="effectiveFrom"]').dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+        setter.call(form.querySelector('input[name="rupeesPerKg"]'),'11');
+        form.querySelector('input[name="rupeesPerKg"]').dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+      });
+      await act(async()=>{ form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true})); });
+      assert.equal(writes.length,1);
+      assert.equal(writes[0].effectiveFrom,'2020-01-01T00:00:00.000Z','an explicit choice is respected, not silently rewritten');
+      const admin=document.querySelector('.catalog-admin');
+      assert.match(admin.textContent,/must be in the future/);
+      assert.doesNotMatch(admin.textContent,/Rate saved/);
+      await unmount();
+    });
     await t.test('admin catalog form never claims success on denial and rejects bad input locally', async () => {
       const posted=[];
       await mount(async (url,init) => {

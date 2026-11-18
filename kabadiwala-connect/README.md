@@ -278,7 +278,11 @@ body, that key and cookies, and projects the new ID (or a fixed error message).
 The API still decides access from the validated session and an active admin
 grant inside the write transaction. The form shows a retry button only after an
 unconfirmed result and re-sends the identical payload with the identical
-in-memory key; it discards uncertain state when the tab is hidden. Keys are not
+in-memory key; it discards uncertain state when the tab is hidden. The rate
+start time defaults to roughly ten minutes ahead and is re-derived at submit
+while it is untouched, so leaving the page open cannot make the default stale.
+If you edit it, your exact value is used and a past time is rejected by the API
+with a message rather than being silently rewritten. Keys are not
 persisted, so reloading the page loses any pending retry — check the catalog
 before making a new write. There is still no edit or delete operation, no rate
 correction path, and no audit of who changed what beyond the retry records.

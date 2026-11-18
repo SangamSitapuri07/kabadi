@@ -8,8 +8,11 @@ import { useEffect, useRef, useState } from 'react';
 type Pending = { kind: 'category'; key: string; name: string } | { kind: 'rate'; key: string; categoryId: string; effectiveFrom: string; paisePerKg: number };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-// Admin writes require a future UTC start formatted to the millisecond.
-function futureUtc(offsetMinutes = 10): string {
+// Admin writes require a future UTC start formatted to the millisecond. The
+// default is refreshed at submit time: a value computed on mount silently
+// expires while the page sits open, which reads as a confusing rejection.
+const DEFAULT_START_MINUTES = 10;
+function futureUtc(offsetMinutes = DEFAULT_START_MINUTES): string {
   const at = new Date(Date.now() + offsetMinutes * 60_000);
   at.setUTCSeconds(0, 0);
   return at.toISOString();
@@ -22,6 +25,9 @@ export function CatalogAdmin({ categoryId, disabled = false }: { categoryId: str
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [pending, setPending] = useState<Pending | null>(null);
+  // True once the operator edits the start time; until then it is refreshed
+  // automatically so the default cannot go stale.
+  const [startEdited, setStartEdited] = useState(false);
   const generation = useRef(0);
 
   // Never keep an uncertain write's inputs on screen after the tab is hidden;
@@ -104,7 +110,10 @@ export function CatalogAdmin({ categoryId, disabled = false }: { categoryId: str
     event.preventDefault();
     if (!categoryId) { setMessage('Choose a category first.'); return; }
     if (pending?.kind === 'rate') { void send(pending); return; }
-    const at = new Date(effectiveFrom);
+    // An untouched default is re-derived now so it is genuinely in the future.
+    const source = startEdited ? effectiveFrom : futureUtc();
+    if (!startEdited) setEffectiveFrom(source);
+    const at = new Date(source);
     if (!Number.isFinite(at.getTime())) { setMessage('Enter a valid start time.'); return; }
     // Convert rupees to integer paise without floating point drift.
     const match = /^(\d{1,8})(?:\.(\d{1,2}))?$/.exec(rupeesPerKg.trim());
@@ -126,7 +135,7 @@ export function CatalogAdmin({ categoryId, disabled = false }: { categoryId: str
     </form>
     {categoryId ? <form onSubmit={submitRate}>
       <fieldset disabled={formDisabled}>
-        <label>Start time (UTC)<input name="effectiveFrom" value={effectiveFrom} autoComplete="off" onChange={event => { setEffectiveFrom(event.target.value); setPending(null); setMessage(''); }} /></label>
+        <label>Start time (UTC)<input name="effectiveFrom" value={effectiveFrom} autoComplete="off" onChange={event => { setEffectiveFrom(event.target.value); setStartEdited(true); setPending(null); setMessage(''); }} /></label>
         <label>Rate in rupees per kg<input name="rupeesPerKg" value={rupeesPerKg} inputMode="decimal" autoComplete="off" onChange={event => { setRupeesPerKg(event.target.value); setPending(null); setMessage(''); }} /></label>
         <button type="submit" disabled={formDisabled}>{pending?.kind === 'rate' ? 'Retry rate save' : 'Save rate for selected category'}</button>
       </fieldset>
