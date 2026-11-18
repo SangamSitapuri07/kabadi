@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { TestPickups } from './test-pickups';
+import { CatalogViewer } from './catalog-viewer';
 
 type SessionStatus = 'checking' | 'signed-out' | 'signed-in' | 'unavailable';
 type Details = { name: string; addressLine: string; city: string; state: string; postalCode: string };
@@ -212,6 +213,7 @@ export function GoogleSignIn() {
         </form>}
         {customerSetup === 'completed' && <TestPickups />}
       </div>
+      {busy !== 'sign-out' && <CatalogViewer disabled={busy !== null} />}
     </>}
     {status === 'unavailable' && <button type="button" onClick={retrySession}>Try again</button>}
     <p className="auth-note">Development only. Sign-in and security are not ready for production.</p>

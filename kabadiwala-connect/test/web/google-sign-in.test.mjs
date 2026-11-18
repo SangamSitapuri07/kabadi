@@ -27,6 +27,12 @@ const pickupCompiled = babel.transformSync(await readFile('apps/web/app/test-pic
   plugins: [require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
 });
 await writeFile(join(temp, 'test-pickups.js'), pickupCompiled.code);
+const catalogCompiled = babel.transformSync(await readFile('apps/web/app/catalog-viewer.tsx','utf8'), {
+  filename:'catalog-viewer.tsx',babelrc:false,configFile:false,
+  presets:[[require('next/dist/compiled/babel/preset-typescript'),{allExtensions:true,isTSX:true}],[require('next/dist/compiled/babel/preset-react'),{runtime:'automatic'}]],
+  plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
+});
+await writeFile(join(temp,'catalog-viewer.js'),catalogCompiled.code);
 const { GoogleSignIn } = createRequire(modulePath)(modulePath);
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 
@@ -265,6 +271,42 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.deepEqual(requests[0], requests[1]); assert.equal(requests[0].estimatedGrams,1500);
       assert.match(section.textContent, /No collector will be notified/);
       await clickButton('Load my test requests'); assert.match(section.textContent, /No test requests found/);
+      await unmount();
+    });
+    await t.test('read-only catalog loads pages and clears data on hidden tab', async () => {
+      const category='123e4567-e89b-42d3-a456-426614174000', rate='123e4567-e89b-42d3-a456-426614174001';
+      const paths=[];
+      await mount(async (url,init) => {
+        paths.push(url);
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        assert.equal(init.cache,'no-store');
+        if (url.endsWith('/rates')) return json({data:{rates:[{id:rate,effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:125}],nextAfter:null}});
+        if (url.includes('?after=')) return json({data:{categories:[],nextAfter:null}});
+        return json({data:{categories:[{id:category,name:'Synthetic paper',active:true}],nextAfter:category}});
+      });
+      await clickButton('Load test catalog'); assert.match(document.body.textContent,/Synthetic paper/);
+      await clickButton('View rates for Synthetic paper'); assert.match(document.body.textContent,/₹1.25 per kg/);
+      await clickButton('Next categories'); assert.match(document.body.textContent,/No categories on this page/);
+      assert.ok(paths.some(p=>p.endsWith(`?after=${category}`)));
+      await clickButton('Load test catalog');
+      Object.defineProperty(document,'visibilityState',{value:'hidden',configurable:true});
+      await act(async()=>document.dispatchEvent(new dom.window.Event('visibilitychange')));
+      assert.doesNotMatch(document.body.textContent,/Synthetic paper/);
+      Object.defineProperty(document,'visibilityState',{value:'visible',configurable:true});
+      await unmount();
+    });
+    await t.test('catalog denies access and ignores a stale in-flight result', async () => {
+      let resolveCatalog;
+      await mount(async url => url.endsWith('get-session') ? json({authenticated:true}) : new Promise(resolve=>{resolveCatalog=resolve;}));
+      const button=[...document.querySelectorAll('button')].find(x=>x.textContent==='Load test catalog');
+      await act(async()=>{button.click();});
+      Object.defineProperty(document,'visibilityState',{value:'hidden',configurable:true});
+      await act(async()=>document.dispatchEvent(new dom.window.Event('visibilitychange')));
+      await act(async()=>resolveCatalog(json({data:{categories:[{id:'123e4567-e89b-42d3-a456-426614174000',name:'Stale data',active:true}],nextAfter:null}})));
+      assert.doesNotMatch(document.body.textContent,/Stale data/);
+      Object.defineProperty(document,'visibilityState',{value:'visible',configurable:true});
+      globalThis.fetch=async()=>json({error:{code:'FORBIDDEN'}},403);
+      await clickButton('Load test catalog'); assert.match(document.body.textContent,/Admin access is required/);
       await unmount();
     });
     await t.test('a still-active session after sign-out is not presented as signed out', async () => {

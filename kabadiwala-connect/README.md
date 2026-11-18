@@ -222,8 +222,9 @@ for profile tests.
 
 ### Catalog and estimate groundwork (development only)
 
-`catalog.ts` is a development storage/math prototype. Direct API admin read and write routes exist, but there is **no web form,
-admin provisioning, or connection to pickup requests**. The migration creates no categories or rates and
+`catalog.ts` is a development storage/math prototype. An admin-only read-only
+web view and direct API read/write routes exist, but there is **no admin write
+form, admin provisioning, or connection to pickup requests**. The migration creates no categories or rates and
 is never run at startup. The internal write methods require a currently active
 admin grant, checked transactionally; callers must supply an actor ID derived
 from a validated server session. There is no admin provisioning mechanism, and no identity/role may be
@@ -240,8 +241,12 @@ time. Pagination does not provide a consistent snapshot: concurrent changes can
 be missed or appear during a scan, so restart inspection if changes are possible.
 Rate times returned are UTC milliseconds, matching the application write format;
 direct SQL writes are outside these assumptions. Read responses use `no-store`.
-There is no web bridge or UI. These listings can assist manual investigation
-but do not prove who caused a matching write.
+The read-only same-origin web bridge and “Test catalog inspection” view expose
+these listings; the button is visible to signed-in users but the API checks the
+active admin grant for every read. A non-admin receives an access-required
+message, not catalog data. The view clears on sign-out and when the tab is
+hidden, but already displayed data can become stale. These listings can assist
+manual investigation but do not prove who caused a matching write.
 
 The development-only API exposes `POST /api/v1/admin/catalog/categories`
 (`{"name":"..."}`) and `POST /api/v1/admin/catalog/categories/:categoryId/rates`
@@ -262,7 +267,7 @@ success record and mutation commit or roll back together. These guarantees assum
 all writers use the adapter, stored retry records remain intact, and clients
 retain their key/payload; there is no UI to retain them across refreshes.
 
-No Next.js bridge or UI exists. These routes do not provision administrators,
+There is no web bridge or UI for writes. These routes do not provision administrators,
 run migrations or populate data. They now require the separately migrated retry
 schema; when it is missing, writes return unavailable rather than falling back
 to unsafe behavior. Read-only listings do not require the retry schema. The

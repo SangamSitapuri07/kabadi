@@ -494,6 +494,8 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       const catalogGet = (path, selectedCookie = cookie) => fetch(apiOrigin+path,{headers:{cookie:selectedCookie,'x-role':'admin'}});
       assert.equal((await catalogGet(catalogPath,'')).status,401);
       assert.equal((await catalogGet(catalogPath)).status,403);
+      assert.equal((await fetch(publicOrigin+catalogPath)).status,401);
+      assert.equal((await fetch(publicOrigin+catalogPath,{headers:{cookie,'x-role':'admin'}})).status,403);
 
       assert.equal((await catalogPost(catalogPath, {name:'Synthetic HTTP'}, cookie, 'https://evil.example')).status, 403);
       const protectedApp = express();
@@ -537,11 +539,21 @@ test('app integration: migration, web bridge and Google-only initiation', { time
         catalogRead=await catalogGet(`${catalogPath}/${catId}/rates`); assert.equal(catalogRead.status,200);
         assert.deepEqual(await catalogRead.json(),{data:{rates:[{id:rateId,effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:123}],nextAfter:null}});
         assert.equal((await catalogGet(`${catalogPath}/${randomUUID()}/rates`)).status,404);
+        const bridged=await fetch(publicOrigin+catalogPath,{headers:{cookie,'x-user-id':'forged','x-role':'admin'}});
+        assert.equal(bridged.status,200); assert.equal(bridged.headers.get('cache-control'),'no-store');
+        assert.deepEqual(await bridged.json(),{data:{categories:[{id:catId,name:'Synthetic HTTP',active:true}],nextAfter:null}});
+        const bridgedRates=await fetch(`${publicOrigin}${catalogPath}/${catId}/rates`,{headers:{cookie}});
+        assert.equal(bridgedRates.status,200);
+        assert.deepEqual(await bridgedRates.json(),{data:{rates:[{id:rateId,effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:123}],nextAfter:null}});
+        assert.equal((await fetch(`${publicOrigin}${catalogPath}?after=bad`,{headers:{cookie}})).status,400);
+        assert.equal((await fetch(`${publicOrigin}${catalogPath}/${randomUUID()}/rates`,{headers:{cookie}})).status,404);
+
 
         await client.query("UPDATE kabadi_authz.accounts SET status='suspended' WHERE user_id=$1",[userId]);
         assert.equal((await catalogPost(catalogPath, {name:'Denied'})).status,403);
         assert.equal((await catalogPost(catalogPath,{name:'Synthetic HTTP'},cookie,publicOrigin,httpKey)).status,403);
         assert.equal((await catalogGet(catalogPath)).status,403);
+        assert.equal((await fetch(publicOrigin+catalogPath,{headers:{cookie}})).status,403);
         await client.query("UPDATE kabadi_authz.accounts SET status='active' WHERE user_id=$1",[userId]);
         await client.query("DELETE FROM kabadi_authz.role_grants WHERE user_id=$1 AND role='admin'",[userId]);
         assert.equal((await catalogPost(`${catalogPath}/${catId}/rates`, {effectiveFrom:'2099-02-01T00:00:00.000Z',paisePerKg:456})).status,403);
@@ -631,7 +643,9 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     const mock = createHttpServer((_req, res) => {
       if (mode === 'error') { res.writeHead(500); res.end('{}'); return; }
       res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'synthetic=refresh; HttpOnly; SameSite=Lax' });
-      const body = mode === 'valid' ? { authenticated: true, token: 'synthetic-secret', user: { name: 'private' } } :
+      const body = mode === 'catalog-rate' ? {data:{rates:[{id:'123e4567-e89b-42d3-a456-426614174001',effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:125,createdBy:'secret'}],nextAfter:null},secret:'hidden'} :
+        mode === 'catalog' ? {data:{categories:[{id:'123e4567-e89b-42d3-a456-426614174000',name:'Mock',active:true,createdBy:'secret'}],nextAfter:null},secret:'hidden'} :
+        mode === 'valid' ? { authenticated: true, token: 'synthetic-secret', user: { name: 'private' } } :
         mode === 'customer' ? { data: { customer: 'ready', userId: 'private' }, token: 'synthetic-secret' } :
         mode === 'details' ? { data: { details: { name: 'Mock', addressLine: 'Example', city: 'Test', state: 'Test', postalCode: '123', userId: 'private' } }, token: 'synthetic-secret' } : { authenticated: 'yes' };
       res.end(JSON.stringify(body));
@@ -650,7 +664,18 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       const projectedDetails = await fetch(publicOrigin + '/api/v1/account/customer/details');
       assert.deepEqual(await projectedDetails.json(), { data: { details: { name: 'Mock', addressLine: 'Example', city: 'Test', state: 'Test', postalCode: '123' } } });
       assert.ok(projectedDetails.headers.getSetCookie().some(value => value.includes('synthetic=refresh')));
+      mode = 'catalog';
+      const catalogProjection = await fetch(publicOrigin+'/api/v1/admin/catalog/categories');
+      assert.deepEqual(await catalogProjection.json(),{data:{categories:[{id:'123e4567-e89b-42d3-a456-426614174000',name:'Mock',active:true}],nextAfter:null}});
+      assert.ok(catalogProjection.headers.getSetCookie().some(value=>value.includes('synthetic=refresh')));
+      assert.equal((await fetch(publicOrigin+'/api/v1/admin/catalog/categories?after=bad')).status,400);
+      assert.equal((await fetch(publicOrigin+'/api/v1/admin/catalog/categories/bad/rates')).status,400);
+      mode='catalog-rate';
+      const mockRate=await fetch(publicOrigin+'/api/v1/admin/catalog/categories/123e4567-e89b-42d3-a456-426614174000/rates?after=123e4567-e89b-42d3-a456-426614174001');
+      assert.deepEqual(await mockRate.json(),{data:{rates:[{id:'123e4567-e89b-42d3-a456-426614174001',effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:125}],nextAfter:null}});
+
       mode = 'invalid';
+      assert.equal((await fetch(publicOrigin + '/api/v1/admin/catalog/categories')).status, 503);
       assert.equal((await fetch(publicOrigin + '/api/v1/account/customer/details')).status, 503);
       assert.equal((await fetch(publicOrigin + '/api/v1/account/customer', { method: 'POST', headers: { origin: publicOrigin, 'content-type': 'application/json' }, body: '{}' })).status, 503);
       assert.equal((await fetch(publicOrigin + '/api/auth/get-session')).status, 503);
