@@ -1,6 +1,29 @@
 import pg from 'pg';
 import { createAuthRuntime, readAuthConfig } from './auth.js';
-import { createRoleAdmin } from './role-admin.js';
+import { createRoleAdmin, normalizeEmail, normalizeReason, normalizeRole, REASONS_MIN } from './role-admin.js';
+
+// Validate arguments before touching the database, and say precisely which one
+// is wrong. A single generic message made a mistyped email look like a schema
+// failure during a real operator session.
+function describeEmailProblem(input: string | undefined): string | null {
+  if (input === undefined) return 'Missing email argument.';
+  if (normalizeEmail(input)) return null;
+  if (/[[\]]|mailto:/i.test(input)) {
+    return 'The email contains bracketed or "mailto:" link formatting. Type the bare address, e.g. "name@example.com".';
+  }
+  return 'The email is not a valid address. Use the bare address, e.g. "name@example.com", with quotes and no extra text.';
+}
+function describeRoleProblem(input: string | undefined): string | null {
+  if (input === undefined) return `Missing role argument. Use one of: customer, collector, admin.`;
+  return normalizeRole(input) ? null : `Invalid role "${input}". Use exactly: customer, collector, or admin.`;
+}
+function describeReasonProblem(input: string | undefined): string | null {
+  if (input === undefined) return 'Missing reason argument. Wrap the reason in quotes.';
+  if (normalizeReason(input)) return null;
+  const length = Array.from(input.trim()).length;
+  if (length < REASONS_MIN) return `The reason is too short (${length} characters; at least ${REASONS_MIN} are required). Wrap it in quotes.`;
+  return 'The reason is too long or contains control characters. Use plain text, 10-200 characters, in quotes.';
+}
 
 // Local operator tool for development role grants. There is no HTTP surface and
 // this script must never run against production data.
@@ -15,8 +38,14 @@ if (NODE_ENV === 'production') {
 }
 const usage = 'Usage: node apps/api/dist/role-admin-cli.js <grant|revoke|list> ... (see README)';
 const [command, ...rest] = process.argv.slice(2);
-if (!['grant', 'revoke', 'list'].includes(command)) {
-  console.error(usage);
+// Arguments are checked before any database connection so a typo is reported as
+// a typo, never as a configuration or schema failure.
+const argumentProblem = !['grant', 'revoke', 'list'].includes(command) ? usage
+  : command === 'list' ? (rest.length === 0 ? null : 'list takes no arguments.')
+  : rest.length !== 3 ? `${command} requires exactly three arguments: <email> <role> "<reason>"`
+  : describeEmailProblem(rest[0]) ?? describeRoleProblem(rest[1]) ?? describeReasonProblem(rest[2]);
+if (argumentProblem) {
+  console.error(argumentProblem);
   process.exitCode = 1;
 } else {
   let auth: ReturnType<typeof createAuthRuntime> | undefined;
@@ -31,7 +60,6 @@ if (!['grant', 'revoke', 'list'].includes(command)) {
     pool.on('error', () => console.error('An idle role-tool connection failed.'));
     const tool = createRoleAdmin(pool);
     if (command === 'list') {
-      if (rest.length !== 0) throw new Error('list takes no arguments');
       const changes = await tool.recentChanges(20);
       console.log(`Active administrators: ${await tool.activeAdminCount()}`);
       if (!changes.length) console.log('No recorded role changes.');
@@ -39,8 +67,7 @@ if (!['grant', 'revoke', 'list'].includes(command)) {
         console.log(`${change.changedAt} ${change.action} ${change.role} ${change.email} — ${change.reason}`);
       }
     } else {
-      if (rest.length !== 3) throw new Error(`${command} requires <email> <role> <reason>`);
-      const [email, role, reason] = rest;
+      const [email, role, reason] = rest as [string, string, string];
       const result = command === 'grant' ? await tool.grant(email, role, reason) : await tool.revoke(email, role, reason);
       switch (result.outcome) {
         case 'changed':
@@ -60,7 +87,10 @@ if (!['grant', 'revoke', 'list'].includes(command)) {
       }
     }
   } catch (error) {
-    console.error('Role tool failed; check development configuration, arguments and schemas.');
+    // Only unexpected outcomes reach here (configuration, schema, database).
+    // Argument problems are reported above with their own message.
+    console.error(`Role tool failed: ${error instanceof Error ? error.message : 'unexpected error'}`);
+    console.error('Check development configuration and schemas.');
     process.exitCode = 1;
   } finally { if (pool) await pool.end(); if (auth) await auth.close(); }
 }

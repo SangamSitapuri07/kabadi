@@ -21,3 +21,21 @@ test('role tool requires a bounded reason so changes are explainable', () => {
   // Reasons are counted in code points, not UTF-16 units.
   assert.equal(normalizeReason('म'.repeat(REASONS_MIN)), 'म'.repeat(REASONS_MIN));
 });
+
+test('role tool explains which argument is wrong instead of one generic message', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const run = (...args) => spawnSync(process.execPath, ['apps/api/dist/role-admin-cli.js', ...args], {
+    encoding: 'utf8', env: { ...process.env, DEV_ROLE_TOOL_CONFIRM: 'yes', NODE_ENV: 'development' }, timeout: 20000,
+  });
+  // The auto-linked form that real terminals produce was the actual failure.
+  const linked = run('grant', '[someone@example.test](mailto:someone@example.test)', 'admin', 'a long enough reason here');
+  assert.equal(linked.status, 1);
+  assert.match(linked.stderr, /bracketed or "mailto:" link formatting/);
+  assert.doesNotMatch(linked.stderr, /schemas/, 'a bad argument must not blame the schema');
+  const bare = run('grant', 'someone@example.test', 'root', 'a long enough reason here');
+  assert.match(bare.stderr, /Invalid role "root"/);
+  const short = run('grant', 'someone@example.test', 'admin', 'short');
+  assert.match(short.stderr, /reason is too short \(5 characters; at least 10 are required\)/);
+  const missing = run('grant', 'someone@example.test');
+  assert.match(missing.stderr, /exactly three arguments/);
+});
