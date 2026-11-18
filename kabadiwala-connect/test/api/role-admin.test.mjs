@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { normalizeEmail, normalizeReason, normalizeRole, REASONS_MAX, REASONS_MIN } from '../../apps/api/dist/role-admin.js';
+import { maskEmail, normalizeEmail, normalizeReason, normalizeRole, REASONS_MAX, REASONS_MIN } from '../../apps/api/dist/role-admin.js';
 
 test('role tool normalizes only unambiguous emails and roles', () => {
   assert.equal(normalizeEmail('  Person@Example.COM '), 'person@example.com');
@@ -31,11 +31,30 @@ test('role tool explains which argument is wrong instead of one generic message'
   const linked = run('grant', '[someone@example.test](mailto:someone@example.test)', 'admin', 'a long enough reason here');
   assert.equal(linked.status, 1);
   assert.match(linked.stderr, /bracketed or "mailto:" link formatting/);
-  assert.doesNotMatch(linked.stderr, /schemas/, 'a bad argument must not blame the schema');
+  assert.doesNotMatch(linked.stderr, /configuration and schemas/, 'a bad argument must not blame the schema');
   const bare = run('grant', 'someone@example.test', 'root', 'a long enough reason here');
   assert.match(bare.stderr, /Invalid role "root"/);
   const short = run('grant', 'someone@example.test', 'admin', 'short');
   assert.match(short.stderr, /reason is too short \(5 characters; at least 10 are required\)/);
   const missing = run('grant', 'someone@example.test');
   assert.match(missing.stderr, /exactly three arguments/);
+});
+
+test('operator listings mask most of each address so a paste cannot disclose it', () => {
+  assert.equal(maskEmail('zwiter4567@gmail.com'), 'z***7@gmail.com');
+  assert.equal(maskEmail('ab@example.test'), 'a***@example.test');
+  assert.equal(maskEmail('no-at-sign'), '***');
+  assert.equal(maskEmail('@example.test'), '***');
+  // The domain stays readable so the operator can tell accounts apart.
+  assert.ok(maskEmail('someone@work.example').endsWith('@work.example'));
+});
+
+test('users command reports a clear message when nothing has signed in', async () => {
+  const { spawnSync } = await import('node:child_process');
+  // No database configured here: the command must fail safe, not print a list.
+  const run = spawnSync(process.execPath, ['apps/api/dist/role-admin-cli.js', 'users', 'extra'], {
+    encoding: 'utf8', env: { ...process.env, DEV_ROLE_TOOL_CONFIRM: 'yes', NODE_ENV: 'development', AUTH_ENABLED: 'false' }, timeout: 20000,
+  });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /users takes no arguments/);
 });

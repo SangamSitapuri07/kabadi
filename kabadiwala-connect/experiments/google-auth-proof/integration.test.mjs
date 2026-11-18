@@ -160,6 +160,16 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(granted.outcome,'changed'); assert.equal(granted.role,'admin');
     assert.deepEqual(await tool.grant(operatorEmail,'admin','repeating a grant is a no-op'),{outcome:'already-granted',userId:operatorUser,role:'admin'});
     assert.equal(await tool.activeAdminCount(),1);
+    // Operator listing: masked addresses, account/role state, no IDs.
+    const listing = await tool.listUsers(50);
+    assert.ok(listing.total >= 1);
+    const operatorRow = listing.users.find(u => u.status === 'active' && u.roles.includes('admin'));
+    assert.equal(listing.users.filter(u => u.email === operatorEmail).length, 0, 'listing must be masked');
+    assert.ok(operatorRow, 'operator must appear in the listing');
+    assert.equal(operatorRow.status,'active');
+    assert.deepEqual(operatorRow.roles,['admin']);
+    assert.ok(!JSON.stringify(listing).includes(operatorUser), 'listing must not expose user IDs');
+    assert.deepEqual((await tool.listUsers(1)).users.length,1, 'limit is respected');
     let changes = await tool.recentChanges(5);
     assert.equal(changes.length,1); assert.equal(changes[0].action,'grant'); assert.equal(changes[0].role,'admin');
     assert.equal(changes[0].email,operatorEmail);

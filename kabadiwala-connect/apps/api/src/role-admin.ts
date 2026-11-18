@@ -29,6 +29,16 @@ export function normalizeEmail(input: unknown): string | null {
   return value;
 }
 
+// Operator-facing listing hides most of the local part so a terminal paste does
+// not disclose full addresses, while still being identifiable to the operator.
+export function maskEmail(email: string): string {
+  const at = email.lastIndexOf('@');
+  if (at < 1) return '***';
+  const local = email.slice(0, at), domain = email.slice(at + 1);
+  if (local.length <= 2) return `${local[0]}***@${domain}`;
+  return `${local[0]}***${local.slice(-1)}@${domain}`;
+}
+
 export function normalizeReason(input: unknown): string | null {
   if (typeof input !== 'string') return null;
   const value = input.trim();
@@ -136,6 +146,23 @@ export function createRoleAdmin(pool: pg.Pool) {
       const email = normalizeEmail(emailInput), role = normalizeRole(roleInput), reason = normalizeReason(reasonInput);
       if (!email || !role || !reason) throw new Error('Invalid revoke arguments');
       return change(email, role, reason, 'revoke');
+    },
+    // Read-only operator aid for finding the identity to grant. The store masks
+    // addresses itself and never returns a user ID, so a caller cannot leak one.
+    async listUsers(limit = 50) {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid limit');
+      const total = await pool.query<{ count: string }>('SELECT count(*)::text AS count FROM "user"');
+      const result = await pool.query<{ email: string; status: string | null; roles: string[] }>(
+        `SELECT u.email, a.status,
+           COALESCE(array_agg(g.role ORDER BY g.role) FILTER (WHERE g.role IS NOT NULL), ARRAY[]::text[]) AS roles
+         FROM "user" u
+         LEFT JOIN kabadi_authz.accounts a ON a.user_id = u.id
+         LEFT JOIN kabadi_authz.role_grants g ON g.user_id = u.id
+         GROUP BY u.id, u.email, a.status ORDER BY u.email LIMIT $1`, [limit]);
+      return {
+        total: Number(total.rows[0]?.count ?? '0'),
+        users: result.rows.map(row => ({ email: maskEmail(row.email), status: row.status, roles: row.roles })),
+      };
     },
     async activeAdminCount(): Promise<number> {
       const result = await pool.query<{ count: string }>(

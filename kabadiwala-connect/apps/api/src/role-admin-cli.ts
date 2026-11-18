@@ -36,12 +36,12 @@ if (NODE_ENV === 'production') {
   console.error('This development role tool refuses to run in production mode.');
   process.exit(1);
 }
-const usage = 'Usage: node apps/api/dist/role-admin-cli.js <grant|revoke|list> ... (see README)';
+const usage = 'Usage: node apps/api/dist/role-admin-cli.js <list|users|grant|revoke> ... (see README)';
 const [command, ...rest] = process.argv.slice(2);
 // Arguments are checked before any database connection so a typo is reported as
 // a typo, never as a configuration or schema failure.
-const argumentProblem = !['grant', 'revoke', 'list'].includes(command) ? usage
-  : command === 'list' ? (rest.length === 0 ? null : 'list takes no arguments.')
+const argumentProblem = !['grant', 'revoke', 'list', 'users'].includes(command) ? usage
+  : (command === 'list' || command === 'users') ? (rest.length === 0 ? null : `${command} takes no arguments.`)
   : rest.length !== 3 ? `${command} requires exactly three arguments: <email> <role> "<reason>"`
   : describeEmailProblem(rest[0]) ?? describeRoleProblem(rest[1]) ?? describeReasonProblem(rest[2]);
 if (argumentProblem) {
@@ -59,7 +59,16 @@ if (argumentProblem) {
     pool = new pg.Pool({ connectionString: config.databaseURL, max: 1, connectionTimeoutMillis: 5000 });
     pool.on('error', () => console.error('An idle role-tool connection failed.'));
     const tool = createRoleAdmin(pool);
-    if (command === 'list') {
+    if (command === 'users') {
+      // Masked output only; never print full addresses or IDs in a terminal.
+      const { total, users } = await tool.listUsers(50);
+      console.log(`Application users: ${total}${total > users.length ? ` (showing first ${users.length})` : ''}`);
+      if (!users.length) console.log('No users have signed in yet.');
+      for (const user of users) {
+        const state = user.status === null ? 'no account (customer setup not completed)' : `${user.status}${user.roles.length ? ` [${user.roles.join(',')}]` : ''}`;
+        console.log(`${user.email} — ${state}`);
+      }
+    } else if (command === 'list') {
       const changes = await tool.recentChanges(20);
       console.log(`Active administrators: ${await tool.activeAdminCount()}`);
       if (!changes.length) console.log('No recorded role changes.');
@@ -69,22 +78,30 @@ if (argumentProblem) {
     } else {
       const [email, role, reason] = rest as [string, string, string];
       const result = command === 'grant' ? await tool.grant(email, role, reason) : await tool.revoke(email, role, reason);
-      switch (result.outcome) {
-        case 'changed':
+      // A resolved account state is a normal answer, not a tool failure: report
+      // it plainly and exit without the schema/configuration hint.
+      const resolvedProblem = result.outcome === 'unknown-user'
+        ? 'No application user exists with that email. Sign in once with that Google account, then retry.'
+        : result.outcome === 'no-account'
+        ? 'That user exists but has no application account yet. Complete "Set up customer account" on the site, then retry.'
+        : result.outcome === 'suspended-account'
+        ? 'That account is suspended; resolve its status before changing roles.'
+        : null;
+      if (resolvedProblem) {
+        console.error(resolvedProblem);
+        process.exitCode = 1;
+      } else if (result.outcome === 'changed' || result.outcome === 'already-granted' || result.outcome === 'already-absent') {
+        if (result.outcome === 'changed') {
           console.log(`${command === 'grant' ? 'Granted' : 'Revoked'} ${result.role} for ${email}.`);
           // A grant/revoke should never be silently ambiguous; state the count.
           console.log(`Active administrators now: ${await tool.activeAdminCount()}`);
-          break;
-        case 'already-granted': console.log(`That account already has ${result.role}; nothing changed.`); break;
-        case 'already-absent': console.log(`That account does not have ${result.role}; nothing changed.`); break;
-        case 'unknown-user': throw new Error('No application user exists with that email. Sign in once first.');
-        case 'no-account': throw new Error('That user has no application account. Use customer setup or a reviewed onboarding flow first.');
-        case 'suspended-account': throw new Error('That account is suspended; resolve the status first.');
-        default: throw new Error('Unexpected result');
-      }
-      if (command === 'revoke' && role === 'admin' && (await tool.activeAdminCount()) === 0) {
-        console.log('Warning: no active administrators remain. Admin routes are now unusable until a grant is restored.');
-      }
+        } else {
+          console.log(`That account ${result.outcome === 'already-granted' ? 'already has' : 'does not have'} ${result.role}; nothing changed.`);
+        }
+        if (command === 'revoke' && role === 'admin' && (await tool.activeAdminCount()) === 0) {
+          console.log('Warning: no active administrators remain. Admin routes are now unusable until a grant is restored.');
+        }
+      } else throw new Error('Unexpected result');
     }
   } catch (error) {
     // Only unexpected outcomes reach here (configuration, schema, database).

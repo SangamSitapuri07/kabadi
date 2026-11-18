@@ -321,7 +321,14 @@ On PowerShell set and later remove the variables with `Remove-Item Env:...`. The
 tool refuses `NODE_ENV=production`, refuses unknown or suspended accounts, does
 not create accounts (the person must have signed in and completed customer
 setup first), requires a 10–200 character reason, and is idempotent for repeat
-grants/revokes. It prints the active-administrator count after each change and
+grants/revokes. Arguments are validated before any database connection, so a
+mistyped email is reported as a formatting problem rather than a schema failure.
+
+Use `list` to see active administrators and recorded changes, and `users` to see
+who has signed in (at most 50, addresses masked by the store itself, no user
+IDs). A user shown as “no account” has signed in but not completed customer
+setup, so a grant will report that instead of changing anything. Neither command
+writes to the database. It prints the active-administrator count after each change and
 warns if a revoke leaves none, because admin routes then become unusable until a
 grant is restored. Do not use real personal emails or record production data
 with this tool; it writes to whatever `DATABASE_URL` points at.
