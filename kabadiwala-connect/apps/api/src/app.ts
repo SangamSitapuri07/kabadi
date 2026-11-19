@@ -20,6 +20,7 @@ type AuthMount = {
     cancel: (userId: string, requestId: string, reason: string | null) => Promise<CancelOutcome | 'forbidden'>;
     raiseDispute: (userId: string, requestId: string, reason: string) => Promise<DisputeOutcome | 'forbidden'>;
   };
+  accountView?: { for: (actorId: string) => Promise<{ roles: string[]; active: boolean }> };
   notifications?: {
     list: (actorId: string) => Promise<{ items: unknown[]; unread: number } | 'forbidden'>;
     markRead: (actorId: string, id: string) => Promise<{ read: true } | 'not-found' | 'forbidden'>;
@@ -447,6 +448,25 @@ export function createApp(auth?: AuthMount) {
       } catch (error) { if (isMissingCollectorColumns(error)) disputeNeedsMigration(res); else disputeUnavailable(res); }
     });
   }
+
+  // ---- Who am I -----------------------------------------------------------
+  // The only endpoint that answers "which panels should this person see". It is
+  // a display hint, never an authorization decision: every other route still
+  // checks the grant it needs, so a tampered answer buys nothing.
+  // Roles decide which panels appear, so a cached answer could show the wrong
+  // set after a grant or revoke. Never cache it.
+  app.use('/api/v1/account/roles', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  app.get('/api/v1/account/roles', async (req, res) => {
+    if (!auth?.resolveIdentity || !auth.accountView) {
+      res.status(503).json({ error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account details are unavailable.' } }); return;
+    }
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const view = await auth.accountView.for(id);
+      const roles = view.roles.filter(r => ['customer', 'collector', 'admin'].includes(r));
+      res.json({ data: { roles, active: view.active === true } });
+    } catch { res.status(503).json({ error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account details are unavailable.' } }); }
+  });
 
   // ---- In-app notifications ---------------------------------------------
   // Every signed-in account reads its own; no role is required, because every

@@ -960,3 +960,60 @@ test('a malformed notification is refused rather than rendered', async () => {
   } finally { await new Promise(resolve=>server.close(resolve)); }
 });
 
+
+test('the roles endpoint reports the caller\'s own grants and nothing else', async () => {
+  const { createAccountViewStore } = await import('../../apps/api/dist/pickups.js');
+  // The store must ask about one account, and must not invent a role it did not
+  // get from a grant. Unknown values are dropped rather than passed on.
+  const seen = [];
+  const pool = { query: async (sql, params) => {
+    seen.push({ text: String(sql).replace(/\s+/g,' ').trim(), params });
+    return { rows: [{ status: 'active', roles: ['admin', 'collector', 'customer'] }] };
+  } };
+  const view = await createAccountViewStore(pool).for('user-1');
+  assert.deepEqual(view, { roles: ['admin','collector','customer'], active: true });
+  assert.deepEqual(seen[0].params, ['user-1'], 'scoped to the caller');
+  assert.match(seen[0].text, /WHERE a\.user_id = \$1/);
+
+  // A signed-in person with no application account is not an account holder.
+  const none = { query: async () => ({ rows: [] }) };
+  assert.deepEqual(await createAccountViewStore(none).for('user-2'), { roles: [], active: false });
+
+  // A suspended account keeps its roles but is reported inactive, so a UI can
+  // avoid presenting tools the routes would refuse anyway.
+  const suspended = { query: async () => ({ rows: [{ status: 'suspended', roles: ['admin'] }] }) };
+  assert.deepEqual(await createAccountViewStore(suspended).for('user-3'), { roles: ['admin'], active: false });
+
+  // An unrecognised role never reaches the browser.
+  const odd = { query: async () => ({ rows: [{ status: 'active', roles: ['admin', 'superuser'] }] }) };
+  assert.deepEqual((await createAccountViewStore(odd).for('user-4')).roles, ['admin']);
+});
+
+test('the roles route requires sign-in and refuses to be a general account dump', async () => {
+  let called = 0;
+  const auth = { origin:'http://localhost:3000', handler:async()=>{},
+    resolveIdentity:async()=>({userId:'user-1',cookies:[]}),
+    accountView:{ for:async(id)=>{ called++; return id === 'user-1' ? { roles:['customer'], active:true } : { roles:[], active:false }; } } };
+  const server = createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    let response = await fetch(`${base}/api/v1/account/roles`, { headers: { origin:'http://localhost:3000' } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    // The identity is derived from the session; no account id is accepted from
+    // the caller, so this cannot be turned into a lookup for somebody else.
+    assert.deepEqual(await response.json(), { data: { roles: ['customer'], active: true } });
+    assert.equal(called, 1);
+    response = await fetch(`${base}/api/v1/account/roles?userId=user-9`, { headers: { origin:'http://localhost:3000' } });
+    assert.equal((await response.json()).data.roles.length, 0 + 1, 'a query parameter cannot select another account');
+
+    // Not signed in: the route must fail closed rather than answer anonymously.
+    const anonymous = { ...auth, resolveIdentity: async () => { throw new Error('no session'); } };
+    const other = createApp(anonymous).listen(0,'127.0.0.1'); await once(other,'listening');
+    try {
+      const denied = await fetch(`http://127.0.0.1:${other.address().port}/api/v1/account/roles`,
+        { headers: { origin:'http://localhost:3000' } });
+      assert.ok(denied.status >= 400, 'anonymous access must not return roles');
+    } finally { await new Promise(resolve=>other.close(resolve)); }
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});

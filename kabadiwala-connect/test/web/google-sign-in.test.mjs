@@ -76,6 +76,10 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     globalThis.fetch = mockFetch;
     root = createRoot(document.getElementById('root'));
     await act(async () => { root.render(React.createElement(GoogleSignIn)); });
+    // The session check and the role read are both async, and which panels exist
+    // depends on the second. Settle them here so every test starts from a loaded
+    // screen rather than a "Loading your account" one.
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   };
   const unmount = async () => { await act(async () => root.unmount()); root = undefined; };
   const click = async () => { await act(async () => { document.querySelector('button').click(); }); };
@@ -84,10 +88,14 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     assert.ok(button, `button not found: ${text}`);
     await act(async () => { button.click(); });
   };
+  // The panel list depends on an async role read, so a test that asserts on a
+  // panel must first let the pending fetches settle.
+  const settle = async () => { await act(async () => { await new Promise(r => setTimeout(r, 0)); }); };
   try {
     await t.test('signed-out state and rejected unexpected sign-in redirect', async () => {
       const requests = [];
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         requests.push([url, init]);
         return url.endsWith('get-session') ? json({ authenticated: false }) : json({ url: 'https://evil.example/' });
       });
@@ -102,6 +110,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     await t.test('signed-in state and confirmed sign-out', async () => {
       let session = true;
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('sign-out')) {
           assert.equal(init.method, 'POST'); assert.equal(init.body, '{}'); session = false; return json({ success: true });
         }
@@ -134,6 +143,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     await t.test('customer setup posts no identity or role and clears after sign-out', async () => {
       let session = true, calls = 0;
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('/account/customer')) {
           calls++; assert.equal(init.method, 'POST'); assert.equal(init.body, '{}');
           assert.equal(init.headers['Content-Type'], 'application/json');
@@ -153,7 +163,9 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     });
     await t.test('customer setup errors fail closed and can be retried', async () => {
       let result = json({ error: { code: 'ACCOUNT_UNAVAILABLE' } }, 503);
-      await mount(async url => url.endsWith('/account/customer') ? result : json({ authenticated: true }));
+      await mount(async url =>
+        url.endsWith('/account/roles') ? json({ data: { roles: ['customer'], active: true } })
+        : url.endsWith('/account/customer') ? result : json({ authenticated: true }));
       await clickButton('Set up customer account');
       assert.match(document.querySelector('[role="alert"]').textContent, /could not be confirmed/i);
       assert.doesNotMatch(document.body.textContent, /Customer setup completed/);
@@ -178,6 +190,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     });
     await t.test('interrupted customer setup does not claim a result', async () => {
       await mount(async url => {
+        if (url.endsWith('/account/roles')) return json({ data: { roles: ['customer'], active: true } });
         if (url.endsWith('/account/customer')) throw new Error('synthetic network failure');
         return json({ authenticated: true });
       });
@@ -189,7 +202,9 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     });
     await t.test('expired session requires a fresh sign-in check', async () => {
       let signedIn = true;
-      await mount(async url => url.endsWith('/account/customer') ? json({ error: { code: 'SIGN_IN_REQUIRED' } }, 401) : json({ authenticated: signedIn }));
+      await mount(async url =>
+        url.endsWith('/account/roles') ? json({ data: { roles: ['customer'], active: true } })
+        : url.endsWith('/account/customer') ? json({ error: { code: 'SIGN_IN_REQUIRED' } }, 401) : json({ authenticated: signedIn }));
       await clickButton('Set up customer account');
       assert.match(document.body.textContent, /sign-in could not be confirmed/i);
       assert.doesNotMatch(document.body.textContent, /Customer setup completed/);
@@ -201,7 +216,9 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     await t.test('hiding the tab discards an in-flight customer setup result', async () => {
       let finish;
       const pending = new Promise(resolve => { finish = resolve; });
-      await mount(async url => url.endsWith('/account/customer') ? pending : json({ authenticated: true }));
+      await mount(async url =>
+        url.endsWith('/account/roles') ? json({ data: { roles: ['customer'], active: true } })
+        : url.endsWith('/account/customer') ? pending : json({ authenticated: true }));
       const button = [...document.querySelectorAll('button')].find(item => item.textContent === 'Set up customer account');
       await act(async () => { button.click(); });
       assert.ok([...document.querySelectorAll('button')].every(item => item.disabled));
@@ -216,6 +233,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       let session = true, saved;
       const profile = { name: 'Sample', addressLine: '12 Example', city: 'Ludhiana', state: 'Punjab', postalCode: '141001' };
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('/account/customer/details')) {
           if (init?.method === 'PUT') { saved = JSON.parse(init.body); return json({ data: { saved: true } }); }
           return json({ data: { details: profile } });
@@ -240,6 +258,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       let mode = 'bad'; let finish;
       const pending = new Promise(resolve => { finish = resolve; });
       await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('/account/customer/details')) return mode === 'bad' ? json({ data: { details: { name: 'Incomplete' } } }) : pending;
         if (url.endsWith('/account/customer')) return json({ data: { customer: 'ready' } });
         return json({ authenticated: true });
@@ -260,6 +279,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     await t.test('profile save failure and expired session fail closed', async () => {
       let mode = 'save-fail';
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('/account/customer/details')) {
           if (init?.method === 'PUT') return mode === 'save-fail' ? json({ error: { code: 'DETAILS_UNAVAILABLE' } }, 503) : json({ error: { code: 'SIGN_IN_REQUIRED' } }, 401);
           return json({ data: { details: { name: 'Sample', addressLine: 'Example', city: 'Ludhiana', state: 'Punjab', postalCode: '141001' } } });
@@ -282,6 +302,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       const categoryId='123e4567-e89b-42d3-a456-426614174030', rateId='123e4567-e89b-42d3-a456-426614174031';
       const estimate = {categoryId, categoryName:'Synthetic paper', rateId, paisePerKg:3245, amountPaise:'8113'};
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.endsWith('/customer/pickups')) {
           if (init?.method === 'POST') {
@@ -327,6 +348,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     });
     await t.test('test pickup explains a missing rate instead of inventing a price', async () => {
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.endsWith('/customer/pickups') && init?.method === 'POST') return json({error:{code:'NO_RATE'}},409);
         return json({authenticated:true});
@@ -346,7 +368,9 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       const category='123e4567-e89b-42d3-a456-426614174000', rate='123e4567-e89b-42d3-a456-426614174001';
       const paths=[];
       await mount(async (url,init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         paths.push(url);
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         assert.equal(init.cache,'no-store');
         if (url.endsWith('/rates')) return json({data:{rates:[{id:rate,effectiveFrom:'2099-01-01T00:00:00.000Z',paisePerKg:125}],nextAfter:null}});
@@ -372,6 +396,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     await t.test('a rate already in force is labelled as in force', async () => {
       const category='123e4567-e89b-42d3-a456-426614174060', rate='123e4567-e89b-42d3-a456-426614174061';
       await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/rates')) return json({data:{rates:[{id:rate,effectiveFrom:'2020-01-01T00:00:00.000Z',paisePerKg:3245}],nextAfter:null}});
         return json({data:{categories:[{id:category,name:'Live paper',active:true}],nextAfter:null}});
@@ -389,6 +414,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       const writes=[];
       let failOnce=true;
       await mount(async (url,init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (init?.method==='POST') {
           writes.push({url,headers:init.headers,body:JSON.parse(init.body)});
@@ -432,6 +458,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       const category='123e4567-e89b-42d3-a456-426614174020';
       const writes=[];
       await mount(async (url,init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (init?.method==='POST') { writes.push(JSON.parse(init.body)); return json({data:{id:category}},201); }
         if (url.endsWith('/rates')) return json({data:{rates:[],nextAfter:null}});
@@ -460,6 +487,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       const category='123e4567-e89b-42d3-a456-426614174021';
       const writes=[];
       await mount(async (url,init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (init?.method==='POST') { writes.push(JSON.parse(init.body)); return json({error:{code:'INVALID_RATE_TIME'}},409); }
         if (url.endsWith('/rates')) return json({data:{rates:[],nextAfter:null}});
@@ -486,6 +514,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     await t.test('admin catalog form never claims success on denial and rejects bad input locally', async () => {
       const posted=[];
       await mount(async (url,init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (init?.method==='POST') { posted.push({body:init.body,key:init.headers['Idempotency-Key']}); return json({error:{code:'FORBIDDEN'}},403); }
         return json({data:{categories:[],nextAfter:null}});
@@ -510,6 +539,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       let finish;
       const pending=new Promise(resolve=>{finish=resolve;});
       await mount(async (url,init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (init?.method==='POST') return pending;
         return json({data:{categories:[],nextAfter:null}});
@@ -528,7 +558,9 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     });
     await t.test('catalog denies access and ignores a stale in-flight result', async () => {
       let resolveCatalog;
-      await mount(async url => url.endsWith('get-session') ? json({authenticated:true}) : new Promise(resolve=>{resolveCatalog=resolve;}));
+      await mount(async url =>
+        url.endsWith('/account/roles') ? json({data:{roles:['admin'], active:true}})
+        : url.endsWith('get-session') ? json({authenticated:true}) : new Promise(resolve=>{resolveCatalog=resolve;}));
       const button=[...document.querySelectorAll('button')].find(x=>x.textContent==='Load test catalog');
       await act(async()=>{button.click();});
       Object.defineProperty(document,'visibilityState',{value:'hidden',configurable:true});
@@ -551,6 +583,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         finalAmountPaise:'7590', collectedAt:'2026-11-20T10:00:00.000Z' };
       let mine=[accepted], posts=[];
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.includes('/collector/pickups?view=')) return json({data:{pickups: url.includes('view=mine') ? mine : [open]}});
         if (url.endsWith('/collect')) { posts.push(JSON.parse(init.body)); mine=[collected]; return json({data:{collected:true, actualGrams:2300,
@@ -587,6 +620,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null };
       let posts=0;
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.includes('/collector/pickups?view=')) return json({data:{pickups:[row]}});
         if (init?.method === 'POST') { posts++; return json({error:{code:url.endsWith('/collect')?'ALREADY_COLLECTED':'ALREADY_ACCEPTED'}},409); }
@@ -617,6 +651,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       const estimate={categoryId:'123e4567-e89b-42d3-a456-426614174110', categoryName:'Synthetic paper',
         rateId:'123e4567-e89b-42d3-a456-426614174111', paisePerKg:3245, amountPaise:'8113'};
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.endsWith('/customer/pickups') && !init?.method) return json({data:{pickups:[
           { id:'123e4567-e89b-42d3-a456-426614174112', status:'collected', createdAt:'2026-11-18T17:00:00.000Z',
@@ -638,6 +673,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     });
     await t.test('a schema-behind database tells the operator to migrate', async () => {
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.includes('/collector/pickups?view=')) return json({error:{code:'PICKUP_SCHEMA_OUTDATED'}},503);
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
@@ -664,6 +700,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       const cancelled={ ...row, status:'cancelled', cancelledAt:'2026-11-21T09:00:00.000Z', cancellationReason:'Changed my mind' };
       let posts=[], rows=[row];
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.includes('/cancel')) {
@@ -703,6 +740,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         cancelledAt:null, cancellationReason:null, releasedAt:null };
       let cancelCalls=0;
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.includes('/cancel')) { cancelCalls++; return json({error:{code:'ALREADY_COLLECTED'}},409); }
@@ -728,6 +766,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         collectedAt:null, cancelledAt:null, cancellationReason:null, releasedAt:null };
       let posts=[], mine=[{...base, status:'accepted'}];
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.includes('/collector/pickups?view=')) return json({data:{pickups: url.includes('view=mine') ? mine : [{...base, status:'requested'}]}});
         if (url.endsWith('/release')) {
@@ -756,6 +795,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         amountPaise:'8113', actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null,
         collectedAt:null, cancelledAt:null, cancellationReason:null, releasedAt:null };
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.includes('/collector/pickups?view=')) return json({data:{pickups:[row]}});
         if (url.endsWith('/accept')) return json({error:{code:'OWN_REQUEST'}},409);
@@ -780,6 +820,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         reason:'It weighed closer to 2 kg', resolvedAt:null } };
       let posts=[], rows=[settled];
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.includes('/dispute')) {
@@ -818,6 +859,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         dispute:{ reason:'It weighed closer to 2 kg', raisedAt:'2026-11-21T08:00:00.000Z' } };
       let posts=[];
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.includes('/admin/disputes/')) {
           posts.push([url, JSON.parse(init.body ?? '{}')]);
@@ -842,12 +884,90 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.match(section.textContent,/Corrected 2000 g, final amount ₹64\.90 at ₹32\.45\/kg/);
       await unmount();
     });
+    await t.test('an admin sees the admin panels and no customer setup', async () => {
+      await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['admin'], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        return json({authenticated:true});
+      });
+      const text=document.body.textContent;
+      assert.match(text,/Collector payouts due/);
+      assert.match(text,/Disputed amounts/);
+      // Admin-only panels present; the customer and collector panels are not.
+      assert.doesNotMatch(text,/Set up a customer account/);
+      assert.doesNotMatch(text,/Collector queue/);
+      await unmount();
+    });
+    await t.test('a customer sees the customer panel and no admin tools', async () => {
+      await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer'], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        return json({authenticated:true});
+      });
+      const text=document.body.textContent;
+      assert.match(text,/Set up a customer account/);
+      // This is the point of the change: no admin panel that answers 403.
+      assert.doesNotMatch(text,/Collector payouts due/);
+      assert.doesNotMatch(text,/Disputed amounts/);
+      assert.doesNotMatch(text,/Collector queue/);
+      // The inbox is universal: every role receives notifications.
+      assert.match(text,/Your notifications/);
+      await unmount();
+    });
+    await t.test('a collector sees the queue and neither customer setup nor admin tools', async () => {
+      await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['collector'], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        return json({authenticated:true});
+      });
+      const text=document.body.textContent;
+      assert.match(text,/Collector queue/);
+      assert.doesNotMatch(text,/Collector payouts due/);
+      assert.doesNotMatch(text,/Set up a customer account/);
+      await unmount();
+    });
+    await t.test('an account with no roles is told so and shown nothing else', async () => {
+      await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:[], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        return json({authenticated:true});
+      });
+      const text=document.body.textContent;
+      assert.match(text,/no roles yet/);
+      assert.doesNotMatch(text,/Collector payouts due|Disputed amounts|Collector queue|Set up a customer account/);
+      await unmount();
+    });
+    await t.test('an unreadable role list hides every panel instead of guessing', async () => {
+      // The safe direction: a failed read must not fall back to showing admin
+      // tools to whoever is signed in.
+      await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({ error: { code: 'ACCOUNT_UNAVAILABLE' } }, 503);
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        return json({authenticated:true});
+      });
+      const text=document.body.textContent;
+      assert.doesNotMatch(text,/Collector payouts due|Disputed amounts|Collector queue|Set up a customer account/);
+      assert.match(text,/no roles yet/);
+      await unmount();
+    });
+    await t.test('unknown role values from the API are dropped, not rendered', async () => {
+      await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['admin','superuser','customer'], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        return json({authenticated:true});
+      });
+      const text=document.body.textContent;
+      assert.match(text,/Collector payouts due/);
+      assert.match(text,/Set up a customer account/);
+      await unmount();
+    });
     await t.test('the payout screen states the real delivery fact without needing a click', async () => {
       // Regression: this panel used to say "Recording a payout notifies nobody"
       // until Load was pressed, which was false once in-app notifications
       // existed. The mount-time prefetch fixes that, so the fact is on screen
       // with no interaction at all.
       await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/admin/payouts')) return json({data:{dues:[],
           payment:{configured:false,name:null,methods:['cash','transfer','adjustment']},
@@ -867,6 +987,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       // The fallback direction matters: an unreadable fact must not become the
       // reassuring claim.
       await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/admin/payouts')) return json({error:{code:'PAYOUT_UNAVAILABLE'}}, 503);
         return json({authenticated:true});
@@ -886,6 +1007,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'} };
       let posts=[], rows=[row];
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.includes('/admin/payouts/')) {
           posts.push([url, JSON.parse(init.body ?? '{}')]);
@@ -919,6 +1041,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         amountPaise:'8113', actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null,
         collectedAt:null, cancelledAt:null, cancellationReason:null, releasedAt:null, dispute:null, payout:null };
       await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.endsWith('/customer/pickups')) return json({data:{pickups:[row],
@@ -936,6 +1059,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     await t.test('a claim of external delivery is not trusted', async () => {
       // The server must never be able to talk this build into promising an email.
       await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.endsWith('/customer/pickups')) return json({data:{pickups:[],
@@ -954,6 +1078,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         detail:'2300 g at 3245 paise/kg = 7464 paise', createdAt:'2026-11-20T10:00:00.000Z', readAt:null };
       let posts=[], rows=[row];
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/notifications')) return json({data:{notifications:rows, unread:1,
           delivery:{inApp:true, external:[]}}});
@@ -980,6 +1105,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
     });
     await t.test('the inbox says delivery is in-app only, not that a message was sent', async () => {
       await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/notifications')) return json({data:{notifications:[], unread:0,
           delivery:{inApp:true, external:[]}}});
@@ -999,6 +1125,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'} };
       let posted=null;
       await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/admin/payouts')) return json({data:{dues:[row],
           payment:{ configured:false, name:null, methods:['cash','transfer','adjustment'] }}});
@@ -1022,6 +1149,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       // A malformed or absent payment block must fall back to "no provider",
       // never to a reassuring one.
       await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/admin/payouts')) return json({data:{dues:[], payment:{ configured:'yes', name:'' }}});
         return json({authenticated:true});
@@ -1043,6 +1171,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         cancelledAt:null, cancellationReason:null, releasedAt:null, dispute:null,
         payout:{ amountPaise:'7464', paidAt:'2026-11-22T09:00:00.000Z' } };
       await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','admin'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.endsWith('/customer/pickups')) return json({data:{pickups:[settled]}});

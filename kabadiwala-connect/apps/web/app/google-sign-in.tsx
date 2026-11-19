@@ -42,6 +42,11 @@ export function GoogleSignIn() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [details, setDetails] = useState<Details>(blankDetails);
   const [profileMessage, setProfileMessage] = useState('');
+  // Which panels to show. `null` means "not answered yet": no panel is shown on
+  // an assumption, and a failed read leaves every panel hidden rather than
+  // showing admin tools to whoever happens to be signed in. Nothing here is an
+  // authorization decision -- every route still checks its own grant.
+  const [roles, setRoles] = useState<string[] | null>(null);
   function clearProfile() { setProfileOpen(false); setDetails(blankDetails()); setProfileMessage(''); }
 
   // Another tab may change the session. Discard a previous result and ignore
@@ -68,6 +73,24 @@ export function GoogleSignIn() {
     return () => controller.abort();
   }, []);
 
+  async function loadRoles() {
+    try {
+      const response = await fetch('/api/v1/account/roles', { cache: 'no-store', signal: AbortSignal.timeout(10000) });
+      if (!response.ok) { setRoles([]); return; }
+      const json = await response.json();
+      const reported = json?.data?.roles;
+      setRoles(Array.isArray(reported)
+        ? reported.filter((r: unknown) => typeof r === 'string' && ['customer', 'collector', 'admin'].includes(r))
+        : []);
+    } catch { setRoles([]); }
+  }
+  // Re-read on every sign-in, and forget on sign-out: a stale list must never
+  // outlive the session it described.
+  useEffect(() => {
+    if (status === 'signed-in') void loadRoles();
+    else if (status === 'signed-out') setRoles(null);
+  }, [status]);
+
   async function retrySession() {
     setStatus('checking');
     setError('');
@@ -76,6 +99,7 @@ export function GoogleSignIn() {
     clearProfile();
     try { setStatus(await getSession() ? 'signed-in' : 'signed-out'); }
     catch { setStatus('unavailable'); }
+    setRoles(null);
   }
 
   async function signIn() {
@@ -200,7 +224,11 @@ export function GoogleSignIn() {
     {status === 'signed-out' && <button type="button" onClick={signIn} disabled={busy !== null}>{busy === 'sign-in' ? 'Opening Google…' : 'Continue with Google'}</button>}
     {status === 'signed-in' && <>
       <button type="button" onClick={signOut} disabled={busy !== null}>{busy === 'sign-out' ? 'Signing out…' : 'Sign out'}</button>
-      <div className="customer-setup">
+      {roles === null && <p className="auth-status">Loading your account…</p>}
+      {roles !== null && roles.length === 0 && <p className="auth-status">
+        This account has no roles yet, so there is nothing to show here. An administrator can grant a role.
+      </p>}
+      {roles?.includes('customer') && <div className="customer-setup">
         <p>Set up a customer account to prepare for future pickup requests.</p>
         <button type="button" onClick={setupCustomer} disabled={busy !== null}>{busy === 'customer-setup' ? 'Setting up…' : 'Set up customer account'}</button>
         <div role="status" aria-live="polite">{customerSetup === 'completed' && <p>Customer setup completed for this sign-in.</p>}</div>
@@ -216,12 +244,17 @@ export function GoogleSignIn() {
           <p role="status" aria-live="polite">{profileMessage}</p>
         </form>}
         {customerSetup === 'completed' && <TestPickups />}
-      </div>
+      </div>}
+      {/* A collector sees the open queue and their own claims. */}
+      {busy !== 'sign-out' && roles?.includes('collector') && <CollectorQueue disabled={busy !== null} />}
+      {/* Admin tools only for admins. The catalogue is read/write for admins and
+          read-only for everyone else, so it stays visible to all signed-in
+          accounts, as before. */}
       {busy !== 'sign-out' && <CatalogViewer disabled={busy !== null} />}
-      {busy !== 'sign-out' && <CollectorQueue disabled={busy !== null} />}
-      {busy !== 'sign-out' && <DisputeAdmin disabled={busy !== null} />}
-      {busy !== 'sign-out' && <PayoutAdmin disabled={busy !== null} />}
-      {busy !== 'sign-out' && <NotificationInbox disabled={busy !== null} />}
+      {busy !== 'sign-out' && roles?.includes('admin') && <DisputeAdmin disabled={busy !== null} />}
+      {busy !== 'sign-out' && roles?.includes('admin') && <PayoutAdmin disabled={busy !== null} />}
+      {/* Everyone has an inbox; it is the only panel that is universal. */}
+      {busy !== 'sign-out' && roles !== null && <NotificationInbox disabled={busy !== null} />}
     </>}
     {status === 'unavailable' && <button type="button" onClick={retrySession}>Try again</button>}
     <p className="auth-note">Development only. Sign-in and security are not ready for production.</p>

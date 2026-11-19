@@ -1028,3 +1028,28 @@ export function createCollectorStore(pool: pg.Pool) {
     },
   };
 }
+
+// What the signed-in account may see. This is a UI concern only: every route
+// re-checks authorization server-side, so a browser that lied about its roles
+// would gain nothing but a screen full of 403s. Keeping the answer here means
+// the panels a person sees match the grants the other stores actually enforce.
+export type AccountView = { roles: string[]; active: boolean };
+export function createAccountViewStore(pool: pg.Pool) {
+  return {
+    async for(userId: string): Promise<AccountView> {
+      if (typeof userId !== 'string' || !userId.trim()) throw Error('Invalid identity');
+      const result = await pool.query<{ status: string; roles: string[] }>(
+        `SELECT a.status, COALESCE(array_agg(g.role ORDER BY g.role) FILTER (WHERE g.role IS NOT NULL), '{}') AS roles
+         FROM kabadi_authz.accounts a
+         LEFT JOIN kabadi_authz.role_grants g ON g.user_id = a.user_id
+         WHERE a.user_id = $1
+         GROUP BY a.status`, [userId]);
+      const row = result.rows[0];
+      // A signed-in person with no application account yet is neither customer
+      // nor collector: they get an empty role list and still count as signed in.
+      if (!row) return { roles: [], active: false };
+      const roles = row.roles.filter(r => ['customer', 'collector', 'admin'].includes(r));
+      return { roles, active: row.status === 'active' };
+    },
+  };
+}
