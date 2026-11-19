@@ -51,6 +51,12 @@ const disputeCompiled = babel.transformSync(await readFile('apps/web/app/dispute
   plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
 });
 await writeFile(join(temp,'dispute-admin.js'),disputeCompiled.code);
+const payoutCompiled = babel.transformSync(await readFile('apps/web/app/payout-admin.tsx','utf8'), {
+  filename:'payout-admin.tsx',babelrc:false,configFile:false,
+  presets:[[require('next/dist/compiled/babel/preset-typescript'),{allExtensions:true,isTSX:true}],[require('next/dist/compiled/babel/preset-react'),{runtime:'automatic'}]],
+  plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
+});
+await writeFile(join(temp,'payout-admin.js'),payoutCompiled.code);
 const { GoogleSignIn } = createRequire(modulePath)(modulePath);
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 
@@ -828,6 +834,62 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.ok(posts[0][0].endsWith(`/${requestId}/resolve`));
       assert.deepEqual(posts[0][1], { correctedGrams:2000 });
       assert.match(section.textContent,/Corrected 2000 g, final amount ₹64\.90 at ₹32\.45\/kg/);
+      await unmount();
+    });
+    await t.test('admin records a payout and the browser never supplies the amount', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174170';
+      const row={ id:requestId, categoryName:'Synthetic paper', estimatedGrams:2500, actualGrams:2000,
+        finalPaisePerKg:3245, amountPaise:'6490', collectedAt:'2026-11-20T10:00:00.000Z',
+        address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'} };
+      let posts=[], rows=[row];
+      await mount(async (url, init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.includes('/admin/payouts/')) {
+          posts.push([url, JSON.parse(init.body ?? '{}')]);
+          rows=[];  // paid requests leave the queue
+          return json({data:{paid:true, amountPaise:'6490', method:'cash'}});
+        }
+        if (url.endsWith('/admin/payouts')) return json({data:{dues:rows}});
+        return json({authenticated:true});
+      });
+      globalThis.confirm=()=>true;
+      await clickButton('Load unpaid dues');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector payouts due'));
+      assert.match(section.textContent,/2000 g at ₹32\.45\/kg/);
+      assert.match(section.textContent,/Amount due: ₹64\.90/);
+      await act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Record this payout').click();});
+      // Only the method is sent. No amount, no collector, no timestamp.
+      assert.equal(posts.length,1);
+      assert.ok(posts[0][0].endsWith(`/${requestId}/pay`));
+      assert.deepEqual(posts[0][1], { method:'cash' });
+      assert.match(section.textContent,/Payout recorded: ₹64\.90 by cash/);
+      assert.match(section.textContent,/No money was moved by this application/);
+      assert.match(section.textContent,/No unpaid dues/);
+      await unmount();
+    });
+    await t.test('a paid request shows the customer a receipt without the payment method', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174171';
+      const address={name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'};
+      const settled={ id:requestId, status:'collected', createdAt:'2026-11-18T17:00:00.000Z', address,
+        estimatedGrams:2500, material:null, categoryId:'123e4567-e89b-42d3-a456-426614174172',
+        categoryName:'Synthetic paper', rateId:'123e4567-e89b-42d3-a456-426614174173', paisePerKg:3245,
+        amountPaise:'8113', actualGrams:2300, finalRateId:'123e4567-e89b-42d3-a456-426614174174',
+        finalPaisePerKg:3245, finalAmountPaise:'7464', collectedAt:'2026-11-20T10:00:00.000Z',
+        cancelledAt:null, cancellationReason:null, releasedAt:null, dispute:null,
+        payout:{ amountPaise:'7464', paidAt:'2026-11-22T09:00:00.000Z' } };
+      await mount(async (url) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
+        if (url.endsWith('/customer/pickups')) return json({data:{pickups:[settled]}});
+        return json({authenticated:true});
+      });
+      await clickButton('Set up customer account');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Test pickup requests'));
+      await act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Load my test requests').click();});
+      assert.match(section.textContent,/Payment recorded: ₹74\.64/);
+      // How the collector was paid is between them and the admin.
+      assert.doesNotMatch(section.textContent,/cash/i);
+      assert.doesNotMatch(section.textContent,/adjustment/i);
       await unmount();
     });
     await t.test('a still-active session after sign-out is not presented as signed out', async () => {

@@ -56,12 +56,22 @@ export type Pickup = {
   dispute:
     | { status: 'open' | 'rejected' | 'resolved'; raisedAt: string; reason: string; resolvedAt: string | null }
     | null;
+  // What the collector was actually paid, if anything. Null means unpaid; the
+  // ledger is the source of truth and this is its read-only projection.
+  payout: { amountPaise: string; method: 'cash' | 'transfer' | 'adjustment'; paidAt: string } | null;
 };
 // Cancelling is the customer's own decision on their own row. A collected or
 // already-cancelled request is terminal and cannot be cancelled again.
 // A dispute never edits the settlement in place. An admin resolves it by
 // replacing the measured weight, which re-prices at the rate frozen at
 // collection time, and the previous settlement is kept in history.
+// Recording a payment is an admin action. It is deliberately separate from
+// collection: deciding the amount and moving the money are different acts by
+// different people, and the ledger records who did the second one.
+export type PayoutOutcome =
+  | { outcome: 'paid'; amountPaise: string; method: string }
+  | { outcome: 'not-found' | 'not-collected' | 'already-paid' | 'disputed' };
+
 export type DisputeOutcome =
   | { outcome: 'raised' }
   | { outcome: 'rejected' }
@@ -92,7 +102,7 @@ export function parsePickup(input: unknown): PickupInput | null {
 // place, keeping existing free-text requests valid. Never run at startup.
 export type PickupMigrationReport = {
   action: 'created' | 'upgraded' | 'unchanged';
-  schemaVersion: 5;
+  schemaVersion: 6;
   fromVersion: number;
   // Requests created before pricing existed. They survive untouched but carry
   // no estimate, so the operator must know how many there are.
@@ -117,7 +127,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       const marker = await c.query<{ marker: string | null }>("SELECT to_regclass('kabadi_pickup.schema_version')::text AS marker");
       if (!marker.rows[0]?.marker) throw Error('Unrecognized pickup schema');
       const versions = await c.query<{ version: number }>('SELECT version FROM kabadi_pickup.schema_version');
-      if (versions.rows.length !== 1 || ![1, 2, 3, 4, 5].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
+      if (versions.rows.length !== 1 || ![1, 2, 3, 4, 5, 6].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
       currentVersion = versions.rows[0]!.version;
     }
     // Remember where we started so the report can describe the real change
@@ -125,7 +135,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
     const startingVersion = currentVersion;
     if (currentVersion === 0) {
       await c.query('CREATE SCHEMA kabadi_pickup');
-      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 5))');
+      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 6))');
       await c.query(`CREATE TABLE kabadi_pickup.requests (
         id uuid PRIMARY KEY, user_id text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
         request_key uuid NOT NULL, material text CHECK (material IS NULL OR char_length(material) BETWEEN 1 AND 100),
@@ -173,10 +183,23 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
           OR (category_id IS NOT NULL AND category_name IS NOT NULL AND rate_id IS NOT NULL AND paise_per_kg IS NOT NULL AND amount_paise IS NOT NULL AND material IS NULL)
         )
       )`);
+      await c.query(`CREATE TABLE kabadi_pickup.payouts (
+        -- One payout per request, ever. A second payment needs a new request, not
+        -- an edit of this row: an amount that has been paid must never move.
+        request_id uuid PRIMARY KEY REFERENCES kabadi_pickup.requests(id) ON DELETE RESTRICT,
+        collector_id text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
+        amount_paise bigint NOT NULL CHECK (amount_paise >= 0),
+        method text NOT NULL CHECK (method IN ('cash','transfer','adjustment')),
+        reference text CHECK (reference IS NULL OR char_length(reference) BETWEEN 1 AND 100),
+        paid_at timestamptz NOT NULL DEFAULT now(),
+        recorded_by text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
+        note text CHECK (note IS NULL OR char_length(note) BETWEEN 1 AND 200)
+      )`);
+      await c.query('CREATE INDEX payout_collector ON kabadi_pickup.payouts (collector_id, paid_at DESC)');
       await c.query('CREATE INDEX ON kabadi_pickup.requests (user_id, created_at DESC, id DESC)');
       await c.query("CREATE INDEX pickup_open ON kabadi_pickup.requests (created_at) WHERE status='requested' AND category_id IS NOT NULL");
       await c.query("CREATE INDEX pickup_collector ON kabadi_pickup.requests (collector_id, status)");
-      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (5)');
+      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (6)');
     }
     if (currentVersion === 1) {
       // Upgrade in place: existing rows keep material and gain no estimate.
@@ -265,6 +288,26 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 5)');
       currentVersion = 5;
     }
+    if (currentVersion === 5) {
+      // Payout is a ledger, not a status flag on the request. Keeping it in its
+      // own table means a settled amount is a fact with a timestamp and a
+      // recorder, and the primary key makes double payment impossible.
+      await c.query(`CREATE TABLE IF NOT EXISTS kabadi_pickup.payouts (
+        request_id uuid PRIMARY KEY REFERENCES kabadi_pickup.requests(id) ON DELETE RESTRICT,
+        collector_id text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
+        amount_paise bigint NOT NULL CHECK (amount_paise >= 0),
+        method text NOT NULL CHECK (method IN ('cash','transfer','adjustment')),
+        reference text CHECK (reference IS NULL OR char_length(reference) BETWEEN 1 AND 100),
+        paid_at timestamptz NOT NULL DEFAULT now(),
+        recorded_by text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
+        note text CHECK (note IS NULL OR char_length(note) BETWEEN 1 AND 200)
+      )`);
+      await c.query('CREATE INDEX IF NOT EXISTS payout_collector ON kabadi_pickup.payouts (collector_id, paid_at DESC)');
+      await c.query('ALTER TABLE kabadi_pickup.schema_version DROP CONSTRAINT IF EXISTS schema_version_version_check');
+      await c.query('UPDATE kabadi_pickup.schema_version SET version = 6');
+      await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 6)');
+      currentVersion = 6;
+    }
     // The version row is a claim; verify the columns it promises. Without this a
     // half-applied upgrade looks identical to a finished one and the migration
     // would cheerfully report "nothing changed" over a broken table.
@@ -277,8 +320,17 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
        WHERE table_schema='kabadi_pickup' AND table_name='requests' AND column_name = ANY($1::text[])`, [V3_COLUMNS]);
     const presentColumns = new Set(found.rows.map(r => r.column_name));
     const absent = V3_COLUMNS.filter(name => !presentColumns.has(name));
-    if (absent.length) {
-      throw Error(`Pickup schema claims version ${currentVersion} but is missing: ${absent.join(', ')}`);
+    // The payout ledger lives in its own table, so a version row alone says
+    // nothing about it; verify the table and its key columns too.
+    const payoutColumns = ['request_id', 'collector_id', 'amount_paise', 'method', 'paid_at', 'recorded_by'];
+    const payoutFound = await c.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema='kabadi_pickup' AND table_name='payouts' AND column_name = ANY($1::text[])`, [payoutColumns]);
+    const payoutPresent = new Set(payoutFound.rows.map(r => r.column_name));
+    const absentPayout = payoutColumns.filter(name => !payoutPresent.has(name));
+    if (absent.length || absentPayout.length) {
+      throw Error(`Pickup schema claims version ${currentVersion} but is missing: ${
+        [...absent, ...absentPayout.map(n => `payouts.${n}`)].join(', ')}`);
     }
     // Report the outcome truthfully: an in-place upgrade is not the same event
     // as a fresh schema, and legacy rows are the operator's main concern.
@@ -287,8 +339,8 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
        FROM kabadi_pickup.requests`);
     await c.query('COMMIT');
     return {
-      action: startingVersion === 0 ? 'created' : startingVersion < 5 ? 'upgraded' : 'unchanged',
-      schemaVersion: 5,
+      action: startingVersion === 0 ? 'created' : startingVersion < 6 ? 'upgraded' : 'unchanged',
+      schemaVersion: 6,
       fromVersion: startingVersion,
       legacyRequests: Number(counts.rows[0]?.legacy ?? 0),
     };
@@ -305,6 +357,8 @@ export type StoredRequest = StoredPickup & {
   cancelled_at: Date | null; cancellation_reason: string | null; released_at: Date | null;
   dispute_status: 'open' | 'resolved' | 'rejected' | null;
   dispute_reason: string | null; dispute_raised_at: Date | null; dispute_resolved_at: Date | null;
+  payout_amount_paise: string | null; payout_method: 'cash' | 'transfer' | 'adjustment' | null;
+  payout_paid_at: Date | null;
 };
 
 export const toPickup = (r: StoredRequest): Pickup => ({
@@ -325,15 +379,25 @@ export const toPickup = (r: StoredRequest): Pickup => ({
     reason: r.dispute_reason,
     resolvedAt: r.dispute_resolved_at ? r.dispute_resolved_at.toISOString() : null,
   },
+  payout: r.payout_amount_paise === null || r.payout_paid_at === null || r.payout_method === null ? null : {
+    amountPaise: r.payout_amount_paise,
+    method: r.payout_method,
+    paidAt: r.payout_paid_at.toISOString(),
+  },
 });
 
 // Columns every read returns, kept in one place so the two list queries and the
 // collector queries cannot drift apart.
-const PICKUP_COLUMNS = `id,status,created_at,name,address_line,city,state,postal_code,estimated_grams,material,
-  category_id,category_name,rate_id,paise_per_kg,amount_paise::text AS amount_paise,
-  actual_grams,final_rate_id,final_paise_per_kg,final_amount_paise::text AS final_amount_paise,collected_at,
-  cancelled_at,cancellation_reason,released_at,
-  dispute_status,dispute_reason,dispute_raised_at,dispute_resolved_at`;
+// Column list plus the optional payout receipt. Every query aliases the request
+// table as `r` and left-joins the ledger, so a row is never N+1 queried.
+const PICKUP_COLUMNS = `r.id,r.status,r.created_at,r.name,r.address_line,r.city,r.state,r.postal_code,
+  r.estimated_grams,r.material,r.category_id,r.category_name,r.rate_id,r.paise_per_kg,
+  r.amount_paise::text AS amount_paise,r.actual_grams,r.final_rate_id,r.final_paise_per_kg,
+  r.final_amount_paise::text AS final_amount_paise,r.collected_at,r.cancelled_at,r.cancellation_reason,
+  r.released_at,r.dispute_status,r.dispute_reason,r.dispute_raised_at,r.dispute_resolved_at,
+  p.amount_paise::text AS payout_amount_paise,p.method AS payout_method,p.paid_at AS payout_paid_at`;
+const PICKUP_FROM = `kabadi_pickup.requests r
+  LEFT JOIN kabadi_pickup.payouts p ON p.request_id = r.id`;
 
 export function createPickupStore(pool: pg.Pool) {
   async function execute<T>(userId: string, action: (c: pg.PoolClient) => Promise<T>): Promise<T | 'forbidden'> {
@@ -504,8 +568,8 @@ export function createDisputeStore(pool: pg.Pool) {
     async openDisputes(actorId: string): Promise<Pickup[] | 'forbidden'> {
       return asAdmin(actorId, async c => {
         const rows = await c.query<StoredRequest>(
-          `SELECT ${PICKUP_COLUMNS} FROM kabadi_pickup.requests
-           WHERE dispute_status='open' ORDER BY dispute_raised_at ASC, id ASC LIMIT 50`);
+          `SELECT ${PICKUP_COLUMNS} FROM ${PICKUP_FROM}
+           WHERE r.dispute_status='open' ORDER BY r.dispute_raised_at ASC, r.id ASC LIMIT 50`);
         return rows.rows.map(toPickup);
       });
     },
@@ -560,6 +624,67 @@ export function createDisputeStore(pool: pg.Pool) {
   };
 }
 
+// Admin-only payout ledger. Recording a payment never changes the settlement;
+// it records that this collector was handed this amount by this person.
+export function createPayoutStore(pool: pg.Pool) {
+  async function asAdmin<T>(actorId: string, action: (c: pg.PoolClient) => Promise<T>): Promise<T | 'forbidden'> {
+    if (typeof actorId !== 'string' || !actorId.trim()) throw Error('Invalid identity');
+    const c = await pool.connect();
+    try {
+      await c.query('BEGIN');
+      const account = await c.query<{ status: string }>('SELECT status FROM kabadi_authz.accounts WHERE user_id=$1 FOR UPDATE', [actorId]);
+      if (account.rows[0]?.status !== 'active') { await c.query('COMMIT'); return 'forbidden'; }
+      const grant = await c.query("SELECT 1 FROM kabadi_authz.role_grants WHERE user_id=$1 AND role='admin' FOR SHARE", [actorId]);
+      if (grant.rowCount !== 1) { await c.query('COMMIT'); return 'forbidden'; }
+      const result = await action(c); await c.query('COMMIT'); return result;
+    } catch (error) { try { await c.query('ROLLBACK'); } catch {} throw error; } finally { c.release(); }
+  }
+  return {
+    // Collected, undisputed, still unpaid. An open dispute is excluded because
+    // paying an amount under challenge would make the correction meaningless.
+    async unpaidCollectorDues(actorId: string): Promise<Pickup[] | 'forbidden'> {
+      return asAdmin(actorId, async c => {
+        const rows = await c.query<StoredRequest>(
+          `SELECT ${PICKUP_COLUMNS} FROM ${PICKUP_FROM}
+           WHERE r.status='collected' AND p.request_id IS NULL
+             AND (r.dispute_status IS NULL OR r.dispute_status='rejected')
+           ORDER BY r.collected_at ASC, r.id ASC LIMIT 50`);
+        return rows.rows.map(toPickup);
+      });
+    },
+    async recordPayout(actorId: string, requestId: string, method: unknown, reference: unknown, note: unknown): Promise<PayoutOutcome | 'forbidden'> {
+      if (typeof requestId !== 'string' || !UUID_V4.test(requestId)) throw Error('Invalid request id');
+      if (method !== 'cash' && method !== 'transfer' && method !== 'adjustment') throw Error('Invalid method');
+      return asAdmin(actorId, async c => {
+        const locked = await c.query<{ status: string; collector_id: string | null; final_amount_paise: string | null;
+          dispute_status: string | null; paid: boolean }>(
+          `SELECT r.status, r.collector_id, r.final_amount_paise::text AS final_amount_paise, r.dispute_status,
+                  (p.request_id IS NOT NULL) AS paid
+           FROM kabadi_pickup.requests r
+           LEFT JOIN kabadi_pickup.payouts p ON p.request_id = r.id
+           WHERE r.id=$1 FOR UPDATE OF r`, [requestId]);
+        const found = locked.rows[0];
+        if (!found) return { outcome: 'not-found' as const };
+        if (found.status !== 'collected') return { outcome: 'not-collected' as const };
+        if (found.paid) return { outcome: 'already-paid' as const };
+        // An open dispute means the amount is not final; refuse rather than pay
+        // a figure that may still change.
+        if (found.dispute_status === 'open') return { outcome: 'disputed' as const };
+        if (found.collector_id === null || found.final_amount_paise === null) throw Error('Invalid settlement');
+        // The primary key on request_id is the real guard against double payment;
+        // the ON CONFLICT keeps a concurrent attempt a clean refusal, not a crash.
+        const inserted = await c.query(
+          `INSERT INTO kabadi_pickup.payouts (request_id, collector_id, amount_paise, method, reference, recorded_by, note)
+           VALUES ($1,$2,$3::bigint,$4,$5,$6,$7)
+           ON CONFLICT (request_id) DO NOTHING RETURNING request_id`,
+          [requestId, found.collector_id, found.final_amount_paise, method, reference, actorId, note]);
+        if (inserted.rowCount !== 1) return { outcome: 'already-paid' as const };
+        return { outcome: 'paid' as const, amountPaise: found.final_amount_paise, method };
+      });
+    },
+  };
+}
+
 export type CollectorOutcome =
   | { outcome: 'accepted' }
   | { outcome: 'collected'; finalAmountPaise: string; finalPaisePerKg: number; finalRateId: string; actualGrams: number }
@@ -589,17 +714,17 @@ export function createCollectorStore(pool: pg.Pool) {
     async open(userId: string): Promise<Pickup[] | 'forbidden'> {
       return asCollector(userId, async c => {
         const rows = await c.query<StoredRequest>(
-          `SELECT ${PICKUP_COLUMNS} FROM kabadi_pickup.requests
-           WHERE status='requested' AND category_id IS NOT NULL
-           ORDER BY created_at ASC, id ASC LIMIT 50`);
+          `SELECT ${PICKUP_COLUMNS} FROM ${PICKUP_FROM}
+           WHERE r.status='requested' AND r.category_id IS NOT NULL
+           ORDER BY r.created_at ASC, r.id ASC LIMIT 50`);
         return rows.rows.map(toPickup);
       });
     },
     async mine(userId: string): Promise<Pickup[] | 'forbidden'> {
       return asCollector(userId, async c => {
         const rows = await c.query<StoredRequest>(
-          `SELECT ${PICKUP_COLUMNS} FROM kabadi_pickup.requests
-           WHERE collector_id=$1 ORDER BY created_at DESC, id DESC LIMIT 50`, [userId]);
+          `SELECT ${PICKUP_COLUMNS} FROM ${PICKUP_FROM}
+           WHERE r.collector_id=$1 ORDER BY r.created_at DESC, r.id DESC LIMIT 50`, [userId]);
         return rows.rows.map(toPickup);
       });
     },

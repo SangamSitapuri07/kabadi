@@ -10,6 +10,8 @@ type Pickup = {
   finalAmountPaise:string|null; collectedAt:string|null;
   cancelledAt:string|null; cancellationReason:string|null; releasedAt:string|null;
   dispute:{ status:'open'|'resolved'|'rejected'; raisedAt:string; reason:string; resolvedAt:string|null }|null;
+  // A receipt only: how the collector was paid stays internal.
+  payout:{ amountPaise:string; paidAt:string }|null;
 };
 type Estimate = { categoryId:string; categoryName:string; rateId:string; paisePerKg:number; amountPaise:string };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -170,6 +172,7 @@ export function TestPickups() {
         {final && <><br /><strong>{final}</strong></>}
         {cancelled && <><br /><span>{cancelled}</span></>}
         {item.dispute && <><br /><span>Dispute {item.dispute.status}: {item.dispute.reason}</span></>}
+        {item.payout && <><br /><span>Payment recorded: {rupees(item.payout.amountPaise)} on {new Date(item.payout.paidAt).toLocaleDateString()}</span></>}
         {canCancel && <><br /><button type="button" onClick={() => cancel(item)} disabled={busy}>Cancel this request</button></>}
         {item.status === 'collected' && (!item.dispute || item.dispute.status === 'rejected') &&
           <><br /><button type="button" onClick={() => dispute(item)} disabled={busy}>Dispute this amount</button></>}

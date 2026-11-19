@@ -426,10 +426,10 @@ production readiness/security review is implied.
 
 A new separate `kabadi_pickup` schema requires the existing auth, authorization,
 customer **and catalog** schemas, because request rows reference catalog
-categories and rates. The schema is version 5; an older schema is upgraded in
-place one version at a time to version 5 in a single run, keeping every legacy
-row. Version 3 added collection, version 4 cancellation and release, and
-version 5 customer disputes. It is explicitly migrated, never on startup, and creates
+categories and rates. The schema is version 6; an older schema is upgraded in
+place one version at a time to version 6 in a single run, keeping every legacy
+row. Version 3 added collection, version 4 cancellation and release, version 5
+customer disputes, and version 6 the payout ledger. It is explicitly migrated, never on startup, and creates
 no pickup requests. Version checks do not detect all schema drift; upgrades and
 restore have not been tested. Before running on any local development database,
 independently inspect the target, back it up, and obtain explicit approval. Do
@@ -448,7 +448,7 @@ the same check and refuses rather than reporting a no-op on a table that does no
 match its recorded version. It prints the recorded version and whether a
 migration is still needed, so nobody has to infer from log wording whether a
 migration actually ran. A migration run always prints what it did — `created`,
-`upgraded from version N to version 5`, or `already version 5; nothing changed`
+`upgraded from version N to version 6`, or `already version 6; nothing changed`
 — so a no-op can never be mistaken for an upgrade. If the printed text does not
 match this description, the built `dist` output is older than the source: run
 `npm run build:api` after pulling. No secrets or customer data should be shared in chat.
@@ -456,8 +456,8 @@ match this description, the built `dist` output is older than the source: run
 Run migrations **from this `kabadiwala-connect` directory**, because `.env` is
 resolved relative to the current directory and lives here. Running from
 the parent repository root fails with `.env: not found`. The command reports what
-it actually did: `created`, `upgraded from version N to version 5`, or
-`already version 5; nothing changed`, plus how many pre-pricing requests still
+it actually did: `created`, `upgraded from version N to version 6`, or
+`already version 6; nothing changed`, plus how many pre-pricing requests still
 exist without an estimate.
 
 ### Collector acceptance and the final amount (development API)
@@ -572,6 +572,45 @@ preserve the previous weight as a separate history row. The correction overwrite
 That is a deliberate simplification for this slice and the first thing to change
 if a real dispute trail is required.
 
+### Payout ledger (development API)
+
+Collecting a pickup and paying the collector are two separate acts, recorded
+separately. This slice records the second one; it never moves money.
+
+- `GET /api/v1/admin/payouts` — collected requests that have no payout row and
+  no **open** dispute, oldest collection first, with the amount owed. A rejected
+  dispute does not block payment: the amount was reviewed and stood.
+- `POST /api/v1/admin/payouts/:requestId/pay` with
+  `{"method":"cash","reference":"…","note":"…"}` — `method` is required and must
+  be `cash`, `transfer` or `adjustment`; `reference` (≤100) and `note` (≤200)
+  are optional free text. The response is
+  `{"paid":true,"amountPaise":"6490","method":"cash"}`.
+
+The amount is **never** accepted from the client. It is read from the row's
+`final_amount_paise` — the amount frozen at collection, or the corrected amount if
+a dispute was resolved — so a payout can never disagree with the settlement it
+settles. Any request body that carries an amount, a collector id or a timestamp
+is refused outright rather than having the extra field ignored.
+
+Each request can be paid **once**: `kabadi_pickup.payouts` has `request_id` as
+its primary key, so a second attempt is `ALREADY_PAID` and a race between two
+admins ends as one payout plus one clean refusal, not two payments or a crash.
+Open disputes (`DISPUTE_OPEN`) and uncollected requests (`NOT_COLLECTED`) are
+refused: paying an amount that is still under challenge would make the
+correction meaningless.
+
+Admin access is re-checked inside the store's transaction against an active
+account holding an `admin` grant. The recorded `recorded_by` is that admin and
+the `collector_id` is copied from the request row.
+
+What this does **not** do: it does not transfer money, contact a payment
+provider, mark a bank reference as verified, or keep a ledger of balances. It is
+a record that a payment happened — who, how much, by what method, on whose
+authority. The customer sees only that a payment was recorded, and the amount;
+the method and reference stay internal. A real mechanism (bank transfer, UPI,
+provider integration) is still an open product decision and is deliberately not
+guessed at here.
+
 ### Customer self-onboarding (development API)
 
 `POST /api/v1/account/customer` accepts only an empty JSON object, requires an
@@ -675,8 +714,11 @@ The API has liveness and an opt-in, development-only Google authentication
 integration. Authentication is disabled by default and prohibited when the API's
 `NODE_ENV` is `production`. An initial owner-run local Google login succeeded;
 security and production readiness have not been established. Customer setup,
-profile, test pickup capture, a read/write development catalog and a local
-admin-grant tool exist; there is no operational collection, dispatch,
-notification, OTP, payment or estimate-to-request flow, and no collector or
-dispute handling. Policy decisions, full security review and zero-cost provider
-suitability remain pending. Phase 1 is not complete.
+profile, test pickup capture, a read/write development catalog, a local
+admin-grant tool, collector acceptance and collection-time settlement,
+cancellation and release, customer disputes with admin correction, and an
+**admin-recorded payout ledger** exist. There is still no dispatch, routing,
+notification, OTP, or actual money movement: recording a payout is bookkeeping,
+and how collectors are really paid is an open product decision. Policy
+decisions, full security review and zero-cost provider suitability remain
+pending. Phase 1 is not complete.

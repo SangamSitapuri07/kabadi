@@ -111,18 +111,41 @@ async function handle(request: Request, method: 'GET' | 'POST') {
             actualGrams:v.actualGrams, finalRateId:v.finalRateId, finalPaisePerKg:v.finalPaisePerKg,
             finalAmountPaise:v.finalAmountPaise, collectedAt:v.collectedAt,
           } : (() => { throw Error('Invalid response'); })();
+          // A dispute is only meaningful while an amount exists to dispute.
+          let dispute: null | { status:'open'|'resolved'|'rejected'; raisedAt:string; reason:string; resolvedAt:string|null } = null;
+          if (v.dispute !== null && v.dispute !== undefined) {
+            const d = v.dispute as Record<string, unknown>;
+            if (v.status !== 'collected' || !d || typeof d !== 'object' ||
+                !['open','resolved','rejected'].includes(String(d.status)) ||
+                typeof d.raisedAt !== 'string' || Number.isNaN(Date.parse(d.raisedAt)) ||
+                typeof d.reason !== 'string' || !d.reason.trim() || Array.from(d.reason).length > 200 ||
+                /[\uD800-\uDFFF\u0000-\u001f\u007f-\u009f]/u.test(d.reason) ||
+                !(d.resolvedAt === null || (typeof d.resolvedAt === 'string' && !Number.isNaN(Date.parse(d.resolvedAt)))) ||
+                (d.status === 'open') !== (d.resolvedAt === null)) throw Error('Invalid response');
+            dispute = { status:d.status as 'open'|'resolved'|'rejected', raisedAt:d.raisedAt, reason:d.reason, resolvedAt:d.resolvedAt as string|null };
+          }
+          // A payout receipt is shown to the customer, but the method and the
+          // reference stay internal: the customer learns that it was settled.
+          let payout: null | { amountPaise:string; paidAt:string } = null;
+          if (v.payout !== null && v.payout !== undefined) {
+            const pay = v.payout as Record<string, unknown>;
+            if (v.status !== 'collected' || !pay || typeof pay !== 'object' ||
+                !/^\d{1,16}$/.test(String(pay.amountPaise ?? '')) ||
+                typeof pay.paidAt !== 'string' || Number.isNaN(Date.parse(pay.paidAt))) throw Error('Invalid response');
+            payout = { amountPaise:String(pay.amountPaise), paidAt:pay.paidAt };
+          }
           // Either a priced item with a snapshot, or a legacy free-text request.
           if (v.categoryId !== null) {
             const estimate = parseEstimate({ categoryId:v.categoryId, categoryName:v.categoryName, rateId:v.rateId, paisePerKg:v.paisePerKg, amountPaise:v.amountPaise });
             if (!estimate) throw Error('Invalid response');
             return { id:v.id, status:v.status, createdAt:v.createdAt, address, estimatedGrams:v.estimatedGrams,
-              material:null, ...estimate, ...settled };
+              material:null, ...estimate, ...settled, dispute, payout };
           }
           if (typeof v.material !== 'string' || !v.material.trim() || Array.from(v.material).length > 100 ||
               /[\uD800-\uDFFF\u0000-\u001f\u007f-\u009f]/u.test(v.material)) throw Error('Invalid response');
           return { id:v.id, status:v.status, createdAt:v.createdAt, address, estimatedGrams:v.estimatedGrams,
             material:v.material, categoryId:null, categoryName:null, rateId:null, paisePerKg:null, amountPaise:null,
-            ...settled };
+            ...settled, dispute, payout };
         });
         payload = { data: { pickups } };
       } else return unavailable();

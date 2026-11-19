@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseCustomerDetails } from './customer-details.js';
 import type { CustomerDetails } from './customer-details.js';
 import { isMissingCollectorColumns, parsePickup } from './pickups.js';
-import type { CancelOutcome, CollectorOutcome, CreatePickupResult, DisputeOutcome, Pickup } from './pickups.js';
+import type { CancelOutcome, CollectorOutcome, CreatePickupResult, DisputeOutcome, PayoutOutcome, Pickup } from './pickups.js';
 import { categoryName, rateValue, utcTimestamp } from './catalog.js';
 import type { CategoryPage, RatePage } from './catalog.js';
 
@@ -18,6 +18,10 @@ type AuthMount = {
     list: (userId: string) => Promise<Pickup[] | 'forbidden'>;
     cancel: (userId: string, requestId: string, reason: string | null) => Promise<CancelOutcome | 'forbidden'>;
     raiseDispute: (userId: string, requestId: string, reason: string) => Promise<DisputeOutcome | 'forbidden'>;
+  };
+  payouts?: {
+    unpaidCollectorDues: (actorId: string) => Promise<Pickup[] | 'forbidden'>;
+    recordPayout: (actorId: string, requestId: string, method: unknown, reference: unknown, note: unknown) => Promise<PayoutOutcome | 'forbidden'>;
   };
   disputes?: {
     openDisputes: (actorId: string) => Promise<Pickup[] | 'forbidden'>;
@@ -192,8 +196,16 @@ export function createApp(auth?: AuthMount) {
       if ((d.status === 'open') !== (d.resolvedAt === null)) throw Error('Invalid result');
       if (d.resolvedAt !== null && !iso(d.resolvedAt)) throw Error('Invalid result');
     }
+    // A payout only exists on a collected request, and always with a method and
+    // a timestamp; a half-written receipt is corrupt, not "unpaid".
+    const pay = r.payout;
+    if (pay !== null) {
+      if (r.status !== 'collected') throw Error('Invalid result');
+      if (!['cash', 'transfer', 'adjustment'].includes(pay.method)) throw Error('Invalid result');
+      if (typeof pay.amountPaise !== 'string' || !/^\d{1,16}$/.test(pay.amountPaise) || !iso(pay.paidAt)) throw Error('Invalid result');
+    }
     return { cancelledAt: r.cancelledAt, cancellationReason: r.cancellationReason,
-      releasedAt: r.releasedAt, dispute: d };
+      releasedAt: r.releasedAt, dispute: d, payout: pay };
   };
   const fullySettled = (r: Pickup) => {
     if (!Number.isInteger(r.actualGrams) || (r.actualGrams as number) < 1 || (r.actualGrams as number) > 10000000 ||
@@ -427,6 +439,85 @@ export function createApp(auth?: AuthMount) {
       } catch (error) { if (isMissingCollectorColumns(error)) disputeNeedsMigration(res); else disputeUnavailable(res); }
     });
   }
+
+  // ---- Admin payout ledger ----------------------------------------------
+  // Recording a payment is deliberately not part of collection: settling an
+  // amount and moving money are different decisions, often by different people.
+  const payoutUnavailable = (res: express.Response) => res.status(503).json({ error: { code: 'PAYOUT_UNAVAILABLE', message: 'Payout recording is unavailable.' } });
+  const payoutNeedsMigration = (res: express.Response) => res.status(503).json({ error: { code: 'PICKUP_SCHEMA_OUTDATED', message: 'Pickup storage needs its migration before payouts can be recorded.' } });
+  // Reference and note are bounded, trimmed free text or absent.
+  const optionalText = (value: unknown, max: number): value is string | null =>
+    value === null || value === undefined || text(value, max);
+
+  app.use('/api/v1/admin/payouts', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  app.get('/api/v1/admin/payouts', async (req, res) => {
+    if (!auth?.resolveIdentity || !auth.payouts) { payoutUnavailable(res); return; }
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const rows = await auth.payouts.unpaidCollectorDues(id);
+      if (rows === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Admin access is required.' } }); return; }
+      if (!Array.isArray(rows) || rows.length > 50) throw Error('Invalid result');
+      const projected = (rows as Pickup[]).map(r => {
+        const address = parseCustomerDetails(r.address);
+        if (!address || r.status !== 'collected' || !uuid.test(r.id) || r.payout !== null ||
+            typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt)) ||
+            !uuid.test(r.categoryId as string) || !text(r.categoryName, 100)) throw Error('Invalid result');
+        const settled = fullySettled(r);
+        return { id: r.id, status: r.status, createdAt: r.createdAt, address,
+          categoryId: r.categoryId, categoryName: r.categoryName, estimatedGrams: r.estimatedGrams,
+          amountPaise: r.amountPaise, ...settled, ...terminalState(r) };
+      });
+      res.json({ data: { dues: projected } });
+    } catch (error) { if (isMissingCollectorColumns(error)) payoutNeedsMigration(res); else payoutUnavailable(res); }
+  });
+
+  app.post('/api/v1/admin/payouts/:requestId/pay', (req, res, next) => {
+    if (!auth?.resolveIdentity || !auth.payouts) { payoutUnavailable(res); return; }
+    if (req.get('origin') !== auth!.origin) { res.status(403).json({ error: { code: 'INVALID_ORIGIN', message: 'Request origin is not allowed.' } }); return; }
+    const length = req.get('content-length');
+    if (!length || !/^\d+$/.test(length) || Number(length) > 4096 || req.get('transfer-encoding')) {
+      res.status(413).json({ error: { code: 'INVALID_BODY', message: 'Request body is invalid or too large.' } }); return;
+    }
+    if (!req.is('application/json')) { res.status(415).json({ error: { code: 'INVALID_CONTENT_TYPE', message: 'JSON is required.' } }); return; }
+    next();
+  }, express.json({ limit: '4kb', strict: true }), async (req, res) => {
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const requestId = req.params.requestId;
+      if (!uuid.test(requestId)) { res.status(400).json({ error: { code: 'INVALID_REQUEST_ID', message: 'Request id is invalid.' } }); return; }
+      const body = req.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        res.status(400).json({ error: { code: 'INVALID_BODY', message: 'A JSON object is required.' } }); return;
+      }
+      const keys = Object.keys(body);
+      const allowed = ['method', 'reference', 'note'];
+      if (keys.length < 1 || keys.some(k => !allowed.includes(k))) {
+        res.status(400).json({ error: { code: 'INVALID_BODY', message: 'Only method, reference and note are accepted.' } }); return;
+      }
+      const { method, reference, note } = body as Record<string, unknown>;
+      if (method !== 'cash' && method !== 'transfer' && method !== 'adjustment') {
+        res.status(400).json({ error: { code: 'INVALID_METHOD', message: 'Method must be cash, transfer or adjustment.' } }); return;
+      }
+      // No amount is accepted: the amount is whatever the settlement says.
+      if (!optionalText(reference, 100) || !optionalText(note, 200)) {
+        res.status(400).json({ error: { code: 'INVALID_DETAILS', message: 'Reference must be 1-100 and note 1-200 characters.' } }); return;
+      }
+      const result = await auth!.payouts!.recordPayout(id, requestId, method,
+        reference === undefined ? null : reference, note === undefined ? null : note);
+      if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Admin access is required.' } }); return; }
+      if (result.outcome === 'paid') {
+        res.json({ data: { paid: true, amountPaise: result.amountPaise, method: result.method } }); return;
+      }
+      const failures: Record<'not-found' | 'not-collected' | 'already-paid' | 'disputed', [number, string, string]> = {
+        'not-found': [404, 'REQUEST_NOT_FOUND', 'That request does not exist.'],
+        'not-collected': [409, 'NOT_COLLECTED', 'Only a collected request can be paid out.'],
+        'already-paid': [409, 'ALREADY_PAID', 'This request has already been paid.'],
+        'disputed': [409, 'DISPUTE_OPEN', 'An open dispute must be resolved before paying.'],
+      };
+      const [status, code, message] = failures[result.outcome];
+      res.status(status).json({ error: { code, message } });
+    } catch (error) { if (isMissingCollectorColumns(error)) payoutNeedsMigration(res); else payoutUnavailable(res); }
+  });
 
   // Development-only admin writes. Identity comes exclusively from the session;
   // the catalog store checks the active admin grant inside the write transaction.
