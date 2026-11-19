@@ -59,13 +59,20 @@ export function CatalogViewer({disabled=false}:{disabled?:boolean}) {
   }
   return <section className="customer-profile catalog-viewer">
     <h2>Test catalog inspection</h2>
-    <p>Development only, read-only. Admin permission is checked on every request. Entries are not connected to pickup estimates.</p>
+    <p>Development only, read-only. Admin permission is checked on every request. Pickup estimates use these categories and rates: a request takes the newest rate already in force at that moment.</p>
     <p>Pages are ordered by ID, not by date or name; concurrent changes may be missed. Restart to inspect from the beginning.</p>
     <button type="button" disabled={busy || disabled} onClick={()=>loadCategories()}>Load test catalog</button>
     <p role="status" aria-live="polite">{message}</p>
     {categories && <div>{categories.items.length===0 ? <p>No categories on this page.</p> : <ul>{categories.items.map(category=><li key={category.id}><strong>{category.name}</strong> — {category.active ? 'active':'inactive'} <button type="button" disabled={busy || disabled} onClick={()=>{ navigator.clipboard?.writeText(category.id).then(()=>setMessage('Category ID copied. Paste it into the pickup form.'),()=>{}); }}>Copy category ID</button> <button type="button" disabled={busy || disabled} onClick={()=>loadRates(category)}>View rates for {category.name}</button><br /><small className="category-id">{category.id}</small></li>)}</ul>}
       {categories.nextAfter && <button type="button" disabled={busy || disabled} onClick={()=>loadCategories(categories.nextAfter)}>Next categories</button>}</div>}
-    {selected && rates && <div><h3>Rates for {selected.name}</h3>{rates.items.length===0 ? <p>No rates on this page.</p> : <ul>{rates.items.map(rate=><li key={rate.id}>₹{(rate.paisePerKg/100).toFixed(2)} per kg — effective {rate.effectiveFrom} UTC</li>)}</ul>}
+    {selected && rates && <div><h3>Rates for {selected.name}</h3>{rates.items.length===0 ? <p>No rates on this page.</p> : <ul>{rates.items.map(rate=>{
+        // A rate created through the admin form must start in the future, so a
+        // new rate is not in force yet. Say which it is instead of leaving the
+        // reader to compare timestamps themselves.
+        const start = Date.parse(rate.effectiveFrom);
+        const inForce = Number.isFinite(start) && start <= Date.now();
+        return <li key={rate.id}>₹{(rate.paisePerKg/100).toFixed(2)} per kg — effective {rate.effectiveFrom} UTC — <strong>{inForce ? 'in force' : 'not yet in force'}</strong>{inForce ? '' : '; pickup requests will be rejected with NO_RATE for this category until then'}</li>;
+      })}</ul>}
       {rates.nextAfter && <button type="button" disabled={busy || disabled} onClick={()=>loadRates(selected,rates.nextAfter)}>Next rates</button>}</div>}
     <CatalogAdmin categoryId={selected && rates ? selected.id : null} disabled={disabled} />
   </section>;

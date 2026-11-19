@@ -331,6 +331,11 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       });
       await clickButton('Load test catalog'); assert.match(document.body.textContent,/Synthetic paper/);
       await clickButton('View rates for Synthetic paper'); assert.match(document.body.textContent,/₹1.25 per kg/);
+      // A 2099 start is not in force, and the UI must say so rather than leave
+      // the reader to compare timestamps: this is why NO_RATE would appear.
+      assert.match(document.body.textContent,/not yet in force/);
+      assert.match(document.body.textContent,/NO_RATE/);
+      assert.doesNotMatch(document.body.textContent,/not connected to pickup estimates/);
       await clickButton('Next categories'); assert.match(document.body.textContent,/No categories on this page/);
       assert.ok(paths.some(p=>p.endsWith(`?after=${category}`)));
       await clickButton('Load test catalog');
@@ -338,6 +343,21 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       await act(async()=>document.dispatchEvent(new dom.window.Event('visibilitychange')));
       assert.doesNotMatch(document.body.textContent,/Synthetic paper/);
       Object.defineProperty(document,'visibilityState',{value:'visible',configurable:true});
+      await unmount();
+    });
+    await t.test('a rate already in force is labelled as in force', async () => {
+      const category='123e4567-e89b-42d3-a456-426614174060', rate='123e4567-e89b-42d3-a456-426614174061';
+      await mount(async (url) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/rates')) return json({data:{rates:[{id:rate,effectiveFrom:'2020-01-01T00:00:00.000Z',paisePerKg:3245}],nextAfter:null}});
+        return json({data:{categories:[{id:category,name:'Live paper',active:true}],nextAfter:null}});
+      });
+      await clickButton('Load test catalog');
+      await clickButton('View rates for Live paper');
+      assert.match(document.body.textContent,/₹32.45 per kg/);
+      assert.match(document.body.textContent,/in force/);
+      assert.doesNotMatch(document.body.textContent,/not yet in force/);
+      assert.doesNotMatch(document.body.textContent,/NO_RATE/);
       await unmount();
     });
     await t.test('admin catalog form retries an uncertain write with the same key and inputs', async () => {
