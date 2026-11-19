@@ -867,6 +867,46 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.match(section.textContent,/No unpaid dues/);
       await unmount();
     });
+    await t.test('the payout screen states no provider is connected and does not pretend money moved', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174180';
+      const row={ id:requestId, categoryName:'Synthetic paper', estimatedGrams:2500, actualGrams:2000,
+        finalPaisePerKg:3245, amountPaise:'6490', collectedAt:'2026-11-20T10:00:00.000Z',
+        address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'} };
+      let posted=null;
+      await mount(async (url, init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/admin/payouts')) return json({data:{dues:[row],
+          payment:{ configured:false, name:null, methods:['cash','transfer','adjustment'] }}});
+        if (url.includes('/admin/payouts/')) { posted=JSON.parse(init.body ?? '{}'); return json({data:{paid:true,amountPaise:'6490',method:'cash'}}); }
+        return json({authenticated:true});
+      });
+      globalThis.confirm=()=>true;
+      await clickButton('Load unpaid dues');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector payouts due'));
+      assert.match(section.textContent,/Payment method not implemented yet/);
+      assert.match(section.textContent,/No payment provider is connected/);
+      assert.match(section.textContent,/nothing is sent to a bank, a wallet or a provider/i);
+      // The control is still usable: recording a manual payout is the point.
+      assert.equal([...section.querySelectorAll('option')].length, 3);
+      await act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Record this payout').click();});
+      assert.deepEqual(posted, { method:'cash' });
+      assert.match(section.textContent,/No money was moved by this application/);
+      await unmount();
+    });
+    await t.test('a payout screen refuses to claim a connection the API did not report', async () => {
+      // A malformed or absent payment block must fall back to "no provider",
+      // never to a reassuring one.
+      await mount(async (url) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/admin/payouts')) return json({data:{dues:[], payment:{ configured:'yes', name:'' }}});
+        return json({authenticated:true});
+      });
+      await clickButton('Load unpaid dues');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector payouts due'));
+      assert.match(section.textContent,/No payment provider is connected/);
+      assert.doesNotMatch(section.textContent,/Connected provider/);
+      await unmount();
+    });
     await t.test('a paid request shows the customer a receipt without the payment method', async () => {
       const requestId='123e4567-e89b-42d3-a456-426614174171';
       const address={name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'};

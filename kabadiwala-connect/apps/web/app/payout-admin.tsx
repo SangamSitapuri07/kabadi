@@ -8,7 +8,15 @@ type Due = {
   finalPaisePerKg:number; amountPaise:string; collectedAt:string;
   address:{name:string;addressLine:string;city:string;state:string;postalCode:string};
 };
-type Method = 'cash'|'transfer'|'adjustment';
+// The server owns this list; the fallback only keeps the control usable if an
+// older API answers without it. Sending an unknown value is refused upstream.
+const FALLBACK_METHODS = ['cash','transfer','adjustment'] as const;
+type Method = typeof FALLBACK_METHODS[number];
+// What the API reports about the payment rail. There is no provider yet, and the
+// screen says so rather than leaving an admin to assume a transfer happened.
+type Payment = { configured: boolean; name: string | null; methods: readonly string[] };
+const methodLabel = (method: string) =>
+  method === 'cash' ? 'Cash' : method === 'transfer' ? 'Bank transfer' : method === 'adjustment' ? 'Adjustment' : method;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function rupees(amountPaise: string): string {
@@ -19,10 +27,14 @@ function rupees(amountPaise: string): string {
 // Recording a payout is bookkeeping, not a transfer: nothing is sent to a bank,
 // a wallet or a payment provider from here. An admin states that a collector was
 // paid, how, and with what evidence. The amount is whatever the settlement says.
+//
+// PLACEHOLDER: the payment mechanism is not decided. This component must keep
+// saying so (see the banner it renders) until a provider is actually wired up.
 export function PayoutAdmin({ disabled }: { disabled: boolean }) {
   const [items, setItems] = useState<Due[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [payment, setPayment] = useState<Payment | null>(null);
   const [methods, setMethods] = useState<Record<string,Method>>({});
   const [references, setReferences] = useState<Record<string,string>>({});
 
@@ -37,6 +49,13 @@ export function PayoutAdmin({ disabled }: { disabled: boolean }) {
         setItems(null); setMessage('The pickup database is behind this build. Run the pickup migration, then reload.'); return;
       }
       if (!response.ok || !Array.isArray(json?.data?.dues)) throw Error('unavailable');
+      // A missing or malformed payment block is treated as "no provider", which
+      // is the safe assumption: never claim money moved when it did not.
+      const reported = json.data.payment;
+      const methods = Array.isArray(reported?.methods) && reported.methods.length &&
+        reported.methods.every((m: unknown) => typeof m === 'string' && (FALLBACK_METHODS as readonly string[]).includes(m))
+        ? reported.methods as Method[] : [...FALLBACK_METHODS];
+      setPayment({ configured: reported?.configured === true, name: typeof reported?.name === 'string' ? reported.name : null, methods });
       const parsed = json.data.dues.map((v: unknown) => {
         if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
         const d = v as Record<string, unknown>;
@@ -90,6 +109,13 @@ export function PayoutAdmin({ disabled }: { disabled: boolean }) {
   return <section className="payout-admin">
     <h2>Collector payouts due</h2>
     <p>Development only. Recording a payout does not transfer money: it records that a collector was paid, by what method, and on whose authority. The amount is the frozen settlement from collection time, or the corrected amount if a dispute was resolved.</p>
+    {/* PLACEHOLDER: the payment rail is undecided. This banner is the honest
+        state of the system, and it must be replaced when a provider is wired up
+        -- not merely hidden. */}
+    <p className="payout-placeholder"><strong>Payment method not implemented yet.</strong>{' '}
+      {payment === null ? 'This build records payouts by hand and moves no money.'
+        : payment.configured && payment.name ? `Connected provider: ${payment.name}.`
+        : 'No payment provider is connected. Every payout below is a manual record; nothing is sent to a bank, a wallet or a provider.'}</p>
     <button type="button" onClick={() => load()} disabled={disabled || busy}>Load unpaid dues</button>
     <p role="status" aria-live="polite">{message}</p>
     {items !== null && <div>
@@ -103,9 +129,8 @@ export function PayoutAdmin({ disabled }: { disabled: boolean }) {
           <div>
             <label>Paid by
               <select value={methods[item.id] ?? 'cash'} onChange={e => setMethods(m => ({ ...m, [item.id]: e.target.value as Method }))}>
-                <option value="cash">Cash</option>
-                <option value="transfer">Bank transfer</option>
-                <option value="adjustment">Adjustment</option>
+                {(payment?.methods ?? FALLBACK_METHODS).map(method =>
+                  <option key={method} value={method}>{methodLabel(method)}</option>)}
               </select>
             </label>
             <label>Reference (optional)

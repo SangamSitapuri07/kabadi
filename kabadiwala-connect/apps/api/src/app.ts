@@ -3,7 +3,7 @@ import type { ErrorRequestHandler } from 'express';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseCustomerDetails } from './customer-details.js';
 import type { CustomerDetails } from './customer-details.js';
-import { isMissingCollectorColumns, parsePickup } from './pickups.js';
+import { PAYMENT_PROVIDER, PAYOUT_METHODS, isMissingCollectorColumns, isPayoutMethod, parsePickup } from './pickups.js';
 import type { CancelOutcome, CollectorOutcome, CreatePickupResult, DisputeOutcome, PayoutOutcome, Pickup } from './pickups.js';
 import { categoryName, rateValue, utcTimestamp } from './catalog.js';
 import type { CategoryPage, RatePage } from './catalog.js';
@@ -201,7 +201,7 @@ export function createApp(auth?: AuthMount) {
     const pay = r.payout;
     if (pay !== null) {
       if (r.status !== 'collected') throw Error('Invalid result');
-      if (!['cash', 'transfer', 'adjustment'].includes(pay.method)) throw Error('Invalid result');
+      if (!isPayoutMethod(pay.method)) throw Error('Invalid result');
       if (typeof pay.amountPaise !== 'string' || !/^\d{1,16}$/.test(pay.amountPaise) || !iso(pay.paidAt)) throw Error('Invalid result');
     }
     return { cancelledAt: r.cancelledAt, cancellationReason: r.cancellationReason,
@@ -467,7 +467,10 @@ export function createApp(auth?: AuthMount) {
           categoryId: r.categoryId, categoryName: r.categoryName, estimatedGrams: r.estimatedGrams,
           amountPaise: r.amountPaise, ...settled, ...terminalState(r) };
       });
-      res.json({ data: { dues: projected } });
+      // `payment` tells the UI whether anything can actually move money. It is
+      // a constant today: no provider is configured, and saying so in the
+      // response keeps that fact out of the client's imagination.
+      res.json({ data: { dues: projected, payment: { ...PAYMENT_PROVIDER, methods: PAYOUT_METHODS } } });
     } catch (error) { if (isMissingCollectorColumns(error)) payoutNeedsMigration(res); else payoutUnavailable(res); }
   });
 
@@ -495,8 +498,8 @@ export function createApp(auth?: AuthMount) {
         res.status(400).json({ error: { code: 'INVALID_BODY', message: 'Only method, reference and note are accepted.' } }); return;
       }
       const { method, reference, note } = body as Record<string, unknown>;
-      if (method !== 'cash' && method !== 'transfer' && method !== 'adjustment') {
-        res.status(400).json({ error: { code: 'INVALID_METHOD', message: 'Method must be cash, transfer or adjustment.' } }); return;
+      if (!isPayoutMethod(method)) {
+        res.status(400).json({ error: { code: 'INVALID_METHOD', message: `Method must be one of: ${PAYOUT_METHODS.join(', ')}.` } }); return;
       }
       // No amount is accepted: the amount is whatever the settlement says.
       if (!optionalText(reference, 100) || !optionalText(note, 200)) {

@@ -7,6 +7,26 @@ import { calculateEstimate } from './catalog.js';
 // record the measured weight, and that fixes the final amount at the rate in
 // force at collection. Still not operational: no scheduling, cancellation,
 // reassignment, dispute handling, payment or retention policy exists.
+
+// PAYMENT MECHANISM IS DELIBERATELY UNDECIDED.
+//
+// A payout row records that money changed hands; it does not cause money to
+// move. Which rail is used (bank transfer, UPI, cash on pickup, a provider
+// integration) is an open product decision, so this module contains no
+// provider client, no credentials, no webhook and no transfer code. When the
+// mechanism is chosen, a provider layer plugs in behind `recordPayout`; the
+// ledger, the amount sourcing and the once-only guard stay exactly as they are.
+//
+// The values below are the set the NOT NULL CHECK on kabadi_pickup.payouts.method
+// accepts. Adding one is a schema migration, not just a code change.
+export const PAYOUT_METHODS = ['cash', 'transfer', 'adjustment'] as const;
+export type PayoutMethod = typeof PAYOUT_METHODS[number];
+export const isPayoutMethod = (value: unknown): value is PayoutMethod =>
+  typeof value === 'string' && (PAYOUT_METHODS as readonly string[]).includes(value);
+
+// What the application can honestly claim about moving money today: nothing.
+// A UI reads this so it never implies a payment was sent.
+export const PAYMENT_PROVIDER = { configured: false as const, name: null as null };
 //
 // A request now names a real catalog category. The applicable rate is selected
 // on the server at request time inside the write transaction and copied onto the
@@ -58,7 +78,7 @@ export type Pickup = {
     | null;
   // What the collector was actually paid, if anything. Null means unpaid; the
   // ledger is the source of truth and this is its read-only projection.
-  payout: { amountPaise: string; method: 'cash' | 'transfer' | 'adjustment'; paidAt: string } | null;
+  payout: { amountPaise: string; method: PayoutMethod; paidAt: string } | null;
 };
 // Cancelling is the customer's own decision on their own row. A collected or
 // already-cancelled request is terminal and cannot be cancelled again.
@@ -357,7 +377,7 @@ export type StoredRequest = StoredPickup & {
   cancelled_at: Date | null; cancellation_reason: string | null; released_at: Date | null;
   dispute_status: 'open' | 'resolved' | 'rejected' | null;
   dispute_reason: string | null; dispute_raised_at: Date | null; dispute_resolved_at: Date | null;
-  payout_amount_paise: string | null; payout_method: 'cash' | 'transfer' | 'adjustment' | null;
+  payout_amount_paise: string | null; payout_method: string | null;
   payout_paid_at: Date | null;
 };
 
@@ -379,11 +399,16 @@ export const toPickup = (r: StoredRequest): Pickup => ({
     reason: r.dispute_reason,
     resolvedAt: r.dispute_resolved_at ? r.dispute_resolved_at.toISOString() : null,
   },
-  payout: r.payout_amount_paise === null || r.payout_paid_at === null || r.payout_method === null ? null : {
-    amountPaise: r.payout_amount_paise,
-    method: r.payout_method,
-    paidAt: r.payout_paid_at.toISOString(),
-  },
+  // A half-written receipt (an amount with no method, say) is corrupt data, not
+  // "unpaid": surface it as an error instead of quietly claiming no payout.
+  payout: r.payout_amount_paise === null && r.payout_paid_at === null && r.payout_method === null ? null : (() => {
+    // The CHECK constraint should make a bad method impossible; if one appears
+    // anyway the schema has drifted, so refuse rather than pass it to a caller.
+    if (r.payout_amount_paise === null || r.payout_paid_at === null || !isPayoutMethod(r.payout_method)) {
+      throw Error('Invalid result');
+    }
+    return { amountPaise: r.payout_amount_paise, method: r.payout_method, paidAt: r.payout_paid_at.toISOString() };
+  })(),
 });
 
 // Columns every read returns, kept in one place so the two list queries and the
@@ -654,7 +679,9 @@ export function createPayoutStore(pool: pg.Pool) {
     },
     async recordPayout(actorId: string, requestId: string, method: unknown, reference: unknown, note: unknown): Promise<PayoutOutcome | 'forbidden'> {
       if (typeof requestId !== 'string' || !UUID_V4.test(requestId)) throw Error('Invalid request id');
-      if (method !== 'cash' && method !== 'transfer' && method !== 'adjustment') throw Error('Invalid method');
+      // One list, one guard: a new method must be added to PAYOUT_METHODS and to
+      // the CHECK constraint together, or both the schema and this refusal break.
+      if (!isPayoutMethod(method)) throw Error('Invalid method');
       return asAdmin(actorId, async c => {
         const locked = await c.query<{ status: string; collector_id: string | null; final_amount_paise: string | null;
           dispute_status: string | null; paid: boolean }>(

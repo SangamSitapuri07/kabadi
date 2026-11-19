@@ -607,9 +607,39 @@ What this does **not** do: it does not transfer money, contact a payment
 provider, mark a bank reference as verified, or keep a ledger of balances. It is
 a record that a payment happened — who, how much, by what method, on whose
 authority. The customer sees only that a payment was recorded, and the amount;
-the method and reference stay internal. A real mechanism (bank transfer, UPI,
-provider integration) is still an open product decision and is deliberately not
-guessed at here.
+the method and reference stay internal.
+
+#### Payment method: not implemented (placeholder)
+
+The payment mechanism is **decided to be decided later**. There is no provider
+client, no credentials, no webhook and no transfer code anywhere in this
+repository, and that is on purpose rather than an oversight. The placeholders
+that exist, and what each one is for:
+
+- `PAYOUT_METHODS` in `apps/api/src/pickups.ts` — the single JavaScript list of
+  accepted methods (`cash`, `transfer`, `adjustment`). Both the store and the
+  route validate against it. The two SQL `CHECK` constraints cannot read a
+  TypeScript constant, so a test asserts that `PAYOUT_METHODS` and both
+  `CHECK (method IN (…))` clauses list exactly the same values. Adding a method
+  therefore requires a migration and fails a test if you only change the code.
+- `PAYMENT_PROVIDER = { configured: false, name: null }` — a constant the payout
+  queue returns as `data.payment`, so the browser learns the truth from the
+  server instead of guessing. The admin screen renders it as a visible notice:
+  "Payment method not implemented yet … nothing is sent to a bank, a wallet or a
+  provider." A missing or malformed `payment` block is treated as *no provider*,
+  never as a reassuring one.
+- `.env.example` — `PAYMENT_PROVIDER` and `PAYMENT_PROVIDER_KEY` are present and
+  deliberately blank. Nothing reads them yet; they are a fixed place for the
+  eventual setting so the shape of the configuration does not have to be
+  invented under time pressure later.
+
+When the mechanism is chosen, a provider layer plugs in **behind**
+`recordPayout`. Everything else is meant to survive that change untouched: the
+amount is still read from the settled row and never from the browser, a request
+is still payable once, an open dispute still blocks payment, and `recorded_by`
+still names the admin. What will have to change is honest and small: flip
+`configured`, add the real method list, and replace the banner with the actual
+provider state — not hide it.
 
 ### Customer self-onboarding (development API)
 
@@ -719,6 +749,7 @@ admin-grant tool, collector acceptance and collection-time settlement,
 cancellation and release, customer disputes with admin correction, and an
 **admin-recorded payout ledger** exist. There is still no dispatch, routing,
 notification, OTP, or actual money movement: recording a payout is bookkeeping,
-and how collectors are really paid is an open product decision. Policy
+and the payment mechanism is an explicit placeholder — no provider is connected,
+and the payout screen says so. Policy
 decisions, full security review and zero-cost provider suitability remain
 pending. Phase 1 is not complete.

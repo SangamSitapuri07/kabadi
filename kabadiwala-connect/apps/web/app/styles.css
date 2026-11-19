@@ -55,3 +55,14 @@ footer { color: #71877a; font-size: .8rem; padding: 25px 0; border-top: 1px soli
 .dispute-admin label { display: grid; gap: 5px; color: #294f3d; font-weight: 700; margin: 8px 0; }
 .dispute-admin input { width: 100%; border: 1px solid #cfded1; border-radius: 8px; padding: 10px; color: #18362c; font: inherit; background: white; }
 .dispute-admin input:focus-visible { outline: 3px solid #21815b; outline-offset: 2px; }
+
+/* Payout ledger: reuses the dispute block's shape, plus a deliberately plain
+   notice that the payment rail is not built. It must read as incomplete. */
+.payout-admin { margin-top: 20px; max-width: 420px; }
+.payout-admin h2 { color: #18362c; font-size: 1.1rem; }
+.payout-admin li { margin: 12px 0; overflow-wrap: anywhere; }
+.payout-admin label { display: grid; gap: 5px; color: #294f3d; font-weight: 700; margin: 8px 0; }
+.payout-admin input, .payout-admin select { width: 100%; border: 1px solid #cfded1; border-radius: 8px; padding: 10px; color: #18362c; font: inherit; background: white; }
+.payout-admin input:focus-visible, .payout-admin select:focus-visible { outline: 3px solid #21815b; outline-offset: 2px; }
+.payout-placeholder { border-left: 4px solid #b58a00; background: #fff8e1; padding: 10px 12px; color: #4a3a00; }
+.payout-placeholder strong { display: block; }

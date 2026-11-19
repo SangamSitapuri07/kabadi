@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { readFile } from 'node:fs/promises';
 import { parsePickup } from '../../apps/api/dist/pickups.js';
 import { createApp } from '../../apps/api/dist/app.js';
 
@@ -752,5 +753,54 @@ test('payout routes reject a client-supplied amount and enforce method and origi
       assert.equal(response.status, status); assert.equal((await response.json()).error.code, code);
     }
     outcome = 'forbidden'; assert.equal((await post('{"method":"cash"}')).status, 403);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
+test('the payout method list cannot drift from the schema CHECK constraint', async () => {
+  const { PAYOUT_METHODS, isPayoutMethod, PAYMENT_PROVIDER } = await import('../../apps/api/dist/pickups.js');
+  // The CHECK constraint is SQL text and cannot read a TypeScript constant, so
+  // the two lists are kept in step by this assertion instead. Adding a method
+  // in one place only is a schema drift waiting to happen.
+  const source = await readFile(new URL('../../apps/api/src/pickups.ts', import.meta.url), 'utf8');
+  const checks = [...source.matchAll(/method text NOT NULL CHECK \(method IN \(([^)]*)\)\)/g)];
+  assert.equal(checks.length, 2, 'the fresh CREATE and the v5->v6 step must both declare it');
+  for (const [, list] of checks) {
+    const inSql = list.split(',').map(v => v.trim().replace(/^'|'$/g, ''));
+    assert.deepEqual(inSql, [...PAYOUT_METHODS], 'SQL CHECK and PAYOUT_METHODS must match exactly');
+  }
+  for (const method of PAYOUT_METHODS) assert.equal(isPayoutMethod(method), true);
+  for (const bad of ['upi', 'cheque', 'CASH', '', null, undefined, 1, {}, []]) {
+    assert.equal(isPayoutMethod(bad), false, `must reject ${JSON.stringify(bad)}`);
+  }
+  // Nothing in the codebase may claim a provider is connected while none is.
+  assert.deepEqual(PAYMENT_PROVIDER, { configured: false, name: null });
+});
+
+test('the payout queue tells the browser that no provider can move money', async () => {
+  const requestId = randomUUID();
+  const row = { id: requestId, status: 'collected', createdAt: '2026-11-20T10:00:00.000Z',
+    address: { name: 'Sample', addressLine: '12 Example', city: 'Ludhiana', state: 'Punjab', postalCode: '141001' },
+    categoryId: '123e4567-e89b-42d3-a456-426614174181', categoryName: 'Synthetic paper',
+    estimatedGrams: 2500, actualGrams: 2000, actualGrams2: 2000,
+    rateId: '123e4567-e89b-42d3-a456-426614174182', paisePerKg: 3245, amountPaise: '8113',
+    finalRateId: '123e4567-e89b-42d3-a456-426614174183', finalPaisePerKg: 3245,
+    finalAmountPaise: '6490', collectedAt: '2026-11-20T10:00:00.000Z',
+    cancelledAt: null, cancellationReason: null, releasedAt: null, dispute: null, payout: null, material: null };
+  const auth = { origin:'http://localhost:3000', handler:async()=>{}, resolveIdentity:async()=>({userId:'admin-1',cookies:[]}),
+    pickups:{ create:async()=>({outcome:'conflict'}), list:async()=>[], cancel:async()=>({outcome:'cancelled'}),
+      raiseDispute:async()=>({outcome:'raised'}) },
+    collector:{ open:async()=>[], mine:async()=>[], accept:async()=>({outcome:'accepted'}),
+      collect:async()=>({outcome:'accepted'}), release:async()=>({outcome:'released'}) },
+    disputes:{ openDisputes:async()=>[], resolveDispute:async()=>({outcome:'resolved'}), rejectDispute:async()=>({outcome:'rejected'}) },
+    payouts:{ unpaidCollectorDues:async()=>[row], recordPayout:async()=>({outcome:'paid'}) } };
+  const server = createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/admin/payouts`,
+      { headers: { origin:'http://localhost:3000' } });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.data.dues.length, 1);
+    // The absence of a provider is stated by the server, not inferred by the UI.
+    assert.deepEqual(body.data.payment, { configured: false, name: null, methods: ['cash','transfer','adjustment'] });
   } finally { await new Promise(resolve=>server.close(resolve)); }
 });
