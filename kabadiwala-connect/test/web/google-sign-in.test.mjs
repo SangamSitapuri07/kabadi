@@ -842,6 +842,43 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.match(section.textContent,/Corrected 2000 g, final amount ₹64\.90 at ₹32\.45\/kg/);
       await unmount();
     });
+    await t.test('the payout screen states the real delivery fact without needing a click', async () => {
+      // Regression: this panel used to say "Recording a payout notifies nobody"
+      // until Load was pressed, which was false once in-app notifications
+      // existed. The mount-time prefetch fixes that, so the fact is on screen
+      // with no interaction at all.
+      await mount(async (url) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/admin/payouts')) return json({data:{dues:[],
+          payment:{configured:false,name:null,methods:['cash','transfer','adjustment']},
+          notifications:{ configured:true, inApp:true, external:[] }}});
+        return json({authenticated:true});
+      });
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector payouts due'));
+      assert.match(section.textContent,/Payment method not implemented yet/);
+      assert.doesNotMatch(section.textContent,/Connected provider/);
+      // The old falsehood must be gone entirely.
+      assert.doesNotMatch(section.textContent,/Recording a payout notifies nobody/);
+      assert.match(section.textContent,/The collector gets an in-app notification/);
+      assert.match(section.textContent,/Nothing is emailed or texted/);
+      await unmount();
+    });
+    await t.test('when the delivery facts cannot be read, the payout screen promises nothing', async () => {
+      // The fallback direction matters: an unreadable fact must not become the
+      // reassuring claim.
+      await mount(async (url) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/admin/payouts')) return json({error:{code:'PAYOUT_UNAVAILABLE'}}, 503);
+        return json({authenticated:true});
+      });
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector payouts due'));
+      assert.match(section.textContent,/Payout notices are in-app only/);
+      assert.match(section.textContent,/Nothing is emailed, texted or pushed to anyone/);
+      // Neither claim about who is told is made without evidence.
+      assert.doesNotMatch(section.textContent,/The collector gets an in-app notification/);
+      assert.doesNotMatch(section.textContent,/Recording a payout notifies nobody/);
+      await unmount();
+    });
     await t.test('admin records a payout and the browser never supplies the amount', async () => {
       const requestId='123e4567-e89b-42d3-a456-426614174170';
       const row={ id:requestId, categoryName:'Synthetic paper', estimatedGrams:2500, actualGrams:2000,

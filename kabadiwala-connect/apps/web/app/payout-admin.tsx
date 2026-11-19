@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 // Mirrors the admin payout bridge. Amounts are decimal strings so that no
 // floating-point rupee arithmetic happens in the browser.
@@ -35,11 +35,39 @@ export function PayoutAdmin({ disabled }: { disabled: boolean }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [payment, setPayment] = useState<Payment | null>(null);
-  // true = the collector gets an in-app notification. External delivery does not
-  // exist either way, so the notice says so regardless.
-  const [notifies, setNotifies] = useState(false);
+  // Both delivery facts are fetched on mount, before any list is loaded: an
+  // admin should not have to click before the screen stops claiming that
+  // recording a payout notifies nobody, when in fact it does.
+  const [notifies, setNotifies] = useState<boolean | null>(null);
   const [methods, setMethods] = useState<Record<string,Method>>({});
   const [references, setReferences] = useState<Record<string,string>>({});
+
+  // Reads the two server-reported facts without pulling the queue. A failure is
+  // silent: the notices then fall back to their cautious wording, which is the
+  // safe direction for both of them.
+  async function preflight() {
+    try {
+      const response = await fetch('/api/v1/admin/payouts', { cache:'no-store', signal:AbortSignal.timeout(10000) });
+      if (!response.ok) return;
+      const json = await response.json();
+      applyDelivery(json?.data);
+    } catch { /* keep the cautious wording */ }
+  }
+
+  // One place decides what the two descriptors mean, so the prefetch and the
+  // post-load path cannot disagree.
+  function applyDelivery(data: unknown) {
+    const value = data as { payment?: unknown; notifications?: unknown } | null;
+    const p = value?.payment as Record<string, unknown> | undefined;
+    const methods = Array.isArray(p?.methods) && p.methods.length &&
+      (p.methods as unknown[]).every(m => typeof m === 'string' && (FALLBACK_METHODS as readonly string[]).includes(m))
+      ? p.methods as Method[] : [...FALLBACK_METHODS];
+    setPayment({ configured: p?.configured === true, name: typeof p?.name === 'string' ? p.name : null, methods });
+    const n = value?.notifications as Record<string, unknown> | undefined;
+    setNotifies(n?.configured === true && n?.inApp === true && Array.isArray(n?.external) && n.external.length === 0);
+  }
+
+  useEffect(() => { void preflight(); }, []);
 
   // `after` carries the confirmation through the reload that follows a payment.
   async function load(after = '') {
@@ -52,17 +80,7 @@ export function PayoutAdmin({ disabled }: { disabled: boolean }) {
         setItems(null); setMessage('The pickup database is behind this build. Run the pickup migration, then reload.'); return;
       }
       if (!response.ok || !Array.isArray(json?.data?.dues)) throw Error('unavailable');
-      // A missing or malformed payment block is treated as "no provider", which
-      // is the safe assumption: never claim money moved when it did not.
-      const reported = json.data.payment;
-      const methods = Array.isArray(reported?.methods) && reported.methods.length &&
-        reported.methods.every((m: unknown) => typeof m === 'string' && (FALLBACK_METHODS as readonly string[]).includes(m))
-        ? reported.methods as Method[] : [...FALLBACK_METHODS];
-      setPayment({ configured: reported?.configured === true, name: typeof reported?.name === 'string' ? reported.name : null, methods });
-      // The collector gets an in-app notification; nothing leaves the app. Only
-      // a report that matches exactly is believed.
-      const n = json.data.notifications;
-      setNotifies(n?.configured === true && n?.inApp === true && Array.isArray(n?.external) && n?.external.length === 0);
+      applyDelivery(json.data);
       const parsed = json.data.dues.map((v: unknown) => {
         if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
         const d = v as Record<string, unknown>;
@@ -120,14 +138,20 @@ export function PayoutAdmin({ disabled }: { disabled: boolean }) {
         state of the system, and it must be replaced when a provider is wired up
         -- not merely hidden. */}
     <p className="payout-placeholder"><strong>Payment method not implemented yet.</strong>{' '}
-      {payment === null ? 'This build records payouts by hand and moves no money.'
+      {payment === null ? 'This build never moves money: a payout is a manual record only.'
         : payment.configured && payment.name ? `Connected provider: ${payment.name}.`
         : 'No payment provider is connected. Every payout below is a manual record; nothing is sent to a bank, a wallet or a provider.'}</p>
+    {/* Three states, and the unknown one must not claim the reassuring thing:
+        before the server answers, say that nothing is emailed, which is true
+        either way, rather than that the collector is told, which may not be. */}
     <p className="notifications-placeholder">
-      <strong>{notifies ? 'The collector gets an in-app notification.' : 'Recording a payout notifies nobody.'}</strong>{' '}
-      {notifies
+      <strong>{notifies === true ? 'The collector gets an in-app notification.'
+        : notifies === false ? 'Recording a payout notifies nobody.'
+        : 'Payout notices are in-app only.'}</strong>{' '}
+      {notifies === true
         ? 'They will see it the next time they open this app. Nothing is emailed or texted, so tell them directly if they are not checking.'
-        : 'Tell them yourself.'}
+        : notifies === false ? 'Tell them yourself. Nothing is emailed, texted or pushed.'
+        : 'Nothing is emailed, texted or pushed to anyone.'}
     </p>
     <button type="button" onClick={() => load()} disabled={disabled || busy}>Load unpaid dues</button>
     <p role="status" aria-live="polite">{message}</p>
