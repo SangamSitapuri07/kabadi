@@ -32,3 +32,7 @@ footer { color: #71877a; font-size: .8rem; padding: 25px 0; border-top: 1px soli
 
 .customer-profile form > button { margin-top: 12px; }
 .customer-profile li { margin: 12px 0; overflow-wrap: anywhere; }
+
+/* Category IDs are long UUIDs; show them in a copyable monospace line. */
+.category-id { display: inline-block; margin-top: 4px; color: #536a5e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .72rem; overflow-wrap: anywhere; }
+.estimate { border-left: 3px solid #21815b; padding-left: 10px; color: #18362c; }

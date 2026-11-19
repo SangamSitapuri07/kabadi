@@ -378,14 +378,33 @@ It refuses unrecognized schemas but version markers do not detect all drift.
 
 ### Test pickup request prototype (development only)
 
-This is not a functioning pickup service. A signed-in active customer can save a
-single free-text material, positive whole-number estimated grams (1–10,000,000),
-and a snapshot of their previously saved customer details, then load their 50
-most recent test requests. No collector is notified or dispatched. Scheduling,
-categories, multiple items, rates and request-time price estimates, cancellation,
-collector actions and audit are not implemented. These are essential before the
-approved marketplace flow can be used. The technical bounds and this prototype
-format are not final product policy; use fictional data only.
+This is not a functioning pickup service. A signed-in active customer can request
+one catalog category with a positive whole-number estimated weight in grams
+(1–10,000,000), and a snapshot of their previously saved customer details is
+copied onto the request, then load their 50 most recent test requests. The server
+picks the newest rate whose `effective_from` has already passed at request time,
+calculates the estimate itself and stores `category_name`, `rate_id`,
+`paise_per_kg` and `amount_paise` on the row. Those snapshot columns are never
+updated afterwards, so a later rate change cannot rewrite an existing estimate.
+The client sends only `{requestKey, categoryId, estimatedGrams}`; a supplied
+rate, amount or material is rejected rather than ignored. No collector is
+notified or dispatched. Scheduling, multiple items per request, cancellation,
+collector-recorded actual weights, the collection-time final rate, settlement,
+assignment and audit are not implemented. These are essential before the approved
+marketplace flow can be used. The technical bounds and this prototype format are
+not final product policy; use fictional data only.
+
+An **estimate is not a price**. Actual weight is confirmed by a collector later
+and the final amount will use the rate in force at collection time, which is not
+built yet. An unknown or deactivated category fails with `UNKNOWN_CATEGORY`, and a
+category with no already-effective rate fails with `NO_RATE`, rather than
+guessing a figure. Because the catalog write API only accepts strictly
+future-dated rates, a freshly created rate does not apply to requests until its
+start time passes.
+
+Requests created before this schema change stay readable: they keep their
+free-text `material`, carry no category or estimate, and are shown in the list
+marked as older requests. The database enforces exactly one shape per row.
 
 The API derives the owner from the validated session and checks active customer
 membership inside the transaction, locking the account row in the same order as
@@ -401,7 +420,9 @@ policy and audited cleanup process are not designed. No automatic migration or
 production readiness/security review is implied.
 
 A new separate `kabadi_pickup` schema requires the existing auth, authorization,
-and customer schemas. It is explicitly migrated, never on startup, and creates
+customer **and catalog** schemas, because request rows reference catalog
+categories and rates. The schema is version 2; an existing version 1 schema is
+upgraded in place, keeping every legacy row. It is explicitly migrated, never on startup, and creates
 no pickup requests. Version checks do not detect all schema drift; upgrades and
 restore have not been tested. Before running on any local development database,
 independently inspect the target, back it up, and obtain explicit approval. Do

@@ -253,30 +253,69 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.match(document.body.textContent, /sign-in could not be confirmed/i);
       await unmount();
     });
-    await t.test('test pickup retries an uncertain save with the same key and loads the list', async () => {
+    await t.test('test pickup retries an uncertain save with the same key, shows the estimate and loads the list', async () => {
       const requests = []; let first = true;
+      const categoryId='123e4567-e89b-42d3-a456-426614174030', rateId='123e4567-e89b-42d3-a456-426614174031';
+      const estimate = {categoryId, categoryName:'Synthetic paper', rateId, paisePerKg:3245, amountPaise:'8113'};
       await mount(async (url, init) => {
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.endsWith('/customer/pickups')) {
-          if (init?.method === 'POST') { requests.push(JSON.parse(init.body)); if (first) { first = false; throw Error('interrupted'); } return json({data:{created:true}}); }
-          return json({data:{pickups:[]}});
+          if (init?.method === 'POST') {
+            requests.push(JSON.parse(init.body));
+            if (first) { first = false; throw Error('interrupted'); }
+            return json({data:{created:true, estimate}});
+          }
+          return json({data:{pickups:[
+            { id:categoryId, status:'requested', createdAt:'2026-11-18T17:00:00.000Z',
+              address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'},
+              estimatedGrams:2500, material:null, ...estimate },
+            { id:rateId, status:'requested', createdAt:'2026-11-17T09:00:00.000Z',
+              address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'},
+              estimatedGrams:900, material:'Old free text', categoryId:null, categoryName:null, rateId:null, paisePerKg:null, amountPaise:null },
+          ]}});
         }
         return json({authenticated:true});
       });
       await clickButton('Set up customer account');
       const section = [...document.querySelectorAll('section')].find(el => el.textContent.includes('Test pickup requests'));
       const inputs = section.querySelectorAll('input');
-      await act(async () => {
-        const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
-        setter.call(inputs[0], 'Paper'); inputs[0].dispatchEvent(new dom.window.Event('input',{bubbles:true}));
-        setter.call(inputs[1], '1500'); inputs[1].dispatchEvent(new dom.window.Event('input',{bubbles:true}));
-      });
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+      const type = async (input, value) => act(async () => { setter.call(input, value); input.dispatchEvent(new dom.window.Event('input',{bubbles:true})); });
+      await type(inputs[0], categoryId);
+      await type(inputs[1], '2500');
       await act(async () => {section.querySelector('form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));});
       assert.match(section.textContent, /could not be confirmed/i);
       await clickButton('Retry same test request');
-      assert.deepEqual(requests[0], requests[1]); assert.equal(requests[0].estimatedGrams,1500);
-      assert.match(section.textContent, /No collector will be notified/);
-      await clickButton('Load my test requests'); assert.match(section.textContent, /No test requests found/);
+      assert.deepEqual(requests[0], requests[1]);
+      assert.equal(requests[0].estimatedGrams,2500);
+      assert.equal(requests[0].categoryId,categoryId);
+      // No client-side price may be sent, only the key, category and weight.
+      assert.deepEqual(Object.keys(requests[0]).sort(), ['categoryId','estimatedGrams','requestKey']);
+      // The server's estimate is displayed, formatted from integer paise.
+      assert.match(section.textContent, /Estimated ₹81\.13 for Synthetic paper at ₹32\.45 per kg/);
+      assert.match(section.textContent, /no collector will be notified/i);
+
+      await clickButton('Load my test requests');
+      // Priced history shows its stored estimate; legacy history says so plainly.
+      assert.match(section.textContent, /Synthetic paper — 2500 g — estimated ₹81\.13 at ₹32\.45\/kg/);
+      assert.match(section.textContent, /Old free text — 900 g — no estimate \(older request\)/);
+      await unmount();
+    });
+    await t.test('test pickup explains a missing rate instead of inventing a price', async () => {
+      await mount(async (url, init) => {
+        if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
+        if (url.endsWith('/customer/pickups') && init?.method === 'POST') return json({error:{code:'NO_RATE'}},409);
+        return json({authenticated:true});
+      });
+      await clickButton('Set up customer account');
+      const section = [...document.querySelectorAll('section')].find(el => el.textContent.includes('Test pickup requests'));
+      const inputs = section.querySelectorAll('input');
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+      await act(async () => { setter.call(inputs[0],'123e4567-e89b-42d3-a456-426614174032'); inputs[0].dispatchEvent(new dom.window.Event('input',{bubbles:true})); });
+      await act(async () => { setter.call(inputs[1],'500'); inputs[1].dispatchEvent(new dom.window.Event('input',{bubbles:true})); });
+      await act(async () => {section.querySelector('form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));});
+      assert.match(section.textContent, /No rate is active for that category yet/i);
+      assert.doesNotMatch(section.textContent, /Estimated ₹/);
       await unmount();
     });
     await t.test('read-only catalog loads pages and clears data on hidden tab', async () => {

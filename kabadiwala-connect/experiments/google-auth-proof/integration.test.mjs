@@ -111,21 +111,29 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 0);
     assert.equal(detailsMigration({ CUSTOMER_DETAILS_MIGRATION_CONFIRM: 'yes' }).status, 0);
     assert.equal((await accountPool.query('SELECT count(*)::int AS count FROM kabadi_customer.details')).rows[0].count, 0);
-    const pickupMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-pickups.js'], { cwd:root, env:{...env, ...overrides}, encoding:'utf8', timeout:20000 });
-    assert.equal(pickupMigration().status, 1);
-    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes', NODE_ENV:'production'}).status, 1);
-    await accountPool.query('CREATE SCHEMA kabadi_pickup');
-    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 1);
-    await accountPool.query('DROP SCHEMA kabadi_pickup');
-    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
-    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
-    assert.equal((await accountPool.query('SELECT count(*)::int AS count FROM kabadi_pickup.requests')).rows[0].count, 0);
     assert.equal(catalogMigration({CATALOG_MIGRATION_CONFIRM:'yes', NODE_ENV:'production'}).status, 1);
     await accountPool.query('CREATE SCHEMA kabadi_catalog');
     assert.equal(catalogMigration({CATALOG_MIGRATION_CONFIRM:'yes'}).status, 1);
     await accountPool.query('DROP SCHEMA kabadi_catalog');
     assert.equal(catalogMigration({CATALOG_MIGRATION_CONFIRM:'yes'}).status, 0);
     assert.equal(catalogMigration({CATALOG_MIGRATION_CONFIRM:'yes'}).status, 0);
+    // Pickups depend on the catalog schema, so this must run after it.
+    const pickupMigration = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/migrate-pickups.js'], { cwd:root, env:{...env, ...overrides}, encoding:'utf8', timeout:20000 });
+    assert.equal(pickupMigration().status, 1);
+    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes', NODE_ENV:'production'}).status, 1);
+    // Without the catalog schema the migration refuses rather than half-applying.
+    await accountPool.query('ALTER SCHEMA kabadi_catalog RENAME TO kabadi_catalog_hold');
+    try {
+      assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 1);
+      assert.equal((await accountPool.query("SELECT to_regclass('kabadi_pickup.requests')::text AS t")).rows[0].t, null);
+    } finally { await accountPool.query('ALTER SCHEMA kabadi_catalog_hold RENAME TO kabadi_catalog'); }
+    await accountPool.query('CREATE SCHEMA kabadi_pickup');
+    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 1);
+    await accountPool.query('DROP SCHEMA kabadi_pickup');
+    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
+    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
+    assert.equal((await accountPool.query('SELECT count(*)::int AS count FROM kabadi_pickup.requests')).rows[0].count, 0);
+    assert.equal((await accountPool.query('SELECT version::int AS v FROM kabadi_pickup.schema_version')).rows[0].v, 2);
     assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.categories')).rows[0].n, 0);
     assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.rates')).rows[0].n, 0);
     assert.equal(retryMigration({CATALOG_RETRY_MIGRATION_CONFIRM:'yes',NODE_ENV:'production'}).status,1);
@@ -140,6 +148,50 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     assert.equal(roleAdminMigration({ROLE_ADMIN_MIGRATION_CONFIRM:'yes'}).status,0);
     assert.equal(roleAdminMigration({ROLE_ADMIN_MIGRATION_CONFIRM:'yes'}).status,0);
     assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_admin.role_changes')).rows[0].n,0);
+
+    // A v1 pickup row (free text, no category) must survive the v2 upgrade
+    // unchanged and must never gain an invented estimate.
+    {
+      const legacyUser = randomUUID();
+      const legacyId = randomUUID();
+      await accountPool.query('INSERT INTO "user" (id,name,email,"emailVerified","createdAt","updatedAt") VALUES ($1,$2,$3,false,now(),now())',[legacyUser,'Legacy',`${legacyUser}@example.test`]);
+      await accountPool.query("INSERT INTO kabadi_authz.accounts VALUES ($1,'active')",[legacyUser]);
+      await accountPool.query("INSERT INTO kabadi_authz.role_grants VALUES ($1,'customer')",[legacyUser]);
+      // Rebuild the pickup schema at v1 exactly as the first release created it.
+      await accountPool.query('DELETE FROM kabadi_pickup.requests');
+      await accountPool.query('DROP TABLE kabadi_pickup.requests');
+      await accountPool.query('DROP TABLE kabadi_pickup.schema_version');
+      await accountPool.query(`CREATE TABLE kabadi_pickup.requests (
+        id uuid PRIMARY KEY, user_id text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
+        request_key uuid NOT NULL, material text NOT NULL CHECK (char_length(material) BETWEEN 1 AND 100),
+        estimated_grams integer NOT NULL CHECK (estimated_grams BETWEEN 1 AND 10000000),
+        status text NOT NULL DEFAULT 'requested' CHECK (status = 'requested'),
+        name text NOT NULL, address_line text NOT NULL, city text NOT NULL, state text NOT NULL, postal_code text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (user_id, request_key))`);
+      await accountPool.query('CREATE INDEX ON kabadi_pickup.requests (user_id, created_at DESC, id DESC)');
+      await accountPool.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 1))');
+      await accountPool.query('INSERT INTO kabadi_pickup.schema_version VALUES (1)');
+      const legacyKey = randomUUID();
+      await accountPool.query(`INSERT INTO kabadi_pickup.requests
+        (id,user_id,request_key,material,estimated_grams,name,address_line,city,state,postal_code)
+        VALUES ($1,$2,$3,'Old newspapers',1200,'Legacy','12 Example Road','Ludhiana','Punjab','141001')`,[legacyId,legacyUser,legacyKey]);
+      assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
+      assert.equal((await accountPool.query('SELECT version::int AS v FROM kabadi_pickup.schema_version')).rows[0].v, 2);
+      const upgraded = (await accountPool.query('SELECT material,category_id,amount_paise,estimated_grams FROM kabadi_pickup.requests WHERE id=$1',[legacyId])).rows[0];
+      assert.deepEqual(upgraded, {material:'Old newspapers', category_id:null, amount_paise:null, estimated_grams:1200});
+      // The upgraded schema still refuses a half-priced row.
+      await assert.rejects(accountPool.query(`INSERT INTO kabadi_pickup.requests (id,user_id,request_key,estimated_grams,name,address_line,city,state,postal_code,paise_per_kg)
+        VALUES ($1,$2,$3,10,'X','y','z','w','1',500)`,[randomUUID(),legacyUser,randomUUID()]), {code:'23514'});
+      // And a legacy row can be listed through the store, labelled as legacy.
+      const legacyList = await createPickupStore(accountPool).list(legacyUser);
+      assert.equal(legacyList.length, 1);
+      assert.equal(legacyList[0].material, 'Old newspapers');
+      assert.equal(legacyList[0].amountPaise, null);
+      assert.equal(legacyList[0].categoryId, null);
+      await accountPool.query('DELETE FROM kabadi_pickup.requests WHERE user_id=$1',[legacyUser]);
+      await accountPool.query('DELETE FROM kabadi_authz.accounts WHERE user_id=$1',[legacyUser]);
+      await accountPool.query('DELETE FROM "user" WHERE id=$1',[legacyUser]);
+    }
     assert.equal(roleTool(['list']).status,1,'role tool must require explicit confirmation');
     assert.equal(roleTool(['list'],{DEV_ROLE_TOOL_CONFIRM:'yes',NODE_ENV:'production'}).status,1,'role tool must refuse production');
     assert.match(roleTool(['list'],{DEV_ROLE_TOOL_CONFIRM:'yes'}).stdout,/Active administrators: 0/);
@@ -315,6 +367,10 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     api = createApp({ origin: publicOrigin, handler: runtime.handler, resolveIdentity: runtime.resolveIdentity, onboardCustomer: runtime.onboardCustomer, customerDetails: runtime.customerDetails, pickups: runtime.pickups, catalog: runtime.catalog }).listen(0, '127.0.0.1');
     await once(api, 'listening');
     const apiOrigin = `http://127.0.0.1:${api.address().port}`;
+    // `next start` serves whatever is in apps/web/.next, so the bridge under
+    // test must be rebuilt first or this would silently exercise stale code.
+    const webBuild = spawnSync(process.execPath, ['node_modules/next/dist/bin/next','build','apps/web'], { cwd:root, env:{...process.env, NEXT_TELEMETRY_DISABLED:'1'}, encoding:'utf8', timeout:300000 });
+    assert.equal(webBuild.status, 0, `web build failed: ${webBuild.stderr?.slice(-800)}`);
     web = spawn(process.execPath, ['node_modules/next/dist/bin/next', 'start', 'apps/web', '-H', '127.0.0.1', '-p', String(webPort)],
       { cwd: root, env: { ...process.env, AUTH_PUBLIC_ORIGIN: publicOrigin, API_INTERNAL_ORIGIN: apiOrigin, NEXT_TELEMETRY_DISABLED: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
     await new Promise((resolve, reject) => {
@@ -453,31 +509,103 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       assert.equal((await details.read(userId)).name, 'Test person');
       await client.query('DELETE FROM kabadi_authz.accounts WHERE user_id = $1', [otherId]);
       assert.equal((await client.query('SELECT count(*)::int AS count FROM kabadi_customer.details WHERE user_id = $1', [otherId])).rows[0].count, 0);
-      // Pickup persistence: owner isolation, retry deduplication and address snapshots.
+      // Pickup persistence: owner isolation, retry deduplication, address and
+      // price snapshots, and request-time rate selection (schema v2).
       const pickups = createPickupStore(accountPool);
-      const request = { requestKey:randomUUID(), material:'Paper', estimatedGrams:2500 };
+      // The earlier catalog tests removed their synthetic admins, so create a
+      // fresh one here; the write path itself still enforces the admin role.
+      const pickupAdmin = randomUUID();
+      await accountPool.query('INSERT INTO "user" (id,name,email,"emailVerified","createdAt","updatedAt") VALUES ($1,$2,$3,false,now(),now())',[pickupAdmin,'Synthetic admin',`${pickupAdmin}@example.test`]);
+      await accountPool.query("INSERT INTO kabadi_authz.accounts VALUES ($1,'active')",[pickupAdmin]);
+      await accountPool.query("INSERT INTO kabadi_authz.role_grants VALUES ($1,'admin')",[pickupAdmin]);
+      const pricedCategory = await catalog.createCategory(pickupAdmin, 'Pickup priced synthetic');
+      assert.equal(typeof pricedCategory.id, 'string', 'the synthetic admin must be able to create a category');
+      const nowMs = Date.now();
+      // Rates may only be created with a future start, so a "live" rate is
+      // simulated by back-dating the row in the disposable database.
+      const liveRate = await catalog.addRate(pickupAdmin, pricedCategory.id, new Date(nowMs + 3600_000).toISOString(), 2000);
+      await accountPool.query("UPDATE kabadi_catalog.rates SET effective_from = now() - interval '1 hour' WHERE id=$1",[liveRate.id]);
+      // A future-dated rate must not be picked for a request made now.
+      await catalog.addRate(pickupAdmin, pricedCategory.id, new Date(nowMs + 7200_000).toISOString(), 9999);
+      const request = { requestKey:randomUUID(), categoryId:pricedCategory.id, estimatedGrams:2500 };
       assert.equal(await pickups.create(otherId, request), 'forbidden');
-      assert.deepEqual(await Promise.all([pickups.create(userId, request), pickups.create(userId, request)]), ['created', 'created']);
-      assert.equal(await pickups.create(userId, {...request, material:'Plastic'}), 'conflict');
-      assert.equal((await pickups.list(userId)).length, 1);
+      const race = await Promise.all([pickups.create(userId, request), pickups.create(userId, request)]);
+      assert.equal(race.filter(r=>r.outcome==='created').length, 1, 'a concurrent retry must not double-insert');
+      assert.equal(race.filter(r=>r.outcome==='replayed').length, 1);
+      const created = race.find(r=>r.outcome==='created').estimate;
+      const replayed = race.find(r=>r.outcome==='replayed').estimate;
+      assert.deepEqual(replayed, created);
+      assert.equal(created.rateId, liveRate.id, 'the effective rate is chosen, never the future one');
+      assert.equal(created.paisePerKg, 2000);
+      assert.equal(created.amountPaise, '5000', '2500 g at 2000 paise/kg is exactly 5000 paise');
+      assert.equal((await pickups.create(userId, {...request, estimatedGrams:2501})).outcome, 'conflict', 'same key, different weight');
+      assert.equal((await pickups.create(userId, {...request, categoryId:randomUUID()})).outcome, 'conflict', 'same key, different category');
+
+      let mine = await pickups.list(userId);
+      assert.equal(mine.length, 1);
+      assert.equal(mine[0].categoryName, 'Pickup priced synthetic');
+      assert.equal(mine[0].paisePerKg, 2000);
+      assert.equal(mine[0].amountPaise, '5000');
+      assert.equal(mine[0].material, null);
+
+      // A later rate must not rewrite the stored snapshot.
+      await accountPool.query("INSERT INTO kabadi_catalog.rates (id,category_id,effective_from,paise_per_kg,created_by) VALUES ($1,$2,now() - interval '30 minutes',7777,$3)",[randomUUID(),pricedCategory.id,pickupAdmin]);
+      assert.equal((await pickups.list(userId))[0].amountPaise, '5000', 'stored estimate must be immutable');
+      const later = await pickups.create(userId, { requestKey:randomUUID(), categoryId:pricedCategory.id, estimatedGrams:2500 });
+      assert.equal(later.outcome, 'created');
+      assert.equal(later.estimate.paisePerKg, 7777, 'a new request picks the newest effective rate');
+      assert.equal(later.estimate.amountPaise, '19443', '2500 g at 7777 paise/kg = 19442.5 paise, tie rounds up');
+
+      // Half-paise ties round up, per the approved policy: 1 g at 500 paise/kg = 0.5 paise -> 1.
+      const tieCategory = await catalog.createCategory(pickupAdmin, 'Pickup tie synthetic');
+      const tieRate = await catalog.addRate(pickupAdmin, tieCategory.id, new Date(nowMs + 3600_000).toISOString(), 500);
+      await accountPool.query("UPDATE kabadi_catalog.rates SET effective_from = now() - interval '2 hours' WHERE id=$1",[tieRate.id]);
+      const tie = await pickups.create(userId, { requestKey:randomUUID(), categoryId:tieCategory.id, estimatedGrams:1 });
+      assert.equal(tie.outcome, 'created');
+      assert.equal(tie.estimate.amountPaise, '1');
+
+      // No effective rate fails closed instead of guessing a price.
+      const bareCategory = await catalog.createCategory(pickupAdmin, 'Pickup no-rate synthetic');
+      assert.equal((await pickups.create(userId, { requestKey:randomUUID(), categoryId:bareCategory.id, estimatedGrams:100 })).outcome, 'no-rate');
+      // Unknown and deactivated categories are refused the same way.
+      assert.equal((await pickups.create(userId, { requestKey:randomUUID(), categoryId:randomUUID(), estimatedGrams:100 })).outcome, 'unknown-category');
+      await accountPool.query('UPDATE kabadi_catalog.categories SET active=false WHERE id=$1',[bareCategory.id]);
+      assert.equal((await pickups.create(userId, { requestKey:randomUUID(), categoryId:bareCategory.id, estimatedGrams:100 })).outcome, 'unknown-category');
+
+      // The address is snapshotted at request time.
       await details.write(userId, {...record, addressLine:'New test road'});
-      assert.equal((await pickups.list(userId))[0].address.addressLine, '12 Example Road');
+      const afterAddressChange = await pickups.list(userId);
+      assert.equal(afterAddressChange.length, 3);
+      assert.ok(afterAddressChange.every(p => p.address.addressLine === '12 Example Road'));
       await details.write(userId, record);
+
+      // Migrating again is a no-op and keeps the priced rows readable.
       await migratePickups(accountPool);
-      assert.equal((await pickups.list(userId)).length, 1);
-      await client.query("UPDATE kabadi_authz.accounts SET status='suspended' WHERE user_id=$1", [userId]);
-      assert.equal(await pickups.list(userId), 'forbidden');
-      assert.equal(await pickups.create(userId, {...request, requestKey:randomUUID()}), 'forbidden');
-      await client.query("UPDATE kabadi_authz.accounts SET status='active' WHERE user_id=$1", [userId]);
-      await client.query("DELETE FROM kabadi_authz.role_grants WHERE user_id=$1 AND role='customer'", [userId]);
-      assert.equal(await pickups.list(userId), 'forbidden');
-      assert.equal(await pickups.create(userId, {...request, requestKey:randomUUID()}), 'forbidden');
-      await client.query("INSERT INTO kabadi_authz.role_grants VALUES ($1, 'customer')", [userId]);
-      await client.query("ALTER TABLE kabadi_pickup.requests ADD CONSTRAINT test_failure CHECK (material <> 'Fail insert')");
+      assert.equal((await pickups.list(userId)).length, 3);
+
+      // A storage failure inside the write transaction leaves nothing behind.
+      await accountPool.query('ALTER TABLE kabadi_pickup.requests ADD CONSTRAINT test_failure CHECK (amount_paise <> 4242)');
+      const failCategory = await catalog.createCategory(pickupAdmin, 'Pickup fail synthetic');
+      const failRate = await catalog.addRate(pickupAdmin, failCategory.id, new Date(nowMs + 3600_000).toISOString(), 4242);
+      await accountPool.query("UPDATE kabadi_catalog.rates SET effective_from = now() - interval '1 hour' WHERE id=$1",[failRate.id]);
       try {
-        await assert.rejects(pickups.create(userId, {...request, requestKey:randomUUID(), material:'Fail insert'}));
-        assert.equal((await pickups.list(userId)).length, 1);
-      } finally { await client.query('ALTER TABLE kabadi_pickup.requests DROP CONSTRAINT test_failure'); }
+        await assert.rejects(pickups.create(userId, { requestKey:randomUUID(), categoryId:failCategory.id, estimatedGrams:1000 }));
+        assert.equal((await pickups.list(userId)).length, 3, 'a failed insert must not persist a row');
+      } finally { await accountPool.query('ALTER TABLE kabadi_pickup.requests DROP CONSTRAINT test_failure'); }
+
+      // Suspension and role loss both close the door.
+      await accountPool.query("UPDATE kabadi_authz.accounts SET status='suspended' WHERE user_id=$1", [userId]);
+      assert.equal(await pickups.list(userId), 'forbidden');
+      assert.equal(await pickups.create(userId, {...request, requestKey:randomUUID()}), 'forbidden');
+      await accountPool.query("UPDATE kabadi_authz.accounts SET status='active' WHERE user_id=$1", [userId]);
+      await accountPool.query("DELETE FROM kabadi_authz.role_grants WHERE user_id=$1 AND role='customer'", [userId]);
+      assert.equal(await pickups.list(userId), 'forbidden');
+      assert.equal(await pickups.create(userId, {...request, requestKey:randomUUID()}), 'forbidden');
+      await accountPool.query("INSERT INTO kabadi_authz.role_grants VALUES ($1, 'customer')", [userId]);
+
+      // Cleanup for the HTTP section below, which re-posts the same request key.
+      await accountPool.query('DELETE FROM kabadi_pickup.requests WHERE user_id=$1', [userId]);
+
       const pickupPath = '/api/v1/customer/pickups';
       for (const base of [apiOrigin, publicOrigin]) {
         const send = (body, origin=publicOrigin, extra={}) => fetch(base+pickupPath, {method:'POST', headers:{origin, 'content-type':'application/json', ...extra}, body:JSON.stringify(body)});
@@ -485,11 +613,41 @@ test('app integration: migration, web bridge and Google-only initiation', { time
         assert.equal((await send(request, publicOrigin, {cookie:cookie+'x'})).status, 401);
         assert.equal((await send(request, 'https://evil.example', {cookie})).status, 403);
         assert.equal((await send({...request, userId:otherId}, publicOrigin, {cookie})).status, 400);
-        assert.equal((await send(request, publicOrigin, {cookie,'x-user-id':otherId})).status, 200);
+        // A client-supplied price is rejected, never trusted.
+        assert.equal((await send({...request, paisePerKg:1}, publicOrigin, {cookie})).status, 400);
+        const fresh = {...request, requestKey:randomUUID()};
+        const posted = await send(fresh, publicOrigin, {cookie,'x-user-id':otherId});
+        assert.equal(posted.status, 200);
+        const postedBody = await posted.json();
+        assert.equal(postedBody.data.created, true);
+        assert.equal(postedBody.data.estimate.amountPaise, '19443', '2500 g at the newest effective rate (7777 paise/kg)');
+        // A replay returns the stored estimate and is flagged as not new.
+        const again = await send(fresh, publicOrigin, {cookie});
+        assert.equal(again.status, 200);
+        const againBody = await again.json();
+        assert.equal(againBody.data.created, false);
+        assert.deepEqual(againBody.data.estimate, postedBody.data.estimate);
+        // The same key with a different weight is a conflict, not a silent overwrite.
+        assert.equal((await send({...fresh, estimatedGrams:100}, publicOrigin, {cookie})).status, 409);
         const listed = await fetch(base+pickupPath, {headers:{cookie,'x-user-id':otherId}});
         assert.equal(listed.status, 200); assert.equal(listed.headers.get('cache-control'), 'no-store');
-        const contents = await listed.json(); assert.equal(contents.data.pickups.length, 1); assert.equal(contents.data.pickups[0].address.addressLine, '12 Example Road');
+        const contents = await listed.json();
+        // Each base adds one fresh request, so the list grows across iterations.
+        assert.ok(contents.data.pickups.length >= 1);
+        assert.ok(contents.data.pickups.every(p => p.status === 'requested' && p.amountPaise === '19443'));
+        assert.ok(contents.data.pickups.every(p => !('estimate' in p)), 'the list exposes flat rows, not the create response');
+        assert.ok(contents.data.pickups.every(p => p.categoryId === pricedCategory.id && p.material === null));
       }
+      // Remove the synthetic pickup catalog fixtures before later catalog reads.
+      await accountPool.query('DELETE FROM kabadi_pickup.requests WHERE category_id = ANY($1::uuid[])',[[pricedCategory.id, tieCategory.id, bareCategory.id, failCategory.id]]);
+      // Idempotency records reference these rows, so clear them first.
+      const pickupFixtures = [pricedCategory.id, tieCategory.id, bareCategory.id, failCategory.id];
+      await accountPool.query('DELETE FROM kabadi_catalog_retry.successes WHERE category_id = ANY($1::uuid[])',[pickupFixtures]);
+      await accountPool.query('DELETE FROM kabadi_catalog.rates WHERE category_id = ANY($1::uuid[])',[pickupFixtures]);
+      await accountPool.query('DELETE FROM kabadi_catalog.categories WHERE id = ANY($1::uuid[])',[pickupFixtures]);
+      await accountPool.query("DELETE FROM kabadi_authz.role_grants WHERE user_id=$1 AND role='admin'",[pickupAdmin]);
+      await accountPool.query('DELETE FROM kabadi_authz.accounts WHERE user_id=$1',[pickupAdmin]);
+      await accountPool.query('DELETE FROM "user" WHERE id=$1',[pickupAdmin]);
       // Real API and Next bridge with a signed synthetic session and disposable DB.
       const detailsPath = '/api/v1/account/customer/details';
       const readDetails = (base, headers = {}) => fetch(base + detailsPath, { headers });
@@ -673,6 +831,12 @@ test('app integration: migration, web bridge and Google-only initiation', { time
           assert.equal(unavailableAccount.status, 503);
           assert.deepEqual(await unavailableAccount.json(), { error: { code: 'AUTHORIZATION_UNAVAILABLE', message: 'Access is unavailable.' } });
         } finally { await client.query('ALTER SCHEMA kabadi_authz_unavailable RENAME TO kabadi_authz'); }
+        // The account still owns a pickup row, so deleting it cascades nowhere:
+        // RESTRICT must refuse. A direct synthetic row is enough to prove the
+        // relationship; the customer grant has already been removed upstream.
+        await client.query(`INSERT INTO kabadi_pickup.requests
+          (id,user_id,request_key,material,estimated_grams,name,address_line,city,state,postal_code)
+          VALUES ($1,$2,$3,'Synthetic legacy',10,'X','Y','Z','W','1')`,[randomUUID(),userId,randomUUID()]);
         await assert.rejects(client.query('DELETE FROM kabadi_authz.accounts WHERE user_id = $1', [userId]), {code:'23001'});
         await client.query('DELETE FROM kabadi_pickup.requests WHERE user_id = $1', [userId]); // synthetic test cleanup only
         await client.query('DELETE FROM kabadi_authz.accounts WHERE user_id = $1', [userId]);

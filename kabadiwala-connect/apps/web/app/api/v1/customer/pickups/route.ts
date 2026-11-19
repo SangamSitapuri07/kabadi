@@ -20,11 +20,28 @@ function project(input: unknown, exact: boolean): Details | null {
   }
   return result;
 }
-function parsePickup(input: unknown): {requestKey:string; material:string; estimatedGrams:number} | null {
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function parsePickup(input: unknown): {requestKey:string; categoryId:string; estimatedGrams:number} | null {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const v = input as Record<string, unknown>;
-  if (Object.keys(v).length !== 3 || typeof v.requestKey !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.requestKey) || typeof v.material !== 'string' || /[\uD800-\uDFFF\u0000-\u001f\u007f-\u009f]/u.test(v.material) || !v.material.trim() || Array.from(v.material.trim()).length > 100 || !Number.isInteger(v.estimatedGrams) || (v.estimatedGrams as number) < 1 || (v.estimatedGrams as number) > 10000000) return null;
-  return {requestKey:v.requestKey.toLowerCase(), material:v.material.trim(), estimatedGrams:v.estimatedGrams as number};
+  if (Object.keys(v).length !== 3 ||
+      typeof v.requestKey !== 'string' || !uuid.test(v.requestKey) ||
+      typeof v.categoryId !== 'string' || !uuid.test(v.categoryId) ||
+      !Number.isInteger(v.estimatedGrams) || (v.estimatedGrams as number) < 1 || (v.estimatedGrams as number) > 10000000) return null;
+  return {requestKey:v.requestKey.toLowerCase(), categoryId:v.categoryId.toLowerCase(), estimatedGrams:v.estimatedGrams as number};
+}
+// The bridge re-validates every field it forwards; the API still owns the
+// authorization and the pricing decision.
+function parseEstimate(input: unknown) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const v = input as Record<string, unknown>;
+  if (!uuid.test(String(v.categoryId ?? '')) || !uuid.test(String(v.rateId ?? '')) ||
+      typeof v.categoryName !== 'string' || !v.categoryName.trim() || Array.from(v.categoryName).length > 100 ||
+      /[\uD800-\uDFFF\u0000-\u001f\u007f-\u009f]/u.test(v.categoryName) ||
+      !Number.isInteger(v.paisePerKg) || (v.paisePerKg as number) < 0 || (v.paisePerKg as number) > 1000000000 ||
+      typeof v.amountPaise !== 'string' || !/^\d{1,16}$/.test(v.amountPaise)) return null;
+  return { categoryId:v.categoryId as string, categoryName:v.categoryName, rateId:v.rateId as string,
+    paisePerKg:v.paisePerKg as number, amountPaise:v.amountPaise };
 }
 async function handle(request: Request, method: 'GET' | 'POST') {
   try {
@@ -68,20 +85,35 @@ async function handle(request: Request, method: 'GET' | 'POST') {
     const data: unknown = await upstream.json();
     let payload: object;
     if (upstream.status === 200 && data && typeof data === 'object' && 'data' in data && data.data && typeof data.data === 'object') {
-      if (method === 'POST' && 'created' in data.data && data.data.created === true) payload = { data: { created: true } };
+      if (method === 'POST' && 'created' in data.data && typeof data.data.created === 'boolean' && 'estimate' in data.data) {
+        const estimate = parseEstimate(data.data.estimate);
+        if (!estimate) return unavailable();
+        payload = { data: { created: data.data.created, estimate } };
+      }
       else if (method === 'GET' && 'pickups' in data.data && Array.isArray(data.data.pickups) && data.data.pickups.length <= 50) {
         const pickups = data.data.pickups.map((r: unknown) => {
           if (!r || typeof r !== 'object' || Array.isArray(r)) throw Error('Invalid response');
           const v = r as Record<string, unknown>;
-          const item = parsePickup({ requestKey:v.id, material:v.material, estimatedGrams:v.estimatedGrams });
           const address = project(v.address, false);
-          if (!item || !address || v.status !== 'requested' || typeof v.createdAt !== 'string' || Number.isNaN(Date.parse(v.createdAt))) throw Error('Invalid response');
-          return { id:item.requestKey, material:item.material, estimatedGrams:item.estimatedGrams, status:'requested', createdAt:v.createdAt, address };
+          if (!address || v.status !== 'requested' || !uuid.test(String(v.id ?? '')) ||
+              typeof v.createdAt !== 'string' || Number.isNaN(Date.parse(v.createdAt)) ||
+              !Number.isInteger(v.estimatedGrams)) throw Error('Invalid response');
+          // Either a priced item with a snapshot, or a legacy free-text request.
+          if (v.categoryId !== null) {
+            const estimate = parseEstimate({ categoryId:v.categoryId, categoryName:v.categoryName, rateId:v.rateId, paisePerKg:v.paisePerKg, amountPaise:v.amountPaise });
+            if (!estimate) throw Error('Invalid response');
+            return { id:v.id, status:'requested', createdAt:v.createdAt, address, estimatedGrams:v.estimatedGrams,
+              material:null, ...estimate };
+          }
+          if (typeof v.material !== 'string' || !v.material.trim() || Array.from(v.material).length > 100 ||
+              /[\uD800-\uDFFF\u0000-\u001f\u007f-\u009f]/u.test(v.material)) throw Error('Invalid response');
+          return { id:v.id, status:'requested', createdAt:v.createdAt, address, estimatedGrams:v.estimatedGrams,
+            material:v.material, categoryId:null, categoryName:null, rateId:null, paisePerKg:null, amountPaise:null };
         });
         payload = { data: { pickups } };
       } else return unavailable();
     } else if (data && typeof data === 'object' && 'error' in data && data.error && typeof data.error === 'object' && 'code' in data.error && typeof data.error.code === 'string') {
-      const messages: Record<string, [number, string]> = { INVALID_BODY:[400, 'Test pickup request is invalid.'], SIGN_IN_REQUIRED:[401, 'Sign-in is required.'], FORBIDDEN:[403, 'Customer access is required.'], PROFILE_REQUIRED:[409, 'Save customer details first.'], REQUEST_CONFLICT:[409, 'This request key was already used.'], PICKUP_UNAVAILABLE:[503, 'Test pickup requests are unavailable.'] };
+      const messages: Record<string, [number, string]> = { INVALID_BODY:[400, 'Test pickup request is invalid.'], SIGN_IN_REQUIRED:[401, 'Sign-in is required.'], FORBIDDEN:[403, 'Customer access is required.'], PROFILE_REQUIRED:[409, 'Save customer details first.'], REQUEST_CONFLICT:[409, 'This request key was already used.'], UNKNOWN_CATEGORY:[409, 'That category is not available.'], NO_RATE:[409, 'No rate is active for that category yet.'], PICKUP_UNAVAILABLE:[503, 'Test pickup requests are unavailable.'] };
       const entry = messages[data.error.code]; if (!entry || entry[0] !== upstream.status) return unavailable();
       payload = { error: { code:data.error.code, message:entry[1] } };
     } else return unavailable();

@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseCustomerDetails } from './customer-details.js';
 import type { CustomerDetails } from './customer-details.js';
 import { parsePickup } from './pickups.js';
-import type { Pickup } from './pickups.js';
+import type { CreatePickupResult, Pickup } from './pickups.js';
 import { categoryName, rateValue, utcTimestamp } from './catalog.js';
 import type { CategoryPage, RatePage } from './catalog.js';
 
@@ -13,10 +13,14 @@ type AuthMount = {
   handler: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
   resolveIdentity?: (cookie?: string) => Promise<{ userId: string | null; cookies: string[] }>;
   onboardCustomer?: (userId: string) => Promise<'ready' | 'forbidden'>;
-  pickups?: { create: (userId: string, input: unknown) => Promise<'created' | 'missing-profile' | 'conflict' | 'forbidden'>; list: (userId: string) => Promise<Pickup[] | 'forbidden'> };
+  pickups?: { create: (userId: string, input: unknown) => Promise<CreatePickupResult | 'forbidden'>; list: (userId: string) => Promise<Pickup[] | 'forbidden'> };
   catalog?: { listCategories: (actorId:string, after:string | null) => Promise<CategoryPage | 'forbidden'>; listRates: (actorId:string, categoryId:string, after:string | null) => Promise<RatePage | 'not-found' | 'forbidden'>; createCategory: (actorId: string, name: unknown, key:string) => Promise<{id:string} | 'duplicate' | 'conflict' | 'forbidden'>; addRate: (actorId: string, categoryId: string, effectiveFrom: unknown, rate: unknown, key:string) => Promise<{id:string} | 'invalid-time' | 'not-found' | 'conflict' | 'forbidden'> };
   customerDetails?: { read: (userId: string) => Promise<CustomerDetails | null | 'forbidden'>; write: (userId: string, input: unknown) => Promise<'saved' | 'forbidden'> };
 };
+
+// Bounded, already-trimmed user-visible text; rejects control characters.
+const text = (value: unknown, max: number): value is string => typeof value === 'string' && value.trim() === value &&
+  value.length > 0 && Array.from(value).length <= max && !/[\uD800-\uDFFF\u0000-\u001f\u007f-\u009f]/u.test(value);
 
 // Never echo parser errors or unexpected exception messages to clients.
 export const errorHandler: ErrorRequestHandler = (error: unknown, _request, response, next) => {
@@ -155,11 +159,23 @@ export function createApp(auth?: AuthMount) {
       const result = await auth.pickups.list(id);
       if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Customer access is required.' } }); return; }
       if (!Array.isArray(result) || result.length > 50) throw Error('Invalid result');
+      const paise = (value: unknown) => typeof value === 'string' && /^\d{1,16}$/.test(value) && BigInt(value) <= 10000000000000n;
+      // Each stored row is re-validated so a malformed record cannot reach the
+      // client, and the two shapes (priced item or legacy free text) stay apart.
       const projected = result.map(r => {
-        const input = parsePickup({ requestKey: r.id, material: r.material, estimatedGrams: r.estimatedGrams });
         const address = parseCustomerDetails(r.address);
-        if (!input || !address || r.status !== 'requested' || typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt))) throw Error('Invalid result');
-        return { id:r.id, material:input.material, estimatedGrams:input.estimatedGrams, status:r.status, createdAt:r.createdAt, address };
+        if (!address || r.status !== 'requested' || typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt)) ||
+            !Number.isInteger(r.estimatedGrams) || r.estimatedGrams < 1 || r.estimatedGrams > 10000000 || !uuid.test(r.id)) throw Error('Invalid result');
+        const priced = r.categoryId !== null;
+        if (priced) {
+          if (!uuid.test(r.categoryId as string) || !text(r.categoryName, 100) || !uuid.test(r.rateId as string) ||
+              !Number.isInteger(r.paisePerKg) || (r.paisePerKg as number) < 0 || (r.paisePerKg as number) > 1000000000 || !paise(r.amountPaise)) throw Error('Invalid result');
+        } else if (r.material === null || !text(r.material, 100)) throw Error('Invalid result');
+        return {
+          id: r.id, status: r.status, createdAt: r.createdAt, address, estimatedGrams: r.estimatedGrams,
+          material: r.material, categoryId: r.categoryId, categoryName: r.categoryName,
+          rateId: r.rateId, paisePerKg: r.paisePerKg, amountPaise: r.amountPaise,
+        };
       });
       res.json({ data: { pickups: projected } });
     } catch { pickupUnavailable(res); }
@@ -178,10 +194,18 @@ export function createApp(auth?: AuthMount) {
       const id = await detailsAuth(req, res); if (id === null) return;
       const result = await auth!.pickups!.create(id, input);
       if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Customer access is required.' } }); return; }
-      if (result === 'missing-profile') { res.status(409).json({ error: { code: 'PROFILE_REQUIRED', message: 'Save customer details first.' } }); return; }
-      if (result === 'conflict') { res.status(409).json({ error: { code: 'REQUEST_CONFLICT', message: 'This request key was already used.' } }); return; }
-      if (result !== 'created') throw Error('Invalid result');
-      res.json({ data: { created: true } });
+      if (result.outcome === 'missing-profile') { res.status(409).json({ error: { code: 'PROFILE_REQUIRED', message: 'Save customer details first.' } }); return; }
+      if (result.outcome === 'conflict') { res.status(409).json({ error: { code: 'REQUEST_CONFLICT', message: 'This request key was already used.' } }); return; }
+      if (result.outcome === 'unknown-category') { res.status(409).json({ error: { code: 'UNKNOWN_CATEGORY', message: 'That category is not available.' } }); return; }
+      if (result.outcome === 'no-rate') { res.status(409).json({ error: { code: 'NO_RATE', message: 'No rate is active for that category yet.' } }); return; }
+      if (result.outcome !== 'created' && result.outcome !== 'replayed') throw Error('Invalid result');
+      const { estimate } = result;
+      // The amount is computed by the server from a snapshotted rate; the client
+      // cannot supply grams-per-rupee, a rate or an amount.
+      if (!uuid.test(estimate.categoryId) || !text(estimate.categoryName, 100) || !uuid.test(estimate.rateId) ||
+          !Number.isInteger(estimate.paisePerKg) || estimate.paisePerKg < 0 || estimate.paisePerKg > 1000000000 ||
+          typeof estimate.amountPaise !== 'string' || !/^\d{1,16}$/.test(estimate.amountPaise)) throw Error('Invalid estimate');
+      res.json({ data: { created: result.outcome === 'created', estimate } });
     } catch { pickupUnavailable(res); }
   });
   // Development-only admin writes. Identity comes exclusively from the session;
