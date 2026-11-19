@@ -2,6 +2,7 @@ import type pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { CustomerDetails } from './customer-details.js';
 import { calculateEstimate } from './catalog.js';
+import type { NotificationEvent } from './notifications.js';
 
 // Development request capture and collection. A collector can accept a request,
 // record the measured weight, and that fixes the final amount at the rate in
@@ -118,11 +119,28 @@ export function parsePickup(input: unknown): PickupInput | null {
   return { requestKey: v.requestKey.toLowerCase(), categoryId: v.categoryId.toLowerCase(), estimatedGrams: v.estimatedGrams as number };
 }
 
+// One row per event, per recipient. `request_id` is nullable on purpose: a
+// notification is a message about something, and losing the message because the
+// subject was deleted would be worse than a dangling reference.
+//
+// There is deliberately no "sent" column and no transport. Delivery is the
+// recipient reading it in the app; `read_at` is the only delivery fact.
+const NOTIFICATION_DDL = `CREATE TABLE IF NOT EXISTS kabadi_pickup.notifications (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  recipient_id text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
+  event text NOT NULL CHECK (event IN ('pickup-requested','pickup-accepted','pickup-collected','pickup-cancelled','claim-released','dispute-raised','dispute-resolved','dispute-rejected','payout-recorded')),
+  request_id uuid REFERENCES kabadi_pickup.requests(id) ON DELETE SET NULL,
+  actor_id text REFERENCES kabadi_authz.accounts(user_id) ON DELETE SET NULL,
+  detail text CHECK (detail IS NULL OR char_length(detail) BETWEEN 1 AND 200),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  read_at timestamptz
+)`;
+
 // Version 2 adds the pricing snapshot. Version 1 databases are upgraded in
 // place, keeping existing free-text requests valid. Never run at startup.
 export type PickupMigrationReport = {
   action: 'created' | 'upgraded' | 'unchanged';
-  schemaVersion: 6;
+  schemaVersion: 7;
   fromVersion: number;
   // Requests created before pricing existed. They survive untouched but carry
   // no estimate, so the operator must know how many there are.
@@ -147,7 +165,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       const marker = await c.query<{ marker: string | null }>("SELECT to_regclass('kabadi_pickup.schema_version')::text AS marker");
       if (!marker.rows[0]?.marker) throw Error('Unrecognized pickup schema');
       const versions = await c.query<{ version: number }>('SELECT version FROM kabadi_pickup.schema_version');
-      if (versions.rows.length !== 1 || ![1, 2, 3, 4, 5, 6].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
+      if (versions.rows.length !== 1 || ![1, 2, 3, 4, 5, 6, 7].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
       currentVersion = versions.rows[0]!.version;
     }
     // Remember where we started so the report can describe the real change
@@ -155,7 +173,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
     const startingVersion = currentVersion;
     if (currentVersion === 0) {
       await c.query('CREATE SCHEMA kabadi_pickup');
-      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 6))');
+      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 7))');
       await c.query(`CREATE TABLE kabadi_pickup.requests (
         id uuid PRIMARY KEY, user_id text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
         request_key uuid NOT NULL, material text CHECK (material IS NULL OR char_length(material) BETWEEN 1 AND 100),
@@ -216,10 +234,13 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
         note text CHECK (note IS NULL OR char_length(note) BETWEEN 1 AND 200)
       )`);
       await c.query('CREATE INDEX payout_collector ON kabadi_pickup.payouts (collector_id, paid_at DESC)');
+      await c.query(NOTIFICATION_DDL);
+      await c.query('CREATE INDEX notification_recipient ON kabadi_pickup.notifications (recipient_id, created_at DESC, id DESC)');
+      await c.query('CREATE INDEX notification_unread ON kabadi_pickup.notifications (recipient_id) WHERE read_at IS NULL');
       await c.query('CREATE INDEX ON kabadi_pickup.requests (user_id, created_at DESC, id DESC)');
       await c.query("CREATE INDEX pickup_open ON kabadi_pickup.requests (created_at) WHERE status='requested' AND category_id IS NOT NULL");
       await c.query("CREATE INDEX pickup_collector ON kabadi_pickup.requests (collector_id, status)");
-      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (6)');
+      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (7)');
     }
     if (currentVersion === 1) {
       // Upgrade in place: existing rows keep material and gain no estimate.
@@ -328,6 +349,18 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 6)');
       currentVersion = 6;
     }
+    if (currentVersion === 6) {
+      // In-app notifications: a durable row per event, written in the same
+      // transaction as the change it announces. No transport, no queue and no
+      // external delivery -- the recipient reads these in the application.
+      await c.query(NOTIFICATION_DDL);
+      await c.query('CREATE INDEX IF NOT EXISTS notification_recipient ON kabadi_pickup.notifications (recipient_id, created_at DESC, id DESC)');
+      await c.query('CREATE INDEX IF NOT EXISTS notification_unread ON kabadi_pickup.notifications (recipient_id) WHERE read_at IS NULL');
+      await c.query('ALTER TABLE kabadi_pickup.schema_version DROP CONSTRAINT IF EXISTS schema_version_version_check');
+      await c.query('UPDATE kabadi_pickup.schema_version SET version = 7');
+      await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 7)');
+      currentVersion = 7;
+    }
     // The version row is a claim; verify the columns it promises. Without this a
     // half-applied upgrade looks identical to a finished one and the migration
     // would cheerfully report "nothing changed" over a broken table.
@@ -359,8 +392,8 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
        FROM kabadi_pickup.requests`);
     await c.query('COMMIT');
     return {
-      action: startingVersion === 0 ? 'created' : startingVersion < 6 ? 'upgraded' : 'unchanged',
-      schemaVersion: 6,
+      action: startingVersion === 0 ? 'created' : startingVersion < 7 ? 'upgraded' : 'unchanged',
+      schemaVersion: 7,
       fromVersion: startingVersion,
       legacyRequests: Number(counts.rows[0]?.legacy ?? 0),
     };
@@ -499,6 +532,15 @@ export function createPickupStore(pool: pg.Pool) {
           }
           return { outcome: 'missing-profile' as const };
         }
+        // Every other collector with an active account learns there is work.
+        // The requester is excluded, so a collector's own request stays silent.
+        const newId = inserted.rows[0].id;
+        await c.query(
+          `INSERT INTO kabadi_pickup.notifications (recipient_id, event, request_id, actor_id, detail)
+           SELECT a.user_id, 'pickup-requested', $2, $1, $3
+           FROM kabadi_authz.accounts a
+           JOIN kabadi_authz.role_grants g ON g.user_id = a.user_id AND g.role='collector'
+           WHERE a.status='active' AND a.user_id <> $1`, [userId, newId, short(category.rows[0].name)]);
         return { outcome: 'created' as const, estimate: {
           categoryId: input.categoryId, categoryName: category.rows[0].name, rateId: chosen.id,
           paisePerKg: chosen.paise_per_kg, amountPaise: estimate.amountPaise,
@@ -527,7 +569,16 @@ export function createPickupStore(pool: pg.Pool) {
              SET dispute_status='open', dispute_reason=$3, dispute_raised_at=now(), dispute_resolved_at=NULL
            WHERE id=$1 AND user_id=$2 AND status='collected'
              AND (dispute_status IS NULL OR dispute_status='rejected') RETURNING id`, [requestId, userId, reason]);
-        if (updated.rowCount === 1) return { outcome: 'raised' as const };
+        if (updated.rowCount === 1) {
+          // Admins are the ones who must act, so they are the recipients.
+          await c.query(
+            `INSERT INTO kabadi_pickup.notifications (recipient_id, event, request_id, actor_id, detail)
+             SELECT a.user_id, 'dispute-raised', $2, $1, $3
+             FROM kabadi_authz.accounts a
+             JOIN kabadi_authz.role_grants g ON g.user_id = a.user_id AND g.role='admin'
+             WHERE a.status='active'`, [userId, requestId, short(reason)]);
+          return { outcome: 'raised' as const };
+        }
         const current = await c.query<{ status: string; owner: boolean; dispute_status: string | null }>(
           'SELECT status, user_id=$2 AS owner, dispute_status FROM kabadi_pickup.requests WHERE id=$1', [requestId, userId]);
         const found = current.rows[0];
@@ -549,7 +600,16 @@ export function createPickupStore(pool: pg.Pool) {
                  collector_id=NULL, accepted_at=NULL
            WHERE id=$1 AND user_id=$2 AND status IN ('requested','accepted') RETURNING id`,
           [requestId, userId, reason]);
-        if (updated.rowCount === 1) return { outcome: 'cancelled' as const };
+        if (updated.rowCount === 1) {
+          // The claim, if any, is gone. Tell whoever held it: their row has
+          // vanished from their queue and this is the only signal they get.
+          const held = await c.query<{ collector_id: string | null }>(
+            'SELECT collector_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
+          const collector = held.rows[0]?.collector_id ?? null;
+          if (collector) await notify(c, { recipientId: collector, event: 'pickup-cancelled',
+            requestId, actorId: userId, detail: reason === null ? null : short(reason) });
+          return { outcome: 'cancelled' as const };
+        }
         const current = await c.query<{ status: string; owner: boolean }>(
           'SELECT status, user_id=$2 AS owner FROM kabadi_pickup.requests WHERE id=$1', [requestId, userId]);
         const found = current.rows[0];
@@ -570,6 +630,83 @@ export function createPickupStore(pool: pg.Pool) {
 export function isMissingCollectorColumns(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   return code === '42703';
+}
+
+// Reading and acknowledging in-app notifications. There is no delivery step to
+// model: a notification is delivered when the recipient's screen shows it, and
+// read_at is the only thing the app changes about it.
+export type Notification = {
+  id: string; event: NotificationEvent; requestId: string | null;
+  detail: string | null; createdAt: string; readAt: string | null;
+};
+export type NotificationList = { items: Notification[]; unread: number };
+type StoredNotification = {
+  id: string; event: NotificationEvent; request_id: string | null;
+  detail: string | null; created_at: Date; read_at: Date | null;
+  // A message pointing at a request the reader may no longer see is dropped
+  // rather than shown with no context.
+  visible: boolean;
+};
+export function createNotificationStore(pool: pg.Pool) {
+  // Any signed-in account can read its own notifications; no role is required,
+  // because every role receives some.
+  async function asSelf<T>(actorId: string, action: (c: pg.PoolClient) => Promise<T>): Promise<T | 'forbidden'> {
+    if (typeof actorId !== 'string' || !actorId.trim()) throw Error('Invalid identity');
+    const c = await pool.connect();
+    try {
+      await c.query('BEGIN');
+      const account = await c.query<{ status: string }>('SELECT status FROM kabadi_authz.accounts WHERE user_id=$1', [actorId]);
+      if (account.rows[0]?.status !== 'active') { await c.query('COMMIT'); return 'forbidden'; }
+      const result = await action(c); await c.query('COMMIT'); return result;
+    } catch (error) { try { await c.query('ROLLBACK'); } catch {} throw error; } finally { c.release(); }
+  }
+  const toNotification = (r: StoredNotification): Notification => ({
+    id: r.id, event: r.event, requestId: r.request_id, detail: r.detail,
+    createdAt: r.created_at.toISOString(), readAt: r.read_at ? r.read_at.toISOString() : null,
+  });
+  return {
+    // Only this account's rows, newest first. `visible` keeps a message about a
+    // request that is no longer readable out of the list.
+    list(actorId: string): Promise<NotificationList | 'forbidden'> {
+      return asSelf(actorId, async c => {
+        const rows = await c.query<StoredNotification>(
+          `SELECT n.id, n.event, n.request_id, n.detail, n.created_at, n.read_at,
+                  (n.request_id IS NULL OR EXISTS (
+                     SELECT 1 FROM kabadi_pickup.requests r
+                     WHERE r.id = n.request_id
+                       AND (r.user_id = $1 OR r.collector_id = $1
+                            OR EXISTS (SELECT 1 FROM kabadi_authz.role_grants g
+                                       WHERE g.user_id = $1 AND g.role='admin')))
+                  ) AS visible
+           FROM kabadi_pickup.notifications n
+           WHERE n.recipient_id = $1
+           ORDER BY n.created_at DESC, n.id DESC LIMIT 50`, [actorId]);
+        const items = rows.rows.filter(r => r.visible).map(toNotification);
+        const unread = items.filter(i => i.readAt === null).length;
+        return { items, unread };
+      });
+    },
+    // Marking is scoped to the caller's own rows, so one account cannot clear
+    // another's badge. Marking an already-read row is a no-op, not an error.
+    markRead(actorId: string, id: string): Promise<{ read: true } | 'not-found' | 'forbidden'> {
+      return asSelf(actorId, async c => {
+        const updated = await c.query(
+          `UPDATE kabadi_pickup.notifications SET read_at = COALESCE(read_at, now())
+           WHERE id=$1 AND recipient_id=$2 RETURNING id`, [id, actorId]);
+        if (updated.rowCount === 1) return { read: true as const };
+        // Distinguish "yours but already gone" from "not yours at all" by never
+        // revealing which: both are simply not-found to the caller.
+        return 'not-found' as const;
+      });
+    },
+    markAllRead(actorId: string): Promise<{ cleared: number } | 'forbidden'> {
+      return asSelf(actorId, async c => {
+        const updated = await c.query(
+          'UPDATE kabadi_pickup.notifications SET read_at = now() WHERE recipient_id=$1 AND read_at IS NULL', [actorId]);
+        return { cleared: updated.rowCount ?? 0 };
+      });
+    },
+  };
 }
 
 // Admin-only dispute handling. The resolution re-prices at the rate frozen on
@@ -625,6 +762,12 @@ export function createDisputeStore(pool: pg.Pool) {
            WHERE id=$1 AND status='collected' AND dispute_status='open' RETURNING id`,
           [requestId, correctedGrams, estimate.amountPaise]);
         if (updated.rowCount !== 1) throw Error('Concurrent resolution');
+        {
+          const owner = await c.query<{ user_id: string }>(
+            'SELECT user_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
+          if (owner.rows[0]) await notify(c, { recipientId: owner.rows[0].user_id, event: 'dispute-resolved',
+            requestId, actorId, detail: short(`${correctedGrams} g at ${found.final_paise_per_kg} paise/kg = ${estimate.amountPaise} paise`) });
+        }
         return { outcome: 'resolved' as const, finalAmountPaise: estimate.amountPaise,
           finalPaisePerKg: found.final_paise_per_kg, actualGrams: correctedGrams };
       });
@@ -637,7 +780,13 @@ export function createDisputeStore(pool: pg.Pool) {
           `UPDATE kabadi_pickup.requests
              SET dispute_status='rejected', dispute_resolved_at=now()
            WHERE id=$1 AND status='collected' AND dispute_status='open' RETURNING id`, [requestId]);
-        if (updated.rowCount === 1) return { outcome: 'rejected' as const };
+        if (updated.rowCount === 1) {
+          const owner = await c.query<{ user_id: string }>(
+            'SELECT user_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
+          if (owner.rows[0]) await notify(c, { recipientId: owner.rows[0].user_id, event: 'dispute-rejected',
+            requestId, actorId, detail: null });
+          return { outcome: 'rejected' as const };
+        }
         const current = await c.query<{ status: string; dispute_status: string | null }>(
           'SELECT status, dispute_status FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
         const found = current.rows[0];
@@ -648,6 +797,26 @@ export function createDisputeStore(pool: pg.Pool) {
     },
   };
 }
+
+// ---- In-app notifications ------------------------------------------------
+// Written on the transaction that makes the change, never after it. If the
+// change rolls back, so does the message: a notification about something that
+// did not happen would be worse than silence.
+//
+// The recipient is always somebody other than the actor, because a person does
+// not need to be told what they just did themselves.
+async function notify(c: pg.PoolClient, input: {
+  recipientId: string; event: NotificationEvent; requestId: string;
+  actorId: string | null; detail: string | null;
+}) {
+  if (input.recipientId === input.actorId) return;
+  await c.query(
+    `INSERT INTO kabadi_pickup.notifications (recipient_id, event, request_id, actor_id, detail)
+     VALUES ($1,$2,$3,$4,$5)`,
+    [input.recipientId, input.event, input.requestId, input.actorId, input.detail]);
+}
+
+const short = (value: string) => value.length > 200 ? `${value.slice(0, 197)}...` : value;
 
 // Admin-only payout ledger. Recording a payment never changes the settlement;
 // it records that this collector was handed this amount by this person.
@@ -706,6 +875,8 @@ export function createPayoutStore(pool: pg.Pool) {
            ON CONFLICT (request_id) DO NOTHING RETURNING request_id`,
           [requestId, found.collector_id, found.final_amount_paise, method, reference, actorId, note]);
         if (inserted.rowCount !== 1) return { outcome: 'already-paid' as const };
+        await notify(c, { recipientId: found.collector_id, event: 'payout-recorded',
+          requestId, actorId, detail: short(`${found.final_amount_paise} paise by ${method}`) });
         return { outcome: 'paid' as const, amountPaise: found.final_amount_paise, method };
       });
     },
@@ -766,7 +937,13 @@ export function createCollectorStore(pool: pg.Pool) {
           `UPDATE kabadi_pickup.requests SET status='accepted', collector_id=$2, accepted_at=now()
            WHERE id=$1 AND status='requested' AND category_id IS NOT NULL AND user_id <> $2 RETURNING id`,
           [requestId, userId]);
-        if (updated.rowCount === 1) return { outcome: 'accepted' as const };
+        if (updated.rowCount === 1) {
+          const owner = await c.query<{ user_id: string }>(
+            'SELECT user_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
+          if (owner.rows[0]) await notify(c, { recipientId: owner.rows[0].user_id, event: 'pickup-accepted',
+            requestId, actorId: userId, detail: null });
+          return { outcome: 'accepted' as const };
+        }
         const current = await c.query<{ status: string; category_id: string | null; user_id: string }>(
           'SELECT status, category_id, user_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
         const found = current.rows[0];
@@ -808,6 +985,14 @@ export function createCollectorStore(pool: pg.Pool) {
            WHERE id=$1 AND status='accepted' AND collector_id=$6 RETURNING id`,
           [requestId, grams, chosen.id, chosen.paise_per_kg, estimate.amountPaise, userId]);
         if (updated.rowCount !== 1) throw Error('Concurrent collection');
+        {
+          const owner = await c.query<{ user_id: string }>(
+            'SELECT user_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
+          // The amount is in the message because that is the number the customer
+          // will be paid (or will dispute), and reading it here saves a trip.
+          if (owner.rows[0]) await notify(c, { recipientId: owner.rows[0].user_id, event: 'pickup-collected',
+            requestId, actorId: userId, detail: short(`${grams} g at ${chosen.paise_per_kg} paise/kg = ${estimate.amountPaise} paise`) });
+        }
         return { outcome: 'collected' as const, finalAmountPaise: estimate.amountPaise,
           finalPaisePerKg: chosen.paise_per_kg, finalRateId: chosen.id, actualGrams: grams };
       });
@@ -822,7 +1007,13 @@ export function createCollectorStore(pool: pg.Pool) {
           `UPDATE kabadi_pickup.requests
              SET status='requested', collector_id=NULL, accepted_at=NULL, released_at=now()
            WHERE id=$1 AND status='accepted' AND collector_id=$2 RETURNING id`, [requestId, userId]);
-        if (updated.rowCount === 1) return { outcome: 'released' as const };
+        if (updated.rowCount === 1) {
+          const owner = await c.query<{ user_id: string }>(
+            'SELECT user_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
+          if (owner.rows[0]) await notify(c, { recipientId: owner.rows[0].user_id, event: 'claim-released',
+            requestId, actorId: userId, detail: null });
+          return { outcome: 'released' as const };
+        }
         const current = await c.query<{ status: string; collector_id: string | null }>(
           'SELECT status, collector_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
         const found = current.rows[0];

@@ -57,6 +57,12 @@ const payoutCompiled = babel.transformSync(await readFile('apps/web/app/payout-a
   plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
 });
 await writeFile(join(temp,'payout-admin.js'),payoutCompiled.code);
+const inboxCompiled = babel.transformSync(await readFile('apps/web/app/notification-inbox.tsx','utf8'), {
+  filename:'notification-inbox.tsx',babelrc:false,configFile:false,
+  presets:[[require('next/dist/compiled/babel/preset-typescript'),{allExtensions:true,isTSX:true}],[require('next/dist/compiled/babel/preset-react'),{runtime:'automatic'}]],
+  plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
+});
+await writeFile(join(temp,'notification-inbox.js'),inboxCompiled.code);
 const { GoogleSignIn } = createRequire(modulePath)(modulePath);
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 
@@ -867,7 +873,7 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.match(section.textContent,/No unpaid dues/);
       await unmount();
     });
-    await t.test('the customer is told plainly that no update will be sent', async () => {
+    await t.test('the customer is told updates are in-app only, never emailed or texted', async () => {
       const requestId='123e4567-e89b-42d3-a456-426614174200';
       const row={ id:requestId, status:'requested', createdAt:'2026-11-18T17:00:00.000Z',
         address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'},
@@ -879,52 +885,77 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.endsWith('/customer/pickups')) return json({data:{pickups:[row],
-          notifications:{ configured:false, channels:[], delivery:'none', events:['pickup-requested'] }}});
+          notifications:{ configured:true, inApp:true, external:[] }}});
         return json({authenticated:true});
       });
       await clickButton('Set up customer account');
       const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Test pickup requests'));
-      // The notice is standing, not a reaction to a click: the customer should
-      // know before requesting that nobody will contact them.
-      assert.match(section.textContent,/No updates will be sent yet/);
-      assert.match(section.textContent,/not get an email, SMS or WhatsApp message/);
-      assert.match(section.textContent,/collector is not notified automatically either/i);
+      // Both halves matter: the promise that in-app works, and the admission
+      // that nothing leaves the app.
+      assert.match(section.textContent,/Updates appear in this app only/);
+      assert.match(section.textContent,/no email, SMS or WhatsApp message/);
       await unmount();
     });
-    await t.test('a claimed notification channel is not trusted without the server saying so', async () => {
-      // The UI must never upgrade to "you will be notified" on its own; only an
-      // explicit configured:true from the server may clear the notice.
+    await t.test('a claim of external delivery is not trusted', async () => {
+      // The server must never be able to talk this build into promising an email.
       await mount(async (url) => {
         if (url.endsWith('get-session')) return json({authenticated:true});
         if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
         if (url.endsWith('/customer/pickups')) return json({data:{pickups:[],
-          notifications:{ configured:'yes', channels:['email'], delivery:'some' }}});
+          notifications:{ configured:true, inApp:true, external:['email'] }}});
         return json({authenticated:true});
       });
       await clickButton('Set up customer account');
       const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Test pickup requests'));
-      assert.match(section.textContent,/No updates will be sent yet/);
+      assert.match(section.textContent,/Check this page for the current status/);
+      assert.doesNotMatch(section.textContent,/Updates appear in this app only/);
       await unmount();
     });
-    await t.test('recording a payout says it notifies nobody', async () => {
-      const requestId='123e4567-e89b-42d3-a456-426614174210';
-      const row={ id:requestId, categoryName:'Synthetic paper', estimatedGrams:2500, actualGrams:2000,
-        finalPaisePerKg:3245, amountPaise:'6490', collectedAt:'2026-11-20T10:00:00.000Z',
-        address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'} };
-      await mount(async (url) => {
+    await t.test('the inbox lists notifications, shows rupees and marks one read', async () => {
+      const id='123e4567-e89b-42d3-a456-426614174220';
+      const row={ id, event:'pickup-collected', requestId:'123e4567-e89b-42d3-a456-426614174221',
+        detail:'2300 g at 3245 paise/kg = 7464 paise', createdAt:'2026-11-20T10:00:00.000Z', readAt:null };
+      let posts=[], rows=[row];
+      await mount(async (url, init) => {
         if (url.endsWith('get-session')) return json({authenticated:true});
-        if (url.endsWith('/admin/payouts')) return json({data:{dues:[row],
-          payment:{configured:false,name:null,methods:['cash','transfer','adjustment']},
-          notifications:{ configured:false, channels:[], delivery:'none', events:['payout-recorded'] }}});
+        if (url.endsWith('/notifications')) return json({data:{notifications:rows, unread:1,
+          delivery:{inApp:true, external:[]}}});
+        if (url.includes('/notifications/')) {
+          posts.push([url, JSON.parse(init.body ?? '{}')]);
+          rows=[{ ...row, readAt:'2026-11-20T12:00:00.000Z' }];
+          return json({data:{read:true}});
+        }
         return json({authenticated:true});
       });
-      await clickButton('Load unpaid dues');
-      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector payouts due'));
-      assert.match(section.textContent,/Recording a payout notifies nobody/);
-      assert.match(section.textContent,/Tell them yourself/);
+      await clickButton('Load notifications');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Your notifications'));
+      assert.match(section.textContent,/Your notifications \(1 unread\)/);
+      assert.match(section.textContent,/Your pickup was collected/);
+      // Paise are rendered as rupees without floating-point arithmetic.
+      assert.match(section.textContent,/₹74\.64/);
+      await act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Mark as read').click();});
+      // Marking read takes no input at all.
+      assert.equal(posts.length,1);
+      assert.ok(posts[0][0].endsWith(`/${id}/read`));
+      assert.deepEqual(posts[0][1], {});
+      assert.doesNotMatch(section.textContent,/unread\)/);
       await unmount();
     });
-    await t.test('the payout screen states no provider is connected and does not pretend money moved', async () => {
+    await t.test('the inbox says delivery is in-app only, not that a message was sent', async () => {
+      await mount(async (url) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/notifications')) return json({data:{notifications:[], unread:0,
+          delivery:{inApp:true, external:[]}}});
+        return json({authenticated:true});
+      });
+      await clickButton('Load notifications');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Your notifications'));
+      assert.match(section.textContent,/delivered in this app only/);
+      assert.match(section.textContent,/no email, SMS or WhatsApp/);
+      assert.match(section.textContent,/No notifications yet/);
+      await unmount();
+    });
+/**/    await t.test('the payout screen states no provider is connected and does not pretend money moved', async () => {
       const requestId='123e4567-e89b-42d3-a456-426614174180';
       const row={ id:requestId, categoryName:'Synthetic paper', estimatedGrams:2500, actualGrams:2000,
         finalPaisePerKg:3245, amountPaise:'6490', collectedAt:'2026-11-20T10:00:00.000Z',

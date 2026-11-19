@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseCustomerDetails } from './customer-details.js';
 import type { CustomerDetails } from './customer-details.js';
 import { PAYMENT_PROVIDER, PAYOUT_METHODS, isMissingCollectorColumns, isPayoutMethod, parsePickup } from './pickups.js';
-import { NOTIFICATION_PROVIDER } from './notifications.js';
+import { NOTIFICATION_PROVIDER, isNotificationEvent } from './notifications.js';
 import type { CancelOutcome, CollectorOutcome, CreatePickupResult, DisputeOutcome, PayoutOutcome, Pickup } from './pickups.js';
 import { categoryName, rateValue, utcTimestamp } from './catalog.js';
 import type { CategoryPage, RatePage } from './catalog.js';
@@ -19,6 +19,11 @@ type AuthMount = {
     list: (userId: string) => Promise<Pickup[] | 'forbidden'>;
     cancel: (userId: string, requestId: string, reason: string | null) => Promise<CancelOutcome | 'forbidden'>;
     raiseDispute: (userId: string, requestId: string, reason: string) => Promise<DisputeOutcome | 'forbidden'>;
+  };
+  notifications?: {
+    list: (actorId: string) => Promise<{ items: unknown[]; unread: number } | 'forbidden'>;
+    markRead: (actorId: string, id: string) => Promise<{ read: true } | 'not-found' | 'forbidden'>;
+    markAllRead: (actorId: string) => Promise<{ cleared: number } | 'forbidden'>;
   };
   payouts?: {
     unpaidCollectorDues: (actorId: string) => Promise<Pickup[] | 'forbidden'>;
@@ -442,6 +447,87 @@ export function createApp(auth?: AuthMount) {
       } catch (error) { if (isMissingCollectorColumns(error)) disputeNeedsMigration(res); else disputeUnavailable(res); }
     });
   }
+
+  // ---- In-app notifications ---------------------------------------------
+  // Every signed-in account reads its own; no role is required, because every
+  // role receives some. Nothing here sends anything outside the application.
+  const notifyUnavailable = (res: express.Response) => res.status(503).json({ error: { code: 'NOTIFICATION_UNAVAILABLE', message: 'Notifications are unavailable.' } });
+  const notifyNeedsMigration = (res: express.Response) => res.status(503).json({ error: { code: 'PICKUP_SCHEMA_OUTDATED', message: 'Pickup storage needs its migration before notifications can be read.' } });
+
+  app.use('/api/v1/notifications', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+
+  app.get('/api/v1/notifications', async (req, res) => {
+    if (!auth?.resolveIdentity || !auth.notifications) { notifyUnavailable(res); return; }
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const result = await auth.notifications.list(id);
+      if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Sign-in is required.' } }); return; }
+      if (!Array.isArray(result.items) || result.items.length > 50) throw Error('Invalid result');
+      // Re-validate every row: a message is rendered directly, so a malformed
+      // one must not reach the screen.
+      const items = result.items.map(v => {
+        const n = v as Record<string, unknown>;
+        if (!uuid.test(String(n?.id ?? '')) || !isNotificationEvent(n.event) ||
+            !(n.requestId === null || uuid.test(String(n.requestId))) ||
+            !(n.detail === null || text(n.detail, 200)) ||
+            typeof n.createdAt !== 'string' || Number.isNaN(Date.parse(n.createdAt)) ||
+            !(n.readAt === null || (typeof n.readAt === 'string' && !Number.isNaN(Date.parse(n.readAt))))) throw Error('Invalid result');
+        return { id: n.id, event: n.event, requestId: n.requestId, detail: n.detail, createdAt: n.createdAt, readAt: n.readAt };
+      });
+      const unread = items.filter(i => i.readAt === null).length;
+      if (!Number.isInteger(result.unread) || result.unread !== unread) throw Error('Invalid result');
+      res.json({ data: { notifications: items, unread, delivery: NOTIFICATION_PROVIDER } });
+    } catch (error) { if (isMissingCollectorColumns(error)) notifyNeedsMigration(res); else notifyUnavailable(res); }
+  });
+
+  // Acknowledging is scoped to the caller's own rows by the store, so an id
+  // belonging to somebody else is simply not found.
+  app.post('/api/v1/notifications/:notificationId/read', (req, res, next) => {
+    if (!auth?.resolveIdentity || !auth.notifications) { notifyUnavailable(res); return; }
+    if (req.get('origin') !== auth!.origin) { res.status(403).json({ error: { code: 'INVALID_ORIGIN', message: 'Request origin is not allowed.' } }); return; }
+    const length = req.get('content-length');
+    if (!length || !/^\d+$/.test(length) || Number(length) > 4096 || req.get('transfer-encoding')) {
+      res.status(413).json({ error: { code: 'INVALID_BODY', message: 'Request body is invalid or too large.' } }); return;
+    }
+    if (!req.is('application/json')) { res.status(415).json({ error: { code: 'INVALID_CONTENT_TYPE', message: 'JSON is required.' } }); return; }
+    next();
+  }, express.json({ limit: '4kb', strict: true }), async (req, res) => {
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const notificationId = req.params.notificationId;
+      if (!uuid.test(notificationId)) { res.status(400).json({ error: { code: 'INVALID_NOTIFICATION_ID', message: 'Notification id is invalid.' } }); return; }
+      const body = req.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 0) {
+        res.status(400).json({ error: { code: 'INVALID_BODY', message: 'An empty JSON object is required.' } }); return;
+      }
+      const result = await auth!.notifications!.markRead(id, notificationId);
+      if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Sign-in is required.' } }); return; }
+      if (result === 'not-found') { res.status(404).json({ error: { code: 'NOTIFICATION_NOT_FOUND', message: 'That notification does not exist.' } }); return; }
+      res.json({ data: { read: true } });
+    } catch (error) { if (isMissingCollectorColumns(error)) notifyNeedsMigration(res); else notifyUnavailable(res); }
+  });
+
+  app.post('/api/v1/notifications/read-all', (req, res, next) => {
+    if (!auth?.resolveIdentity || !auth.notifications) { notifyUnavailable(res); return; }
+    if (req.get('origin') !== auth!.origin) { res.status(403).json({ error: { code: 'INVALID_ORIGIN', message: 'Request origin is not allowed.' } }); return; }
+    const length = req.get('content-length');
+    if (!length || !/^\d+$/.test(length) || Number(length) > 4096 || req.get('transfer-encoding')) {
+      res.status(413).json({ error: { code: 'INVALID_BODY', message: 'Request body is invalid or too large.' } }); return;
+    }
+    if (!req.is('application/json')) { res.status(415).json({ error: { code: 'INVALID_CONTENT_TYPE', message: 'JSON is required.' } }); return; }
+    next();
+  }, express.json({ limit: '4kb', strict: true }), async (req, res) => {
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const body = req.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 0) {
+        res.status(400).json({ error: { code: 'INVALID_BODY', message: 'An empty JSON object is required.' } }); return;
+      }
+      const result = await auth!.notifications!.markAllRead(id);
+      if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Sign-in is required.' } }); return; }
+      res.json({ data: { cleared: result.cleared } });
+    } catch (error) { if (isMissingCollectorColumns(error)) notifyNeedsMigration(res); else notifyUnavailable(res); }
+  });
 
   // ---- Admin payout ledger ----------------------------------------------
   // Recording a payment is deliberately not part of collection: settling an

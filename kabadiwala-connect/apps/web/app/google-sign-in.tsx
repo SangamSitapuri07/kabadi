@@ -6,6 +6,7 @@ import { CatalogViewer } from './catalog-viewer';
 import { CollectorQueue } from './collector-queue';
 import { DisputeAdmin } from './dispute-admin';
 import { PayoutAdmin } from './payout-admin';
+import { NotificationInbox } from './notification-inbox';
 
 type SessionStatus = 'checking' | 'signed-out' | 'signed-in' | 'unavailable';
 type Details = { name: string; addressLine: string; city: string; state: string; postalCode: string };
@@ -220,6 +221,7 @@ export function GoogleSignIn() {
       {busy !== 'sign-out' && <CollectorQueue disabled={busy !== null} />}
       {busy !== 'sign-out' && <DisputeAdmin disabled={busy !== null} />}
       {busy !== 'sign-out' && <PayoutAdmin disabled={busy !== null} />}
+      {busy !== 'sign-out' && <NotificationInbox disabled={busy !== null} />}
     </>}
     {status === 'unavailable' && <button type="button" onClick={retrySession}>Try again</button>}
     <p className="auth-note">Development only. Sign-in and security are not ready for production.</p>

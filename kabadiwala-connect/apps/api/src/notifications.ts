@@ -1,23 +1,20 @@
-// NOTIFICATIONS ARE NOT IMPLEMENTED.
+// IN-APP NOTIFICATIONS ARE IMPLEMENTED. EXTERNAL DELIVERY IS NOT.
 //
-// Every state change below currently happens silently: a customer is never told
-// their request was accepted, collected, corrected or paid, and a collector is
-// never told a request is waiting or that a payout was recorded. Nothing in this
-// repository sends an email, an SMS, a push notification or a WhatsApp message,
-// and that is a deliberate deferral, not an oversight.
+// The channel decision has been made: notifications are in-app only. A
+// notification is a row in kabadi_pickup.notifications, written in the same
+// transaction as the change it announces, and delivered when the recipient's
+// screen reads it. `read_at` is the only delivery fact that exists.
 //
-// This module exists so the deferral is *stated* rather than merely absent. It
-// contains no transport, no credentials, no queue, no retry logic and no
-// database table. When notifications are built, a sender plugs in and the
-// descriptor below stops being a constant.
+// What is deliberately still absent: email, SMS, WhatsApp and push. There is no
+// transport, no queue, no retry, no provider credential and no cron. A recipient
+// who never opens the app is never told anything, and no amount of this code
+// changes that -- so the UI still states it rather than implying a message.
 //
-// Which channel and which audience each event should reach is NOT decided. That
-// is owner input tracked as P0-02 ("notification channels/events"); the event
-// list here is derived from transitions that actually exist in the code, not
-// from a guess about policy.
+// Which event should reach which audience IS decided, because the in-app
+// implementation had to choose a recipient for each one; see the table below.
+// Changing a recipient is a code change here, not a policy question left open.
 
-// One entry per real state change in the pickup lifecycle, so this list cannot
-// drift ahead of the features that exist or fall behind them unnoticed.
+// One entry per real state change in the pickup lifecycle.
 export const NOTIFICATION_EVENTS = [
   'pickup-requested',
   'pickup-accepted',
@@ -33,20 +30,28 @@ export type NotificationEvent = typeof NOTIFICATION_EVENTS[number];
 export const isNotificationEvent = (value: unknown): value is NotificationEvent =>
   typeof value === 'string' && (NOTIFICATION_EVENTS as readonly string[]).includes(value);
 
-// Channels that were considered. Listed so the eventual choice is a visible
-// decision rather than a silent default; none of them is wired up.
-export const NOTIFICATION_CHANNELS = ['in-app', 'email', 'sms', 'whatsapp'] as const;
-export type NotificationChannel = typeof NOTIFICATION_CHANNELS[number];
+// Who hears about what. The actor is always excluded: nobody is notified of
+// their own action. `collectors` and `admins` mean every active account holding
+// that grant, minus the actor.
+export const NOTIFICATION_AUDIENCE: Record<NotificationEvent, 'customer' | 'collector' | 'admins' | 'collectors'> = {
+  'pickup-requested': 'collectors',
+  'pickup-accepted': 'customer',
+  'pickup-collected': 'customer',
+  'pickup-cancelled': 'collector',
+  'claim-released': 'customer',
+  'dispute-raised': 'admins',
+  'dispute-resolved': 'customer',
+  'dispute-rejected': 'customer',
+  'payout-recorded': 'collector',
+};
 
-// What the application can honestly claim today: nothing is sent, anywhere.
-// A UI reads this so it never leaves someone waiting for a message.
-//
-// `configured: false` is a real value that is checked by a test -- flipping it
-// without wiring a transport must fail, so this cannot quietly become a lie.
+// In-app delivery exists; nothing leaves the application. The two facts are
+// reported separately so a screen can say "check your notifications here" while
+// still saying "do not expect an email".
 export const NOTIFICATION_PROVIDER = {
-  configured: false as const,
-  channels: [] as readonly NotificationChannel[],
+  configured: true as const,
+  delivery: 'in-app' as const,
+  channels: ['in-app'] as const,
+  external: [] as readonly string[],
   events: NOTIFICATION_EVENTS,
-  // The honest sentence a screen can show: there is no message coming.
-  delivery: 'none' as const,
 };

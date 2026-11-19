@@ -70,3 +70,10 @@ footer { color: #71877a; font-size: .8rem; padding: 25px 0; border-top: 1px soli
    read as "this feature is missing", not as a normal informational aside. */
 .notifications-placeholder { border-left: 4px solid #8a4b00; background: #fff4e5; padding: 10px 12px; color: #4a2800; }
 .notifications-placeholder strong { display: block; }
+/* In-app inbox. An unread row is marked by weight, not only by colour, so it
+   does not depend on colour perception. */
+.notification-inbox { margin-top: 20px; max-width: 420px; }
+.notification-inbox h2 { color: #18362c; font-size: 1.1rem; }
+.notification-inbox li { margin: 10px 0; overflow-wrap: anywhere; }
+.notification-inbox li.unread { font-weight: 700; }
+.notification-inbox li.unread::before { content: '● '; color: #21815b; }

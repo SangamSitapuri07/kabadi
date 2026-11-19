@@ -53,18 +53,17 @@ export async function GET(request: Request) {
           estimatedGrams: v.estimatedGrams, actualGrams: v.actualGrams,
           finalPaisePerKg: v.finalPaisePerKg, amountPaise: v.amountPaise, collectedAt: v.collectedAt };
       });
-      // Same rule as the customer bridge: forward only a report that promises
-      // nothing, because this build can send nothing.
+      // In-app delivery is real; external delivery is not. Both facts are
+      // re-checked here so a build cannot start implying an email exists.
       const reported = (data as { data: { notifications?: unknown } }).data.notifications;
-      let notifications: { configured: boolean; channels: string[]; delivery: 'none' } | null = null;
-      if (reported !== undefined) {
-        if (!reported || typeof reported !== 'object' || Array.isArray(reported) ||
-            (reported as Record<string, unknown>).configured !== false ||
-            !Array.isArray((reported as Record<string, unknown>).channels) ||
-            ((reported as Record<string, unknown>).channels as unknown[]).length !== 0 ||
-            (reported as Record<string, unknown>).delivery !== 'none') throw Error('Invalid response');
-        notifications = { configured: false, channels: [], delivery: 'none' };
-      }
+      const notifications = (() => {
+        if (!reported || typeof reported !== 'object' || Array.isArray(reported)) throw Error('Invalid response');
+        const n = reported as Record<string, unknown>;
+        if (n.configured !== true || n.delivery !== 'in-app') throw Error('Invalid response');
+        if (!Array.isArray(n.channels) || (n.channels as unknown[]).length !== 1 || (n.channels as unknown[])[0] !== 'in-app') throw Error('Invalid response');
+        if (!Array.isArray(n.external) || (n.external as unknown[]).length !== 0) throw Error('Invalid response');
+        return { configured: true as const, inApp: true as const, external: [] as readonly string[] };
+      })();
       payload = { data: { dues, notifications } };
     } else if (object(data) && object(data.error) && typeof data.error.code === 'string') {
       const messages: Record<string, [number, string]> = {

@@ -34,16 +34,26 @@ try {
        WHERE table_schema='kabadi_pickup' AND table_name='requests' AND column_name = ANY($1::text[])`, [expected]);
     const present = new Set(columns.rows.map(r => r.column_name));
     const missing = expected.filter(name => !present.has(name));
-    console.log(`Pickup schema version: ${version ?? 'unrecognized'} (expected 6).`);
-    if (version !== 6) {
+    console.log(`Pickup schema version: ${version ?? 'unrecognized'} (expected 7).`);
+    if (version !== 7) {
       console.log('Run the pickup migration to upgrade it.');
     } else if (missing.length) {
       // The recorded version and the real table disagree; never report success.
-      console.log(`The recorded version is 6 but the table is missing: ${missing.join(', ')}.`);
+      console.log(`The recorded version is 7 but the table is missing: ${missing.join(', ')}.`);
       console.log('The version row does not match the table. Inspect and restore before relying on this database.');
       process.exitCode = 1;
     } else {
-      console.log('Collector columns present: acceptance, measured weight and the final amount are available.');
+      // Version 7 is a separate table, so its presence is checked as well: a
+      // version row claiming 7 with no notifications table is still drift.
+      const table = await pool.query<{ marker: string | null }>(
+        "SELECT to_regclass('kabadi_pickup.notifications')::text AS marker");
+      if (!table.rows[0]?.marker) {
+        console.log('The recorded version is 7 but the notifications table is missing.');
+        console.log('The version row does not match the database. Inspect and restore before relying on this database.');
+        process.exitCode = 1;
+      } else {
+        console.log('Collector columns present, and the in-app notifications table exists.');
+      }
     }
   }
 } catch (error) {

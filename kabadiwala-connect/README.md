@@ -393,7 +393,9 @@ calculates the estimate itself and stores `category_name`, `rate_id`,
 updated afterwards, so a later rate change cannot rewrite an existing estimate.
 The client sends only `{requestKey, categoryId, estimatedGrams}`; a supplied
 rate, amount or material is rejected rather than ignored. No collector is
-notified or dispatched. Scheduling, multiple items per request, cancellation,
+dispatched: an active collector may see the request in their queue and gets an
+in-app notification, but nothing pushes it to them. Scheduling, multiple items
+per request, cancellation,
 collector-recorded actual weights, the collection-time final rate, settlement,
 assignment and audit are not implemented. These are essential before the approved
 marketplace flow can be used. The technical bounds and this prototype format are
@@ -426,10 +428,11 @@ production readiness/security review is implied.
 
 A new separate `kabadi_pickup` schema requires the existing auth, authorization,
 customer **and catalog** schemas, because request rows reference catalog
-categories and rates. The schema is version 6; an older schema is upgraded in
-place one version at a time to version 6 in a single run, keeping every legacy
+categories and rates. The schema is version 7; an older schema is upgraded in
+place one version at a time to version 7 in a single run, keeping every legacy
 row. Version 3 added collection, version 4 cancellation and release, version 5
-customer disputes, and version 6 the payout ledger. It is explicitly migrated, never on startup, and creates
+customer disputes, version 6 the payout ledger, and version 7 in-app
+notifications. It is explicitly migrated, never on startup, and creates
 no pickup requests. Version checks do not detect all schema drift; upgrades and
 restore have not been tested. Before running on any local development database,
 independently inspect the target, back it up, and obtain explicit approval. Do
@@ -448,7 +451,7 @@ the same check and refuses rather than reporting a no-op on a table that does no
 match its recorded version. It prints the recorded version and whether a
 migration is still needed, so nobody has to infer from log wording whether a
 migration actually ran. A migration run always prints what it did — `created`,
-`upgraded from version N to version 6`, or `already version 6; nothing changed`
+`upgraded from version N to version 7`, or `already version 7; nothing changed`
 — so a no-op can never be mistaken for an upgrade. If the printed text does not
 match this description, the built `dist` output is older than the source: run
 `npm run build:api` after pulling. No secrets or customer data should be shared in chat.
@@ -456,8 +459,8 @@ match this description, the built `dist` output is older than the source: run
 Run migrations **from this `kabadiwala-connect` directory**, because `.env` is
 resolved relative to the current directory and lives here. Running from
 the parent repository root fails with `.env: not found`. The command reports what
-it actually did: `created`, `upgraded from version N to version 6`, or
-`already version 6; nothing changed`, plus how many pre-pricing requests still
+it actually did: `created`, `upgraded from version N to version 7`, or
+`already version 7; nothing changed`, plus how many pre-pricing requests still
 exist without an estimate.
 
 ### Collector acceptance and the final amount (development API)
@@ -641,42 +644,63 @@ still names the admin. What will have to change is honest and small: flip
 `configured`, add the real method list, and replace the banner with the actual
 provider state — not hide it.
 
-### Notifications: not implemented (placeholder)
+### In-app notifications (development API)
 
-Nothing in this repository sends a message. No email, SMS, WhatsApp, push or
-in-app notification exists: not to the customer when their request is accepted,
-collected, corrected or paid, and not to the collector when a request is waiting
-or a payout was recorded. Every state change is silent unless somebody looks at
-the screen. This is a deliberate deferral, not an omission.
+Notifications are implemented **in-app only**. A notification is a row in
+`kabadi_pickup.notifications`, written **in the same transaction as the change it
+announces** — if the change rolls back, so does the message. There is no queue,
+no retry, no cron and no provider: delivery is the recipient reading it in the
+app, and `read_at` is the only delivery fact that exists.
 
-The placeholder has four parts, each there to stop the absence turning into a
-false claim:
+| Event | Recipient |
+| --- | --- |
+| `pickup-requested` | every active collector, except the requester |
+| `pickup-accepted` | the customer |
+| `pickup-collected` | the customer (weight, rate and amount in the message) |
+| `pickup-cancelled` | the collector who held the claim, if any |
+| `claim-released` | the customer |
+| `dispute-raised` | every active admin |
+| `dispute-resolved` / `dispute-rejected` | the customer |
+| `payout-recorded` | the collector (amount and method) |
 
-- `apps/api/src/notifications.ts` — `NOTIFICATION_PROVIDER =
-  { configured: false, delivery: 'none', channels: [] }` plus
-  `NOTIFICATION_EVENTS`, one entry per transition that actually exists in the
-  store. A test imports the store source and asserts that each listed event has
-  a matching SQL transition, so the list cannot advertise a feature that was
-  removed or miss one that was added.
-- **The server states it, the browser does not guess.** `GET
-  /api/v1/customer/pickups` and `GET /api/v1/admin/payouts` both return a
-  `notifications` descriptor alongside their data. The customer screen shows a
-  standing notice ("No updates will be sent yet…") *before* anything is
-  requested, not after; the payout screen says "Recording a payout notifies
-  nobody. Tell them yourself."
-- **Bridges refuse to relay a claim they cannot honour.** Both web bridges accept
-  the descriptor only when it promises nothing (`configured:false`,
-  `channels: []`, `delivery:'none'`). Anything else is a 503, not a passed-through
-  promise. The UI likewise treats an unexpected shape as "nothing is sent".
-- `.env.example` — `NOTIFICATION_CHANNEL`, `NOTIFICATION_SMTP_URL`,
-  `NOTIFICATION_SMS_KEY` are present and deliberately blank. Nothing reads them.
+The actor is never a recipient: nobody is notified of their own action, and that
+rule lives in one function. Broadcast events target accounts by *active grant*, not
+by a stored list, so a newly granted collector starts receiving work immediately
+and a suspended account stops.
 
-`NOTIFICATION_CHANNELS` lists what was *considered* (`in-app`, `email`, `sms`,
-`whatsapp`) with none selected: choosing a channel, and which audience should
-receive which event, is open policy work tracked as **P0-02**. The notice is
-correct only while `configured` is `false`; a test fails the moment it is flipped
-without a transport behind it. When notifications are built, the sender plugs in
-and the notice is **replaced** with the real state — not deleted.
+- `GET /api/v1/notifications` — the caller's own 50 most recent, with `unread`,
+  plus the `delivery` descriptor. A notification pointing at a request the reader
+  can no longer see is dropped rather than shown without context.
+- `POST /api/v1/notifications/:id/read` with `{}` — marks one read.
+- `POST /api/v1/notifications/read-all` with `{}` — marks all read, returns
+  `{cleared}`.
+
+Every read and update is scoped by `recipient_id` **in the SQL**, not filtered
+afterwards, so one account cannot read or clear another's. An id belonging to
+somebody else is a plain 404, not a distinguishable error. Marking an
+already-read row is a no-op, not a failure. Any signed-in account may read its
+own inbox; no role is required, because every role receives something.
+
+#### What is still absent: external delivery
+
+No email, SMS, WhatsApp or push message is sent, to anyone, ever. There is no
+transport, no credentials and no queue. A recipient who never opens the app is
+never told anything. This is stated in three places rather than assumed:
+
+- `NOTIFICATION_PROVIDER` reports `delivery: 'in-app'`, `channels: ['in-app']`
+  and `external: []` — the two facts are separate so a screen can say "check
+  your notifications here" *and* "do not wait for an email".
+- Both web bridges accept a notification descriptor only when it matches that
+  exactly; a block claiming an external channel is a 503, not a passed-through
+  promise.
+- The customer screen and the payout screen both say it, and the inbox repeats
+  it under its own heading.
+
+`.env.example` carries `NOTIFICATION_CHANNEL=in-app` plus blank
+`NOTIFICATION_SMTP_URL` / `NOTIFICATION_SMS_KEY` for a future external channel.
+Nothing reads the latter two. When an external channel is chosen, a sender plugs
+in beside the in-app write; the notice changes from "in-app only" to the real
+state rather than being deleted.
 
 ### Customer self-onboarding (development API)
 
@@ -784,11 +808,11 @@ security and production readiness have not been established. Customer setup,
 profile, test pickup capture, a read/write development catalog, a local
 admin-grant tool, collector acceptance and collection-time settlement,
 cancellation and release, customer disputes with admin correction, and an
-**admin-recorded payout ledger** exist. There is still no dispatch, routing,
-OTP, or actual money movement, and **notifications are not implemented either**:
-no message is sent to anyone on any state change. Recording a payout is
-bookkeeping, and both the payment rail and notifications are explicit
-placeholders kept for a later implementation — no provider is connected, no
-channel exists, and the screens say so. Policy
+**admin-recorded payout ledger** and an **in-app notification inbox** exist.
+There is still no dispatch, routing, OTP, or actual money movement, and notes are
+delivered **in-app only** — no email, SMS, WhatsApp or push message is sent, so
+nothing reaches anyone who is signed out. Recording a payout is bookkeeping, and
+the payment rail remains an explicit placeholder: no provider is connected and
+the screen says so. Policy
 decisions, full security review and zero-cost provider suitability remain
 pending. Phase 1 is not complete.

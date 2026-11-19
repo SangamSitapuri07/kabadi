@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import pg from 'pg';
 import { createCustomerOnboarder } from './customer-onboarding.js';
 import { createCustomerDetailsStore } from './customer-details.js';
-import { createCollectorStore, createDisputeStore, createPayoutStore, createPickupStore } from './pickups.js';
+import { createCollectorStore, createDisputeStore, createNotificationStore, createPayoutStore, createPickupStore } from './pickups.js';
 import { createCatalogStore } from './catalog.js';
 
 export type AuthConfig = {
@@ -87,6 +87,7 @@ export function createAuthRuntime(config: AuthConfig) {
     collector: createCollectorStore(pool),
     disputes: createDisputeStore(pool),
     payouts: createPayoutStore(pool),
+    notifications: createNotificationStore(pool),
     catalog: createCatalogStore(pool),
     async handler(request: IncomingMessage, response: ServerResponse) {
       // Better Auth's standard session response includes a bearer token. Even

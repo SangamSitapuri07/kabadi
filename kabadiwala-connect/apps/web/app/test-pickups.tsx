@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 type Pickup = {
   id:string; status:'requested'|'accepted'|'collected'|'cancelled'; createdAt:string; estimatedGrams:number;
@@ -31,9 +31,23 @@ export function TestPickups() {
   const [message, setMessage] = useState('');
   const [estimate, setEstimate] = useState<Estimate | null>(null);
   const [pending, setPending] = useState<{requestKey:string; categoryId:string; estimatedGrams:number} | null>(null);
-  // What the server said about notifications. null means "not reported"; the UI
-  // then still assumes nothing is sent, because nothing is.
-  const [notifications, setNotifications] = useState<{configured:boolean; delivery:'none'|'some'} | null>(null);
+  // What the server said about delivery. The two facts are kept apart on purpose:
+  // in-app works, external channels do not exist.
+  const [delivery, setDelivery] = useState<{inApp:boolean; external:string[]} | null>(null);
+
+  // The delivery fact is fetched on mount, not on the first click: the customer
+  // should know whether anything will reach them before they request a pickup.
+  useEffect(() => { void readDelivery(); }, []);
+  async function readDelivery() {
+    try {
+      const response = await fetch('/api/v1/customer/pickups', { cache:'no-store', signal:AbortSignal.timeout(10000) });
+      if (!response.ok) return;
+      const json = await response.json();
+      const n = json?.data?.notifications;
+      setDelivery(n && n.configured === true && n.inApp === true && Array.isArray(n.external) && n.external.length === 0
+        ? { inApp:true, external:[] } : null);
+    } catch { /* the notice already says to check this page; nothing to add */ }
+  }
 
   async function list() {
     setBusy(true); setMessage('');
@@ -45,11 +59,11 @@ export function TestPickups() {
       }
       if (!response.ok || !Array.isArray(json?.data?.pickups)) throw Error('unavailable');
       setItems(json.data.pickups);
-      // Only a recognised report is trusted; an unexpected shape falls back to
-      // "nothing is sent" rather than to a comforting claim.
+      // Only a recognised report is trusted. Anything unexpected falls back to
+      // claiming neither in-app nor external delivery, never to a comforting one.
       const n = json.data.notifications;
-      setNotifications(n && n.configured === true && n.delivery === 'some'
-        ? { configured:true, delivery:'some' } : { configured:false, delivery:'none' });
+      setDelivery(n && n.configured === true && n.inApp === true && Array.isArray(n.external) && n.external.length === 0
+        ? { inApp:true, external:[] } : null);
     } catch { setItems(null); setMessage('Test requests could not be loaded. Please try again.'); }
     finally { setBusy(false); }
   }
@@ -153,11 +167,16 @@ export function TestPickups() {
     <p role="status">{message}</p>
     {/* NOTIFICATIONS: deferred. This notice must be removed only when a real
         channel exists and the server reports configured:true -- not before. */}
-    {notifications?.configured !== true && <p className="notifications-placeholder">
-      <strong>No updates will be sent yet.</strong> Notifications are not implemented, so you will not get an
-      email, SMS or WhatsApp message when this request is accepted, collected or paid. Check this page for the
-      current status. Your collector is not notified automatically either.
-    </p>}
+    {/* In-app exists; external delivery does not. Say both, always. */}
+    <p className="notifications-placeholder">
+      {/* Only an explicit in-app report earns the promise; anything else, and
+          the "not loaded yet" state, falls back to telling the customer to look. */}
+      <strong>{delivery?.inApp === true ? 'Updates appear in this app only.' : 'Check this page for the current status.'}</strong>{' '}
+      {delivery?.inApp
+        ? 'When your request is accepted, collected, corrected or paid you will get an in-app notification. '
+        : ''}
+      There is no email, SMS or WhatsApp message, so nothing reaches you while you are signed out.
+    </p>
     {estimate && <p className="estimate" role="status">
       Estimated {rupees(estimate.amountPaise)} for {estimate.categoryName} at {rupees(String(estimate.paisePerKg))} per kg. Rate reference {estimate.rateId.slice(0, 8)}… included in the request.
     </p>}

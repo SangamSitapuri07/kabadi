@@ -105,8 +105,8 @@ test('pickup list separates priced requests from legacy free text and rejects ma
       const body = await response.json();
       // Every list response now carries the notification descriptor; the rows
       // themselves are unchanged.
-      assert.equal(body.data.notifications.configured, false);
-      assert.equal(body.data.notifications.delivery, 'none');
+      assert.equal(body.data.notifications.configured, true);
+      assert.equal(body.data.notifications.delivery, 'in-app');
       assert.deepEqual(body.data.pickups, [priced, legacy]);
     }
     // A half-priced row is inconsistent and must fail closed.
@@ -250,7 +250,7 @@ test('collector list fails closed on a malformed or unsettled row', async () => 
 // ---- Schema migration ----------------------------------------------------
 // A recording fake client asserts the SQL the migration emits, so the v1 -> v3
 // chain is checked without a live database.
-test('pickup migration walks v1 to v6 in one run and reports the real starting version', async () => {
+test('pickup migration walks v1 to v7 in one run and reports the real starting version', async () => {
   const { migratePickups } = await import('../../apps/api/dist/pickups.js');
   const statements = [];
   const V3 = ['collector_id', 'accepted_at', 'collected_at', 'actual_grams',
@@ -286,7 +286,7 @@ test('pickup migration walks v1 to v6 in one run and reports the real starting v
   }
 
   const report = await migratePickups(fakePool(1));
-  assert.deepEqual(report, { action: 'upgraded', schemaVersion: 6, fromVersion: 1, legacyRequests: 1 });
+  assert.deepEqual(report, { action: 'upgraded', schemaVersion: 7, fromVersion: 1, legacyRequests: 1 });
   const all = statements.join('\n');
   // Both upgrade steps ran, in order, and each pinned its own version.
   assert.ok(all.indexOf('SET version = 2') < all.indexOf('ADD COLUMN collector_id'), 'v2 upgrade precedes v3');
@@ -307,13 +307,14 @@ test('pickup migration walks v1 to v6 in one run and reports the real starting v
   // The payout ledger is created last, in its own table.
   assert.ok(all.indexOf('SET version = 5') < all.indexOf('CREATE TABLE IF NOT EXISTS kabadi_pickup.payouts'));
   assert.ok(all.includes('SET version = 6'));
+  assert.ok(all.includes('SET version = 7'));
   // Existing rows are never rewritten or deleted by the upgrade.
   assert.ok(!/DELETE FROM kabadi_pickup\.requests/i.test(all));
   assert.ok(!/UPDATE kabadi_pickup\.requests SET (material|status)/i.test(all));
 
   // A v2 database takes the last two steps and stays 'upgraded'.
   statements.length = 0;
-  assert.deepEqual(await migratePickups(fakePool(2)), { action: 'upgraded', schemaVersion: 6, fromVersion: 2, legacyRequests: 1 });
+  assert.deepEqual(await migratePickups(fakePool(2)), { action: 'upgraded', schemaVersion: 7, fromVersion: 2, legacyRequests: 1 });
   const v2only = statements.join('\n');
   assert.ok(!v2only.includes('SET version = 2'));
   assert.ok(v2only.includes('ADD COLUMN collector_id'));
@@ -321,7 +322,7 @@ test('pickup migration walks v1 to v6 in one run and reports the real starting v
 
   // A v3 database — the owner's current state — takes only the cancellation step.
   statements.length = 0;
-  assert.deepEqual(await migratePickups(fakePool(3)), { action: 'upgraded', schemaVersion: 6, fromVersion: 3, legacyRequests: 1 });
+  assert.deepEqual(await migratePickups(fakePool(3)), { action: 'upgraded', schemaVersion: 7, fromVersion: 3, legacyRequests: 1 });
   const v3only = statements.join('\n');
   assert.ok(!v3only.includes('ADD COLUMN collector_id'), 'v3 columns are not re-added');
   assert.ok(v3only.includes('ADD COLUMN cancelled_at'));
@@ -330,14 +331,14 @@ test('pickup migration walks v1 to v6 in one run and reports the real starting v
   // A recorded version that the table does not honour is refused, not reported
   // as a successful no-op. This is the "already version 3" lie.
   statements.length = 0;
-  await assert.rejects(() => migratePickups(fakePool(6, ['collector_id', 'actual_grams'])),
-    /claims version 6 but is missing: accepted_at/);
+  await assert.rejects(() => migratePickups(fakePool(7, ['collector_id', 'actual_grams'])),
+    /claims version 7 but is missing: accepted_at/);
   const refused = statements.join('\n');
   assert.ok(!refused.includes('SET version = 3'), 'nothing may be written when verification fails');
 
   // A current database is reported as unchanged, and an unknown version fails.
-  assert.equal((await migratePickups(fakePool(6))).action, 'unchanged');
-  await assert.rejects(() => migratePickups(fakePool(7)), /Unsupported schema/);
+  assert.equal((await migratePickups(fakePool(7))).action, 'unchanged');
+  await assert.rejects(() => migratePickups(fakePool(8)), /Unsupported schema/);
 
   // A fresh schema is 'created' from version 0 and lands directly at 3.
   statements.length = 0;
@@ -356,10 +357,10 @@ test('pickup migration walks v1 to v6 in one run and reports the real starting v
       return { rows: [] };
     }, release: () => {},
   }) });
-  assert.deepEqual(fresh, { action: 'created', schemaVersion: 6, fromVersion: 0, legacyRequests: 0 });
+  assert.deepEqual(fresh, { action: 'created', schemaVersion: 7, fromVersion: 0, legacyRequests: 0 });
   const created = statements.join('\n');
-  assert.ok(created.includes('CHECK (version = 6)'));
-  assert.ok(created.includes('INSERT INTO kabadi_pickup.schema_version VALUES (6)'));
+  assert.ok(created.includes('CHECK (version = 7)'));
+  assert.ok(created.includes('INSERT INTO kabadi_pickup.schema_version VALUES (7)'));
   // A fresh table defines the cancellation columns directly, not via ALTER.
   assert.ok(created.includes('cancelled_at timestamptz'));
   assert.ok(created.includes('released_at timestamptz'));
@@ -812,67 +813,150 @@ test('the payout queue tells the browser that no provider can move money', async
   } finally { await new Promise(resolve=>server.close(resolve)); }
 });
 
-test('the notification placeholder promises nothing and covers every real state change', async () => {
-  const { NOTIFICATION_EVENTS, NOTIFICATION_CHANNELS, NOTIFICATION_PROVIDER, isNotificationEvent } =
+test('in-app notifications are written on the transaction, to the right audience, never to the actor', async () => {
+  const { NOTIFICATION_EVENTS, NOTIFICATION_AUDIENCE, NOTIFICATION_PROVIDER, isNotificationEvent } =
     await import('../../apps/api/dist/notifications.js');
 
-  // Every event listed must correspond to a transition that actually exists in
-  // the store. If a feature is added without updating this list, or removed
-  // while the list keeps advertising it, that is a lie in the UI.
+  // Every event advertised must correspond to a transition that exists, or the
+  // list is describing a product that is not there.
   const source = await readFile(new URL('../../apps/api/src/pickups.ts', import.meta.url), 'utf8');
   for (const [event, marker] of [
-    ['pickup-requested', 'INSERT INTO kabadi_pickup.requests'],
-    ['pickup-accepted', "SET status='accepted'"],
-    ['pickup-collected', "SET status='collected'"],
-    ['pickup-cancelled', "status='cancelled'"],
-    ['dispute-raised', 'SET dispute_status='],
-    ['payout-recorded', 'INSERT INTO kabadi_pickup.payouts'],
+    ['pickup-requested', "'pickup-requested', $2, $1"],
+    ['pickup-accepted', "event: 'pickup-accepted'"],
+    ['pickup-collected', "event: 'pickup-collected'"],
+    ['pickup-cancelled', "event: 'pickup-cancelled'"],
+    ['claim-released', "event: 'claim-released'"],
+    ['dispute-raised', "'dispute-raised', $2, $1"],
+    ['dispute-resolved', "event: 'dispute-resolved'"],
+    ['dispute-rejected', "event: 'dispute-rejected'"],
+    ['payout-recorded', "event: 'payout-recorded'"],
   ]) {
     assert.ok(NOTIFICATION_EVENTS.includes(event), `${event} must be listed`);
-    assert.ok(source.includes(marker), `${event} has no matching transition in the store`);
+    assert.ok(source.includes(marker), `${event} is listed but nothing emits it`);
   }
-  // Claiming delivery requires a transport; there is none, so this must be false
-  // and a test fails the moment someone flips it without building one.
-  assert.equal(NOTIFICATION_PROVIDER.configured, false);
-  assert.equal(NOTIFICATION_PROVIDER.delivery, 'none');
-  assert.deepEqual([...NOTIFICATION_PROVIDER.channels], []);
-  // Channels were considered, not silently defaulted to.
-  assert.deepEqual([...NOTIFICATION_CHANNELS], ['in-app', 'email', 'sms', 'whatsapp']);
-  assert.equal(isNotificationEvent('pickup-collected'), true);
-  for (const bad of ['pickup-paid', 'PICKUP-COLLECTED', '', null, 1]) {
-    assert.equal(isNotificationEvent(bad), false, `must reject ${JSON.stringify(bad)}`);
+  // Every event has a decided audience. No silent default.
+  for (const event of NOTIFICATION_EVENTS) {
+    assert.ok(['customer','collector','admins','collectors'].includes(NOTIFICATION_AUDIENCE[event]), `${event} has no audience`);
   }
+  // In-app delivery is real now; external delivery is still absent and must be
+  // reported as absent rather than left ambiguous.
+  assert.equal(NOTIFICATION_PROVIDER.configured, true);
+  assert.equal(NOTIFICATION_PROVIDER.delivery, 'in-app');
+  assert.deepEqual([...NOTIFICATION_PROVIDER.channels], ['in-app']);
+  assert.deepEqual([...NOTIFICATION_PROVIDER.external], []);
+  assert.equal(isNotificationEvent('payout-recorded'), true);
+  for (const bad of ['pickup-paid', 'PICKUP-COLLECTED', '', null, 1]) assert.equal(isNotificationEvent(bad), false);
+
+  // The self-suppression rule lives in one place; assert it is actually used and
+  // that the actor is never the recipient.
+  assert.ok(source.includes('if (input.recipientId === input.actorId) return;'),
+    'a person must not be notified of their own action');
 });
 
-test('both pickup lists tell the browser that no notification will be sent', async () => {
-  const address = { name: 'Sample', addressLine: '12 Example', city: 'Ludhiana', state: 'Punjab', postalCode: '141001' };
-  const requested = { id: randomUUID(), status: 'requested', createdAt: '2026-11-20T10:00:00.000Z',
-    address, estimatedGrams: 2500, material: null,
-    categoryId: '123e4567-e89b-42d3-a456-426614174191', categoryName: 'Synthetic paper',
-    rateId: '123e4567-e89b-42d3-a456-426614174192', paisePerKg: 3245, amountPaise: '8113',
-    actualGrams: null, finalRateId: null, finalPaisePerKg: null, finalAmountPaise: null, collectedAt: null,
-    cancelledAt: null, cancellationReason: null, releasedAt: null, dispute: null, payout: null };
-  const auth = { origin:'http://localhost:3000', handler:async()=>{}, resolveIdentity:async()=>({userId:'customer-1',cookies:[]}),
-    onboardCustomer:async()=>({outcome:'ready'}),
-    customerDetails:{ get:async()=>({outcome:'ready', details:address}), save:async()=>({outcome:'saved'}) },
-    pickups:{ create:async()=>({outcome:'conflict'}), list:async()=>[requested], cancel:async()=>({outcome:'cancelled'}),
-      raiseDispute:async()=>({outcome:'raised'}) },
-    collector:{ open:async()=>[], mine:async()=>[], accept:async()=>({outcome:'accepted'}),
-      collect:async()=>({outcome:'accepted'}), release:async()=>({outcome:'released'}) },
-    disputes:{ openDisputes:async()=>[], resolveDispute:async()=>({outcome:'resolved'}), rejectDispute:async()=>({outcome:'rejected'}) },
-    payouts:{ unpaidCollectorDues:async()=>[], recordPayout:async()=>({outcome:'paid'}) } };
+test('notification reads are scoped to the recipient and never leak another account\'s rows', async () => {
+  const { createNotificationStore } = await import('../../apps/api/dist/pickups.js');
+  const me = 'user-a', other = 'user-b';
+  const rowId = randomUUID();
+  const seen = [];
+  function pool() {
+    return { connect: async () => ({
+      query: async (sql, params) => {
+        const text = typeof sql === 'string' ? sql.replace(/\s+/g,' ').trim() : '';
+        seen.push({ text, params });
+        if (text.startsWith('SELECT status FROM kabadi_authz.accounts')) return { rows: [{ status: 'active' }] };
+        if (text.startsWith('SELECT n.id')) return { rows: [
+          { id: rowId, event: 'pickup-collected', request_id: randomUUID(), detail: '2300 g', created_at: new Date('2026-11-20T10:00:00Z'), read_at: null, visible: true },
+          // A notification about a request this reader can no longer see must be
+          // dropped rather than rendered without context.
+          { id: randomUUID(), event: 'dispute-resolved', request_id: randomUUID(), detail: null, created_at: new Date('2026-11-20T11:00:00Z'), read_at: null, visible: false },
+        ] };
+        if (text.startsWith('UPDATE kabadi_pickup.notifications SET read_at = COALESCE')) {
+          // The store must scope by recipient, so a foreign id updates nothing.
+          return { rows: params[1] === me ? [{ id: params[0] }] : [], rowCount: params[1] === me ? 1 : 0 };
+        }
+        if (text.startsWith('UPDATE kabadi_pickup.notifications SET read_at = now()')) return { rowCount: 2, rows: [] };
+        return { rows: [], rowCount: 0 };
+      }, release: () => {},
+    }) };
+  }
+  const store = createNotificationStore(pool());
+  const list = await store.list(me);
+  assert.equal(list.items.length, 1, 'an invisible notification is not shown');
+  assert.equal(list.unread, 1);
+  assert.equal(typeof list.items[0].createdAt, 'string', 'dates cross the boundary as ISO strings');
+  const query = seen.find(q => q.text.startsWith('SELECT n.id'));
+  // Scoping is done in SQL by recipient_id, not by filtering afterwards.
+  assert.match(query.text, /WHERE n\.recipient_id = \$1/);
+
+  // Reading somebody else's notification is not-found, and reveals nothing.
+  assert.equal(await createNotificationStore(pool()).markRead(other, rowId), 'not-found');
+  const update = seen.find(q => q.text.startsWith('UPDATE kabadi_pickup.notifications SET read_at = COALESCE'));
+  assert.match(update.text, /WHERE id=\$1 AND recipient_id=\$2/, 'the recipient is part of the WHERE clause');
+  assert.deepEqual(await createNotificationStore(pool()).markRead(me, rowId), { read: true });
+
+  // An inactive account cannot read notifications at all.
+  const inactive = { connect: async () => ({ query: async (sql) => {
+    const text = typeof sql === 'string' ? sql.trim() : '';
+    if (text.startsWith('SELECT status FROM kabadi_authz.accounts')) return { rows: [{ status: 'suspended' }] };
+    return { rows: [], rowCount: 0 };
+  }, release: () => {} }) };
+  assert.equal(await createNotificationStore(inactive).list(me), 'forbidden');
+});
+
+test('notification routes serve only the caller and mark read under origin and size guards', async () => {
+  const rowId = randomUUID();
+  const items = [{ id: rowId, event: 'pickup-accepted', requestId: randomUUID(), detail: null,
+    createdAt: '2026-11-20T10:00:00.000Z', readAt: null }];
+  const called = [];
+  const auth = { origin:'http://localhost:3000', handler:async()=>{}, resolveIdentity:async()=>({userId:'user-a',cookies:[]}),
+    notifications:{ list:async()=>({ items, unread:1 }),
+      markRead:async(a,id)=>{ called.push(['read',a,id]); return id === rowId ? { read:true } : 'not-found'; },
+      markAllRead:async(a)=>{ called.push(['all',a]); return { cleared: 3 }; } } };
   const server = createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
   try {
-    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/customer/pickups`,
-      { headers: { origin:'http://localhost:3000' } });
+    let response = await fetch(`${base}/api/v1/notifications`, { headers: { origin:'http://localhost:3000' } });
     assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
     const body = await response.json();
-    assert.equal(body.data.pickups.length, 1);
-    // Same descriptor the admin queue returns, so the two screens cannot
-    // disagree about whether anything is sent.
-    assert.equal(body.data.notifications.configured, false);
-    assert.equal(body.data.notifications.delivery, 'none');
-    assert.deepEqual(body.data.notifications.channels, []);
-    assert.ok(body.data.notifications.events.includes('payout-recorded'));
+    assert.equal(body.data.notifications.length, 1);
+    assert.equal(body.data.unread, 1);
+    assert.equal(body.data.delivery.delivery, 'in-app');
+
+    const post = (path, payload, headers={}) => fetch(`${base}${path}`, { method:'POST',
+      headers:{ origin:'http://localhost:3000', 'content-type':'application/json', ...headers }, body: payload });
+
+    response = await post(`/api/v1/notifications/${rowId}/read`, '{}');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { data: { read: true } });
+    assert.deepEqual(called.pop(), ['read', 'user-a', rowId]);
+
+    // A body carrying anything is refused: marking read takes no input.
+    assert.equal((await post(`/api/v1/notifications/${rowId}/read`, '{"read":true}')).status, 400);
+    assert.equal((await post(`/api/v1/notifications/${rowId}/read`, '{}', { origin:'https://evil.example' })).status, 403);
+    assert.equal((await post(`/api/v1/notifications/${rowId}/read`, '{}', { 'content-type':'text/plain' })).status, 415);
+    assert.equal((await post('/api/v1/notifications/not-a-uuid/read', '{}')).status, 400);
+    // Somebody else's id is not-found, not a distinguishing error.
+    assert.equal((await post(`/api/v1/notifications/${randomUUID()}/read`, '{}')).status, 404);
+
+    response = await post('/api/v1/notifications/read-all', '{}');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { data: { cleared: 3 } });
+    assert.deepEqual(called.pop(), ['all', 'user-a']);
   } finally { await new Promise(resolve=>server.close(resolve)); }
 });
+
+test('a malformed notification is refused rather than rendered', async () => {
+  const auth = { origin:'http://localhost:3000', handler:async()=>{}, resolveIdentity:async()=>({userId:'user-a',cookies:[]}),
+    notifications:{ list:async()=>({ items: [{ id: randomUUID(), event: 'not-an-event', requestId: null,
+      detail: null, createdAt: '2026-11-20T10:00:00.000Z', readAt: null }], unread: 1 }),
+      markRead:async()=>({ read:true }), markAllRead:async()=>({ cleared: 0 }) } };
+  const server = createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/notifications`,
+      { headers: { origin:'http://localhost:3000' } });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, 'NOTIFICATION_UNAVAILABLE');
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
