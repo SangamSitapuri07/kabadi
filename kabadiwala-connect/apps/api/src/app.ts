@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseCustomerDetails } from './customer-details.js';
 import type { CustomerDetails } from './customer-details.js';
 import { parsePickup } from './pickups.js';
-import type { CreatePickupResult, Pickup } from './pickups.js';
+import type { CollectorOutcome, CreatePickupResult, Pickup } from './pickups.js';
 import { categoryName, rateValue, utcTimestamp } from './catalog.js';
 import type { CategoryPage, RatePage } from './catalog.js';
 
@@ -14,6 +14,12 @@ type AuthMount = {
   resolveIdentity?: (cookie?: string) => Promise<{ userId: string | null; cookies: string[] }>;
   onboardCustomer?: (userId: string) => Promise<'ready' | 'forbidden'>;
   pickups?: { create: (userId: string, input: unknown) => Promise<CreatePickupResult | 'forbidden'>; list: (userId: string) => Promise<Pickup[] | 'forbidden'> };
+  collector?: {
+    open: (userId: string) => Promise<Pickup[] | 'forbidden'>;
+    mine: (userId: string) => Promise<Pickup[] | 'forbidden'>;
+    accept: (userId: string, requestId: string) => Promise<CollectorOutcome | 'forbidden'>;
+    collect: (userId: string, requestId: string, grams: unknown) => Promise<CollectorOutcome | 'forbidden'>;
+  };
   catalog?: { listCategories: (actorId:string, after:string | null) => Promise<CategoryPage | 'forbidden'>; listRates: (actorId:string, categoryId:string, after:string | null) => Promise<RatePage | 'not-found' | 'forbidden'>; createCategory: (actorId: string, name: unknown, key:string) => Promise<{id:string} | 'duplicate' | 'conflict' | 'forbidden'>; addRate: (actorId: string, categoryId: string, effectiveFrom: unknown, rate: unknown, key:string) => Promise<{id:string} | 'invalid-time' | 'not-found' | 'conflict' | 'forbidden'> };
   customerDetails?: { read: (userId: string) => Promise<CustomerDetails | null | 'forbidden'>; write: (userId: string, input: unknown) => Promise<'saved' | 'forbidden'> };
 };
@@ -151,6 +157,18 @@ export function createApp(auth?: AuthMount) {
     } catch { detailsUnavailable(response); }
   });
   const pickupUnavailable = (res: express.Response) => res.status(503).json({ error: { code: 'PICKUP_UNAVAILABLE', message: 'Test pickup requests are unavailable.' } });
+  const settledEmpty = { actualGrams: null, finalRateId: null, finalPaisePerKg: null, finalAmountPaise: null, collectedAt: null };
+  // The measured weight and the collection-time amount are the customer's
+  // receipt, so every field is present together or the row is rejected.
+  const fullySettled = (r: Pickup) => {
+    if (!Number.isInteger(r.actualGrams) || (r.actualGrams as number) < 1 || (r.actualGrams as number) > 10000000 ||
+        !uuid.test(r.finalRateId as string) || !Number.isInteger(r.finalPaisePerKg) ||
+        (r.finalPaisePerKg as number) < 0 || (r.finalPaisePerKg as number) > 1000000000 ||
+        typeof r.finalAmountPaise !== 'string' || !/^\d{1,16}$/.test(r.finalAmountPaise) ||
+        typeof r.collectedAt !== 'string' || Number.isNaN(Date.parse(r.collectedAt))) throw Error('Invalid result');
+    return { actualGrams: r.actualGrams, finalRateId: r.finalRateId, finalPaisePerKg: r.finalPaisePerKg,
+      finalAmountPaise: r.finalAmountPaise, collectedAt: r.collectedAt };
+  };
   app.use('/api/v1/customer/pickups', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   app.get('/api/v1/customer/pickups', async (req, res) => {
     if (!auth?.resolveIdentity || !auth.pickups) { pickupUnavailable(res); return; }
@@ -164,17 +182,20 @@ export function createApp(auth?: AuthMount) {
       // client, and the two shapes (priced item or legacy free text) stay apart.
       const projected = result.map(r => {
         const address = parseCustomerDetails(r.address);
-        if (!address || r.status !== 'requested' || typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt)) ||
+        if (!address || !['requested','accepted','collected'].includes(r.status) || typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt)) ||
             !Number.isInteger(r.estimatedGrams) || r.estimatedGrams < 1 || r.estimatedGrams > 10000000 || !uuid.test(r.id)) throw Error('Invalid result');
         const priced = r.categoryId !== null;
         if (priced) {
           if (!uuid.test(r.categoryId as string) || !text(r.categoryName, 100) || !uuid.test(r.rateId as string) ||
               !Number.isInteger(r.paisePerKg) || (r.paisePerKg as number) < 0 || (r.paisePerKg as number) > 1000000000 || !paise(r.amountPaise)) throw Error('Invalid result');
         } else if (r.material === null || !text(r.material, 100)) throw Error('Invalid result');
+        // A collected request is only returned once it is fully settled; a
+        // half-written settlement is treated as corrupt rather than priced.
+        const settled = r.status !== 'collected' ? settledEmpty : fullySettled(r);
         return {
           id: r.id, status: r.status, createdAt: r.createdAt, address, estimatedGrams: r.estimatedGrams,
           material: r.material, categoryId: r.categoryId, categoryName: r.categoryName,
-          rateId: r.rateId, paisePerKg: r.paisePerKg, amountPaise: r.amountPaise,
+          rateId: r.rateId, paisePerKg: r.paisePerKg, amountPaise: r.amountPaise, ...settled,
         };
       });
       res.json({ data: { pickups: projected } });
@@ -265,6 +286,104 @@ export function createApp(auth?: AuthMount) {
     } catch { catalogUnavailable(res); }
   });
   const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+  // ---- Collector surface -------------------------------------------------
+  // The actor always comes from the session; the store re-checks the collector
+  // grant inside its transaction, so a browser cannot claim the role.
+  app.use('/api/v1/collector/pickups', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  const collectorUnavailable = (res: express.Response) =>
+    res.status(503).json({ error: { code: 'COLLECTOR_UNAVAILABLE', message: 'Collector actions are unavailable.' } });
+
+  app.get('/api/v1/collector/pickups', async (req, res) => {
+    if (!auth?.resolveIdentity || !auth.collector) { collectorUnavailable(res); return; }
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const view = req.query.view;
+      if (view !== 'open' && view !== 'mine') {
+        res.status(400).json({ error: { code: 'INVALID_VIEW', message: 'View must be open or mine.' } }); return;
+      }
+      const rows = view === 'open' ? await auth.collector.open(id) : await auth.collector.mine(id);
+      if (rows === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Collector access is required.' } }); return; }
+      // Re-use the customer projection: a collector sees the same validated
+      // address and money shape, never a raw stored row.
+      const paiseOk = (value: unknown) => value === null || (typeof value === 'string' && /^\d{1,16}$/.test(value));
+      const projected = (rows as Pickup[]).map(r => {
+        const address = parseCustomerDetails(r.address);
+        if (!address || !['requested','accepted','collected'].includes(r.status) || !uuid.test(r.id) ||
+            typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt)) ||
+            !Number.isInteger(r.estimatedGrams) || r.estimatedGrams < 1 || r.estimatedGrams > 10000000) throw Error('Invalid result');
+        if (r.categoryId === null) throw Error('Invalid result');
+        if (!uuid.test(r.categoryId) || !text(r.categoryName, 100) || !uuid.test(r.rateId as string) ||
+            !Number.isInteger(r.paisePerKg) || (r.paisePerKg as number) < 0 || (r.paisePerKg as number) > 1000000000 ||
+            r.amountPaise === null || !paiseOk(r.amountPaise)) throw Error('Invalid result');
+        const settled = r.status === 'collected' ? fullySettled(r) : settledEmpty;
+        return { id: r.id, status: r.status, createdAt: r.createdAt, address, estimatedGrams: r.estimatedGrams,
+          material: r.material, categoryId: r.categoryId, categoryName: r.categoryName,
+          rateId: r.rateId, paisePerKg: r.paisePerKg, amountPaise: r.amountPaise, ...settled };
+      });
+      res.json({ data: { pickups: projected } });
+    } catch { collectorUnavailable(res); }
+  });
+
+  // One guarded shape for both collector mutations: exact origin, bounded JSON,
+  // then the session, then the store's own authorization and state checks.
+  for (const action of ['accept', 'collect'] as const) {
+    app.post(`/api/v1/collector/pickups/:requestId/${action}`, (req, res, next) => {
+      if (!auth?.resolveIdentity || !auth.collector) { collectorUnavailable(res); return; }
+      if (req.get('origin') !== auth!.origin) { res.status(403).json({ error: { code: 'INVALID_ORIGIN', message: 'Request origin is not allowed.' } }); return; }
+      const length = req.get('content-length');
+      if (!length || !/^\d+$/.test(length) || Number(length) > 4096 || req.get('transfer-encoding')) {
+        res.status(413).json({ error: { code: 'INVALID_BODY', message: 'Request body is invalid or too large.' } }); return;
+      }
+      if (!req.is('application/json')) { res.status(415).json({ error: { code: 'INVALID_CONTENT_TYPE', message: 'JSON is required.' } }); return; }
+      next();
+    }, express.json({ limit: '4kb', strict: true }), async (req, res) => {
+      try {
+        const id = await detailsAuth(req, res); if (id === null) return;
+        const requestId = req.params.requestId;
+        if (!uuid.test(requestId)) { res.status(400).json({ error: { code: 'INVALID_REQUEST_ID', message: 'Request id is invalid.' } }); return; }
+        const body = req.body;
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          res.status(400).json({ error: { code: 'INVALID_BODY', message: 'A JSON object is required.' } }); return;
+        }
+        const keys = Object.keys(body);
+        let result: CollectorOutcome | 'forbidden';
+        if (action === 'accept') {
+          if (keys.length !== 0) { res.status(400).json({ error: { code: 'INVALID_BODY', message: 'An empty JSON object is required.' } }); return; }
+          result = await auth!.collector!.accept(id, requestId);
+        } else {
+          if (keys.length !== 1 || !('actualGrams' in body)) {
+            res.status(400).json({ error: { code: 'INVALID_BODY', message: 'Only actualGrams is accepted.' } }); return;
+          }
+          // The weight is validated before the store so a bad number is a clear
+          // 400 rather than a sanitized upstream failure.
+          const grams = (body as Record<string, unknown>).actualGrams;
+          if (typeof grams !== 'number' || !Number.isInteger(grams) || grams < 1 || grams > 10000000) {
+            res.status(400).json({ error: { code: 'INVALID_WEIGHT', message: 'Actual weight must be 1 to 10,000,000 grams.' } }); return;
+          }
+          result = await auth!.collector!.collect(id, requestId, grams);
+        }
+        if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Collector access is required.' } }); return; }
+        if (result.outcome === 'accepted') { res.json({ data: { accepted: true } }); return; }
+        if (result.outcome === 'collected') {
+          res.json({ data: { collected: true, actualGrams: result.actualGrams,
+            finalPaisePerKg: result.finalPaisePerKg, finalAmountPaise: result.finalAmountPaise,
+            finalRateId: result.finalRateId } });
+          return;
+        }
+        const failures: Record<'not-found' | 'already-accepted' | 'not-accepted' | 'already-collected' | 'no-rate' | 'legacy-request', [number, string, string]> = {
+          'not-found': [404, 'REQUEST_NOT_FOUND', 'That request does not exist.'],
+          'already-accepted': [409, 'ALREADY_ACCEPTED', 'Another collector already accepted this request.'],
+          'not-accepted': [409, 'NOT_ACCEPTED', 'Accept this request before recording a collection.'],
+          'already-collected': [409, 'ALREADY_COLLECTED', 'This request was already collected.'],
+          'no-rate': [409, 'NO_RATE', 'No rate is in force for that category.'],
+          'legacy-request': [409, 'LEGACY_REQUEST', 'Older free-text requests cannot be priced.'],
+        };
+        const [status, code, message] = failures[result.outcome];
+        res.status(status).json({ error: { code, message } });
+      } catch { collectorUnavailable(res); }
+    });
+  }
+
   app.post('/api/v1/admin/catalog/categories', catalogWrite, express.json({limit:'4kb',strict:true}), async (req, res) => {
     const body: unknown = req.body, key = req.get('idempotency-key');
     if (!key || !uuid.test(key)) { res.status(400).json({error:{code:'INVALID_KEY',message:'A valid idempotency key is required.'}}); return; }

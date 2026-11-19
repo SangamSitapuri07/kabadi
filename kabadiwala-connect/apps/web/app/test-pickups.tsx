@@ -2,10 +2,12 @@
 import { useState } from 'react';
 
 type Pickup = {
-  id:string; status:'requested'; createdAt:string; estimatedGrams:number;
+  id:string; status:'requested'|'accepted'|'collected'; createdAt:string; estimatedGrams:number;
   address:{name:string;addressLine:string;city:string;state:string;postalCode:string};
   material:string|null; categoryId:string|null; categoryName:string|null;
   rateId:string|null; paisePerKg:number|null; amountPaise:string|null;
+  actualGrams:number|null; finalRateId:string|null; finalPaisePerKg:number|null;
+  finalAmountPaise:string|null; collectedAt:string|null;
 };
 type Estimate = { categoryId:string; categoryName:string; rateId:string; paisePerKg:number; amountPaise:string };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -93,10 +95,17 @@ export function TestPickups() {
         : `${item.material} — ${item.estimatedGrams} g — no estimate (older request)`;
       const saved = `${item.status} · saved ${new Date(item.createdAt).toLocaleString()}`;
       const where = `${item.address.name}, ${item.address.addressLine}, ${item.address.city}, ${item.address.state}, ${item.address.postalCode}`;
+      // Once collected, the measured weight and the rate in force at collection
+      // are the final amount. Until then the only figure on screen is an estimate.
+      const final = item.status === 'collected' && item.finalAmountPaise !== null &&
+        item.finalPaisePerKg !== null && item.actualGrams !== null
+        ? `Final amount ${rupees(item.finalAmountPaise)}: ${item.actualGrams} g at ${rupees(String(item.finalPaisePerKg))}/kg (collection-time rate).`
+        : null;
       return <li key={item.id}>
         <span>{summary}</span>
         <br /><span>{saved}</span>
         <br /><span>{where}</span>
+        {final && <><br /><strong>{final}</strong></>}
       </li>;
     })}</ul>}</div>}
   </section>;

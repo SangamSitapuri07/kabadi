@@ -39,6 +39,12 @@ const adminCompiled = babel.transformSync(await readFile('apps/web/app/catalog-a
   plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
 });
 await writeFile(join(temp,'catalog-admin.js'),adminCompiled.code);
+const collectorCompiled = babel.transformSync(await readFile('apps/web/app/collector-queue.tsx','utf8'), {
+  filename:'collector-queue.tsx',babelrc:false,configFile:false,
+  presets:[[require('next/dist/compiled/babel/preset-typescript'),{allExtensions:true,isTSX:true}],[require('next/dist/compiled/babel/preset-react'),{runtime:'automatic'}]],
+  plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
+});
+await writeFile(join(temp,'collector-queue.js'),collectorCompiled.code);
 const { GoogleSignIn } = createRequire(modulePath)(modulePath);
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 
@@ -514,6 +520,102 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       Object.defineProperty(document,'visibilityState',{value:'visible',configurable:true});
       globalThis.fetch=async()=>json({error:{code:'FORBIDDEN'}},403);
       await clickButton('Load test catalog'); assert.match(document.body.textContent,/Admin access is required/);
+      await unmount();
+    });
+    await t.test('collector queue accepts, records a weight and shows the final amount', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174100', rateId='123e4567-e89b-42d3-a456-426614174101';
+      const address={name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'};
+      const open={ id:requestId, status:'requested', createdAt:'2026-11-18T17:00:00.000Z', address, estimatedGrams:2500,
+        material:null, categoryId:'123e4567-e89b-42d3-a456-426614174102', categoryName:'Synthetic paper', rateId:rateId,
+        paisePerKg:3245, amountPaise:'8113', actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null };
+      const accepted={ ...open, status:'accepted' };
+      const collected={ ...accepted, status:'collected', actualGrams:2300, finalRateId:rateId, finalPaisePerKg:3300,
+        finalAmountPaise:'7590', collectedAt:'2026-11-20T10:00:00.000Z' };
+      let mine=[accepted], posts=[];
+      await mount(async (url, init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.includes('/collector/pickups?view=')) return json({data:{pickups: url.includes('view=mine') ? mine : [open]}});
+        if (url.endsWith('/collect')) { posts.push(JSON.parse(init.body)); mine=[collected]; return json({data:{collected:true, actualGrams:2300,
+          finalPaisePerKg:3300, finalAmountPaise:'7590', finalRateId:rateId}}); }
+        if (url.endsWith('/accept')) { posts.push(JSON.parse(init.body)); return json({data:{accepted:true}}); }
+        return json({authenticated:true});
+      });
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector queue'));
+      const inSection=text=>[...section.querySelectorAll('button')].find(b=>b.textContent===text);
+      await clickButton('Open requests');
+      assert.match(section.textContent,/Synthetic paper — 2500 g — estimate ₹81\.13 at ₹32\.45\/kg/);
+      await act(async()=>{inSection('Accept this request').click();});
+      // Accept sends an empty object: no collector id and no price.
+      assert.deepEqual(posts.pop(), {});
+      assert.match(section.textContent,/Request accepted/i);
+      assert.match(section.textContent,/accepted/);
+      const input=section.querySelector('input');
+      const setter=Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set;
+      await act(async()=>{setter.call(input,'2300'); input.dispatchEvent(new dom.window.Event('input',{bubbles:true}));});
+      globalThis.confirm=()=>true;
+      await act(async()=>{inSection('Record collection').click();});
+      // Collect sends only the measured weight.
+      assert.deepEqual(posts.pop(), {actualGrams:2300});
+      assert.match(section.textContent,/Final amount ₹75\.90 at ₹33\.00\/kg/);
+      assert.match(section.textContent,/Final: 2300 g at ₹33\.00\/kg = ₹75\.90/);
+      await unmount();
+    });
+    await t.test('collector queue refuses a bad weight and explains a lost race', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174103';
+      const row={ id:requestId, status:'accepted', createdAt:'2026-11-18T17:00:00.000Z',
+        address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'},
+        estimatedGrams:2500, material:null, categoryId:'123e4567-e89b-42d3-a456-426614174104', categoryName:'Synthetic paper',
+        rateId:'123e4567-e89b-42d3-a456-426614174105', paisePerKg:3245, amountPaise:'8113',
+        actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null };
+      let posts=0;
+      await mount(async (url, init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.includes('/collector/pickups?view=')) return json({data:{pickups:[row]}});
+        if (init?.method === 'POST') { posts++; return json({error:{code:url.endsWith('/collect')?'ALREADY_COLLECTED':'ALREADY_ACCEPTED'}},409); }
+        return json({authenticated:true});
+      });
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector queue'));
+      const clickIn=async text=>{const b=[...section.querySelectorAll('button')].find(x=>x.textContent===text); assert.ok(b,`button not found: ${text}`); await act(async()=>{b.click();});};
+      await clickButton('My accepted and collected');
+      await clickIn('Record collection');
+      // An empty weight never reaches the API.
+      assert.equal(posts,0);
+      assert.match(section.textContent,/Enter the measured weight/i);
+      const input=section.querySelector('input');
+      const setter=Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set;
+      await act(async()=>{setter.call(input,'0'); input.dispatchEvent(new dom.window.Event('input',{bubbles:true}));});
+      await clickIn('Record collection');
+      assert.equal(posts,0,'a weight below 1 g is refused locally');
+
+      globalThis.fetch=async (url,init) => url.endsWith('get-session') ? json({authenticated:true})
+        : url.includes('view=') ? json({data:{pickups:[{...row, status:'requested'}]}})
+        : json({error:{code:'ALREADY_ACCEPTED'}},409);
+      await clickButton('Open requests');
+      await clickIn('Accept this request');
+      assert.match(section.textContent,/Another collector already accepted/i);
+      await unmount();
+    });
+    await t.test('customer sees the collection-time final amount once collected', async () => {
+      const estimate={categoryId:'123e4567-e89b-42d3-a456-426614174110', categoryName:'Synthetic paper',
+        rateId:'123e4567-e89b-42d3-a456-426614174111', paisePerKg:3245, amountPaise:'8113'};
+      await mount(async (url, init) => {
+        if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
+        if (url.endsWith('/customer/pickups') && !init?.method) return json({data:{pickups:[
+          { id:'123e4567-e89b-42d3-a456-426614174112', status:'collected', createdAt:'2026-11-18T17:00:00.000Z',
+            address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'},
+            estimatedGrams:2500, material:null, ...estimate, actualGrams:2300,
+            finalRateId:'123e4567-e89b-42d3-a456-426614174113', finalPaisePerKg:3300, finalAmountPaise:'7590',
+            collectedAt:'2026-11-20T10:00:00.000Z' },
+        ]}});
+        return json({authenticated:true});
+      });
+      await clickButton('Set up customer account');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Test pickup requests'));
+      await act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Load my test requests').click();});
+      // Both figures are present and each is labelled: estimate at request time,
+      // final amount at collection time.
+      assert.match(section.textContent,/estimated ₹81\.13 at ₹32\.45\/kg/);
+      assert.match(section.textContent,/Final amount ₹75\.90: 2300 g at ₹33\.00\/kg \(collection-time rate\)/);
       await unmount();
     });
     await t.test('a still-active session after sign-out is not presented as signed out', async () => {

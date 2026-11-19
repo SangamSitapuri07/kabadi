@@ -22,8 +22,8 @@ try {
   } else {
     const rows = await pool.query<{ version: number }>('SELECT version FROM kabadi_pickup.schema_version');
     const version = rows.rows[0]?.version;
-    console.log(`Pickup schema version: ${version ?? 'unrecognized'} (expected 2).`);
-    if (version !== 2) console.log('Run the pickup migration to upgrade it.');
+    console.log(`Pickup schema version: ${version ?? 'unrecognized'} (expected 3).`);
+    if (version !== 3) console.log('Run the pickup migration to upgrade it.');
   }
 } catch (error) {
   const hint = !process.env.AUTH_ENABLED && !process.env.DATABASE_URL;

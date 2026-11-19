@@ -36,3 +36,13 @@ footer { color: #71877a; font-size: .8rem; padding: 25px 0; border-top: 1px soli
 /* Category IDs are long UUIDs; show them in a copyable monospace line. */
 .category-id { display: inline-block; margin-top: 4px; color: #536a5e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .72rem; overflow-wrap: anywhere; }
 .estimate { border-left: 3px solid #21815b; padding-left: 10px; color: #18362c; }
+
+/* Collector queue: claims and measured weights, kept visually distinct from the
+   customer's estimate list so an estimate is never mistaken for a final amount. */
+.collector-queue { margin-top: 20px; max-width: 420px; }
+.collector-queue h2 { color: #18362c; font-size: 1.1rem; }
+.collector-queue li { margin: 12px 0; overflow-wrap: anywhere; }
+.collector-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.collector-queue label { display: grid; gap: 5px; color: #294f3d; font-weight: 700; margin: 8px 0; }
+.collector-queue input { width: 100%; border: 1px solid #cfded1; border-radius: 8px; padding: 10px; color: #18362c; font: inherit; background: white; }
+.collector-queue input:focus-visible { outline: 3px solid #21815b; outline-offset: 2px; }

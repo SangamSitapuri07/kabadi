@@ -426,8 +426,8 @@ production readiness/security review is implied.
 
 A new separate `kabadi_pickup` schema requires the existing auth, authorization,
 customer **and catalog** schemas, because request rows reference catalog
-categories and rates. The schema is version 2; an existing version 1 schema is
-upgraded in place, keeping every legacy row. It is explicitly migrated, never on startup, and creates
+categories and rates. The schema is version 3; a version 1 schema is upgraded in
+place through version 2 to version 3 in one run, keeping every legacy row. It is explicitly migrated, never on startup, and creates
 no pickup requests. Version checks do not detect all schema drift; upgrades and
 restore have not been tested. Before running on any local development database,
 independently inspect the target, back it up, and obtain explicit approval. Do
@@ -442,7 +442,7 @@ To check the recorded version without changing anything, run
 `npm run pickups:version`. It prints the recorded version and whether a
 migration is still needed, so nobody has to infer from log wording whether a
 migration actually ran. A migration run always prints what it did — `created`,
-`upgraded from version 1 to version 2`, or `already version 2; nothing changed`
+`upgraded from version N to version 3`, or `already version 3; nothing changed`
 — so a no-op can never be mistaken for an upgrade. If the printed text does not
 match this description, the built `dist` output is older than the source: run
 `npm run build:api` after pulling. No secrets or customer data should be shared in chat.
@@ -450,9 +450,47 @@ match this description, the built `dist` output is older than the source: run
 Run migrations **from this `kabadiwala-connect` directory**, because `.env` is
 resolved relative to the current directory and lives here. Running from
 the parent repository root fails with `.env: not found`. The command reports what
-it actually did: `created`, `upgraded from version 1 to version 2`, or
-`already version 2; nothing changed`, plus how many pre-pricing requests still
+it actually did: `created`, `upgraded from version N to version 3`, or
+`already version 3; nothing changed`, plus how many pre-pricing requests still
 exist without an estimate.
+
+### Collector acceptance and the final amount (development API)
+
+The request-time figure is an **estimate**; the payable amount is decided when a
+collector records the collection. Three endpoints back that:
+
+- `GET /api/v1/collector/pickups?view=open|mine` — open requests are priced
+  `requested` rows only (legacy free-text rows are never offered, because there
+  is no category to price at collection). `mine` shows the caller's accepted and
+  collected rows. The view is required and anything else is a 400.
+- `POST /api/v1/collector/pickups/:requestId/accept` with `{}` — claims the
+  request. Acceptance is a single conditional `UPDATE ... WHERE status='requested'`
+  inside a transaction, so exactly one collector can win a race; losers get
+  `ALREADY_ACCEPTED` (409).
+- `POST /api/v1/collector/pickups/:requestId/collect` with `{"actualGrams":2300}`
+  — locks the row, requires `status='accepted'` **and** that the caller is the
+  accepting collector, then selects the newest rate with
+  `effective_from <= clock_timestamp()` and stores the weight, that rate and the
+  final amount on the request.
+
+The final amount therefore always uses the **collection-time** rate, never the
+request-time one; the request-time rate stays on the row as the historical
+estimate. Both writes require an exact Origin, a bounded JSON body (4 KB), a
+content type of `application/json`, a session, and an active account holding a
+`collector` grant — re-checked inside the transaction, not trusted from the
+guard. The actor is always the session user; no endpoint accepts a collector id,
+a rate, a per-kg price or an amount from the client. A second collection returns
+`ALREADY_COLLECTED` (409) and changes nothing; a collector who did not accept the
+request gets `NOT_ACCEPTED` (409). Every code the UI can show is enumerated in
+the same-origin bridges; anything unlisted fails closed as a 503.
+
+The customer's own list now carries the lifecycle (`requested`, `accepted`,
+`collected`) plus, once collected, the measured weight, the collection-time rate
+and the final amount. The UI labels the request-time figure as an estimate and
+the collected figure as the final amount. No cancellation, reassignment,
+dispute handling, notification, payout or retention policy exists yet, and
+collection requires the `collector` role to be granted with the development role
+tool — no self-service collector signup exists.
 
 ### Customer self-onboarding (development API)
 

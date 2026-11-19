@@ -95,20 +95,34 @@ async function handle(request: Request, method: 'GET' | 'POST') {
           if (!r || typeof r !== 'object' || Array.isArray(r)) throw Error('Invalid response');
           const v = r as Record<string, unknown>;
           const address = project(v.address, false);
-          if (!address || v.status !== 'requested' || !uuid.test(String(v.id ?? '')) ||
+          if (!address || !['requested','accepted','collected'].includes(String(v.status)) ||
+              !uuid.test(String(v.id ?? '')) ||
               typeof v.createdAt !== 'string' || Number.isNaN(Date.parse(v.createdAt)) ||
               !Number.isInteger(v.estimatedGrams)) throw Error('Invalid response');
+          // A settled request must carry its measured weight and final amount;
+          // anything half-filled is rejected rather than shown as a price.
+          const settled = v.status !== 'collected' ? {
+            actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null,
+          } : (
+            Number.isInteger(v.actualGrams) && uuid.test(String(v.finalRateId ?? '')) &&
+            Number.isInteger(v.finalPaisePerKg) && /^\d{1,16}$/.test(String(v.finalAmountPaise ?? '')) &&
+            typeof v.collectedAt === 'string' && !Number.isNaN(Date.parse(v.collectedAt))
+          ) ? {
+            actualGrams:v.actualGrams, finalRateId:v.finalRateId, finalPaisePerKg:v.finalPaisePerKg,
+            finalAmountPaise:v.finalAmountPaise, collectedAt:v.collectedAt,
+          } : (() => { throw Error('Invalid response'); })();
           // Either a priced item with a snapshot, or a legacy free-text request.
           if (v.categoryId !== null) {
             const estimate = parseEstimate({ categoryId:v.categoryId, categoryName:v.categoryName, rateId:v.rateId, paisePerKg:v.paisePerKg, amountPaise:v.amountPaise });
             if (!estimate) throw Error('Invalid response');
-            return { id:v.id, status:'requested', createdAt:v.createdAt, address, estimatedGrams:v.estimatedGrams,
-              material:null, ...estimate };
+            return { id:v.id, status:v.status, createdAt:v.createdAt, address, estimatedGrams:v.estimatedGrams,
+              material:null, ...estimate, ...settled };
           }
           if (typeof v.material !== 'string' || !v.material.trim() || Array.from(v.material).length > 100 ||
               /[\uD800-\uDFFF\u0000-\u001f\u007f-\u009f]/u.test(v.material)) throw Error('Invalid response');
-          return { id:v.id, status:'requested', createdAt:v.createdAt, address, estimatedGrams:v.estimatedGrams,
-            material:v.material, categoryId:null, categoryName:null, rateId:null, paisePerKg:null, amountPaise:null };
+          return { id:v.id, status:v.status, createdAt:v.createdAt, address, estimatedGrams:v.estimatedGrams,
+            material:v.material, categoryId:null, categoryName:null, rateId:null, paisePerKg:null, amountPaise:null,
+            ...settled };
         });
         payload = { data: { pickups } };
       } else return unavailable();
