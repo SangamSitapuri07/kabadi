@@ -534,8 +534,8 @@ gets `OWN_REQUEST` (409) and the UI explains it. This matters because a collecto
 records the weight — self-acceptance would let one person set the quantity and
 receive the money.
 
-Neither action notifies anybody: there is no messaging, no dispute process and no
-retention policy yet. Cancelling after a collector has accepted leaves that
+Neither action notifies anybody: no messaging exists (see *Notifications: not
+implemented*), and there is no dispute process or retention policy yet. Cancelling after a collector has accepted leaves that
 collector with no signal beyond the row disappearing from their queue.
 
 ### Disputes (development API)
@@ -640,6 +640,43 @@ is still payable once, an open dispute still blocks payment, and `recorded_by`
 still names the admin. What will have to change is honest and small: flip
 `configured`, add the real method list, and replace the banner with the actual
 provider state — not hide it.
+
+### Notifications: not implemented (placeholder)
+
+Nothing in this repository sends a message. No email, SMS, WhatsApp, push or
+in-app notification exists: not to the customer when their request is accepted,
+collected, corrected or paid, and not to the collector when a request is waiting
+or a payout was recorded. Every state change is silent unless somebody looks at
+the screen. This is a deliberate deferral, not an omission.
+
+The placeholder has four parts, each there to stop the absence turning into a
+false claim:
+
+- `apps/api/src/notifications.ts` — `NOTIFICATION_PROVIDER =
+  { configured: false, delivery: 'none', channels: [] }` plus
+  `NOTIFICATION_EVENTS`, one entry per transition that actually exists in the
+  store. A test imports the store source and asserts that each listed event has
+  a matching SQL transition, so the list cannot advertise a feature that was
+  removed or miss one that was added.
+- **The server states it, the browser does not guess.** `GET
+  /api/v1/customer/pickups` and `GET /api/v1/admin/payouts` both return a
+  `notifications` descriptor alongside their data. The customer screen shows a
+  standing notice ("No updates will be sent yet…") *before* anything is
+  requested, not after; the payout screen says "Recording a payout notifies
+  nobody. Tell them yourself."
+- **Bridges refuse to relay a claim they cannot honour.** Both web bridges accept
+  the descriptor only when it promises nothing (`configured:false`,
+  `channels: []`, `delivery:'none'`). Anything else is a 503, not a passed-through
+  promise. The UI likewise treats an unexpected shape as "nothing is sent".
+- `.env.example` — `NOTIFICATION_CHANNEL`, `NOTIFICATION_SMTP_URL`,
+  `NOTIFICATION_SMS_KEY` are present and deliberately blank. Nothing reads them.
+
+`NOTIFICATION_CHANNELS` lists what was *considered* (`in-app`, `email`, `sms`,
+`whatsapp`) with none selected: choosing a channel, and which audience should
+receive which event, is open policy work tracked as **P0-02**. The notice is
+correct only while `configured` is `false`; a test fails the moment it is flipped
+without a transport behind it. When notifications are built, the sender plugs in
+and the notice is **replaced** with the real state — not deleted.
 
 ### Customer self-onboarding (development API)
 
@@ -748,8 +785,10 @@ profile, test pickup capture, a read/write development catalog, a local
 admin-grant tool, collector acceptance and collection-time settlement,
 cancellation and release, customer disputes with admin correction, and an
 **admin-recorded payout ledger** exist. There is still no dispatch, routing,
-notification, OTP, or actual money movement: recording a payout is bookkeeping,
-and the payment mechanism is an explicit placeholder — no provider is connected,
-and the payout screen says so. Policy
+OTP, or actual money movement, and **notifications are not implemented either**:
+no message is sent to anyone on any state change. Recording a payout is
+bookkeeping, and both the payment rail and notifications are explicit
+placeholders kept for a later implementation — no provider is connected, no
+channel exists, and the screens say so. Policy
 decisions, full security review and zero-cost provider suitability remain
 pending. Phase 1 is not complete.

@@ -867,6 +867,63 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.match(section.textContent,/No unpaid dues/);
       await unmount();
     });
+    await t.test('the customer is told plainly that no update will be sent', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174200';
+      const row={ id:requestId, status:'requested', createdAt:'2026-11-18T17:00:00.000Z',
+        address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'},
+        estimatedGrams:2500, material:null, categoryId:'123e4567-e89b-42d3-a456-426614174201',
+        categoryName:'Synthetic paper', rateId:'123e4567-e89b-42d3-a456-426614174202', paisePerKg:3245,
+        amountPaise:'8113', actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null,
+        collectedAt:null, cancelledAt:null, cancellationReason:null, releasedAt:null, dispute:null, payout:null };
+      await mount(async (url) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
+        if (url.endsWith('/customer/pickups')) return json({data:{pickups:[row],
+          notifications:{ configured:false, channels:[], delivery:'none', events:['pickup-requested'] }}});
+        return json({authenticated:true});
+      });
+      await clickButton('Set up customer account');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Test pickup requests'));
+      // The notice is standing, not a reaction to a click: the customer should
+      // know before requesting that nobody will contact them.
+      assert.match(section.textContent,/No updates will be sent yet/);
+      assert.match(section.textContent,/not get an email, SMS or WhatsApp message/);
+      assert.match(section.textContent,/collector is not notified automatically either/i);
+      await unmount();
+    });
+    await t.test('a claimed notification channel is not trusted without the server saying so', async () => {
+      // The UI must never upgrade to "you will be notified" on its own; only an
+      // explicit configured:true from the server may clear the notice.
+      await mount(async (url) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
+        if (url.endsWith('/customer/pickups')) return json({data:{pickups:[],
+          notifications:{ configured:'yes', channels:['email'], delivery:'some' }}});
+        return json({authenticated:true});
+      });
+      await clickButton('Set up customer account');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Test pickup requests'));
+      assert.match(section.textContent,/No updates will be sent yet/);
+      await unmount();
+    });
+    await t.test('recording a payout says it notifies nobody', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174210';
+      const row={ id:requestId, categoryName:'Synthetic paper', estimatedGrams:2500, actualGrams:2000,
+        finalPaisePerKg:3245, amountPaise:'6490', collectedAt:'2026-11-20T10:00:00.000Z',
+        address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'} };
+      await mount(async (url) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/admin/payouts')) return json({data:{dues:[row],
+          payment:{configured:false,name:null,methods:['cash','transfer','adjustment']},
+          notifications:{ configured:false, channels:[], delivery:'none', events:['payout-recorded'] }}});
+        return json({authenticated:true});
+      });
+      await clickButton('Load unpaid dues');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector payouts due'));
+      assert.match(section.textContent,/Recording a payout notifies nobody/);
+      assert.match(section.textContent,/Tell them yourself/);
+      await unmount();
+    });
     await t.test('the payout screen states no provider is connected and does not pretend money moved', async () => {
       const requestId='123e4567-e89b-42d3-a456-426614174180';
       const row={ id:requestId, categoryName:'Synthetic paper', estimatedGrams:2500, actualGrams:2000,

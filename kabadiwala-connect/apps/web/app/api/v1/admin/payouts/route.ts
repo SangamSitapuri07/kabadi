@@ -53,7 +53,19 @@ export async function GET(request: Request) {
           estimatedGrams: v.estimatedGrams, actualGrams: v.actualGrams,
           finalPaisePerKg: v.finalPaisePerKg, amountPaise: v.amountPaise, collectedAt: v.collectedAt };
       });
-      payload = { data: { dues } };
+      // Same rule as the customer bridge: forward only a report that promises
+      // nothing, because this build can send nothing.
+      const reported = (data as { data: { notifications?: unknown } }).data.notifications;
+      let notifications: { configured: boolean; channels: string[]; delivery: 'none' } | null = null;
+      if (reported !== undefined) {
+        if (!reported || typeof reported !== 'object' || Array.isArray(reported) ||
+            (reported as Record<string, unknown>).configured !== false ||
+            !Array.isArray((reported as Record<string, unknown>).channels) ||
+            ((reported as Record<string, unknown>).channels as unknown[]).length !== 0 ||
+            (reported as Record<string, unknown>).delivery !== 'none') throw Error('Invalid response');
+        notifications = { configured: false, channels: [], delivery: 'none' };
+      }
+      payload = { data: { dues, notifications } };
     } else if (object(data) && object(data.error) && typeof data.error.code === 'string') {
       const messages: Record<string, [number, string]> = {
         SIGN_IN_REQUIRED: [401, 'Sign-in is required.'],

@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseCustomerDetails } from './customer-details.js';
 import type { CustomerDetails } from './customer-details.js';
 import { PAYMENT_PROVIDER, PAYOUT_METHODS, isMissingCollectorColumns, isPayoutMethod, parsePickup } from './pickups.js';
+import { NOTIFICATION_PROVIDER } from './notifications.js';
 import type { CancelOutcome, CollectorOutcome, CreatePickupResult, DisputeOutcome, PayoutOutcome, Pickup } from './pickups.js';
 import { categoryName, rateValue, utcTimestamp } from './catalog.js';
 import type { CategoryPage, RatePage } from './catalog.js';
@@ -246,7 +247,9 @@ export function createApp(auth?: AuthMount) {
           rateId: r.rateId, paisePerKg: r.paisePerKg, amountPaise: r.amountPaise, ...settled, ...terminal,
         };
       });
-      res.json({ data: { pickups: projected } });
+      // `notifications` tells the customer screen that no message is coming.
+      // It is reported by the server so the UI never has to assume either way.
+      res.json({ data: { pickups: projected, notifications: NOTIFICATION_PROVIDER } });
     } catch (error) { if (isMissingCollectorColumns(error)) pickupNeedsMigration(res); else pickupUnavailable(res); }
   });
   app.post('/api/v1/customer/pickups', (req, res, next) => {
@@ -470,7 +473,7 @@ export function createApp(auth?: AuthMount) {
       // `payment` tells the UI whether anything can actually move money. It is
       // a constant today: no provider is configured, and saying so in the
       // response keeps that fact out of the client's imagination.
-      res.json({ data: { dues: projected, payment: { ...PAYMENT_PROVIDER, methods: PAYOUT_METHODS } } });
+      res.json({ data: { dues: projected, payment: { ...PAYMENT_PROVIDER, methods: PAYOUT_METHODS }, notifications: NOTIFICATION_PROVIDER } });
     } catch (error) { if (isMissingCollectorColumns(error)) payoutNeedsMigration(res); else payoutUnavailable(res); }
   });
 

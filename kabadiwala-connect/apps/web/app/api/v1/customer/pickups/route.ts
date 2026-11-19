@@ -147,7 +147,20 @@ async function handle(request: Request, method: 'GET' | 'POST') {
             material:v.material, categoryId:null, categoryName:null, rateId:null, paisePerKg:null, amountPaise:null,
             ...settled, dispute, payout };
         });
-        payload = { data: { pickups } };
+        // Forward the notification state verbatim, rejecting anything that
+        // claims a delivery this build cannot make. A bridge that silently
+        // dropped the field would let the UI imply a message was sent.
+        const reported = (data as { data: { notifications?: unknown } }).data.notifications;
+        let notifications: { configured: boolean; channels: string[]; delivery: 'none' } | null = null;
+        if (reported !== undefined) {
+          if (!reported || typeof reported !== 'object' || Array.isArray(reported) ||
+              (reported as Record<string, unknown>).configured !== false ||
+              !Array.isArray((reported as Record<string, unknown>).channels) ||
+              ((reported as Record<string, unknown>).channels as unknown[]).length !== 0 ||
+              (reported as Record<string, unknown>).delivery !== 'none') throw Error('Invalid response');
+          notifications = { configured: false, channels: [], delivery: 'none' };
+        }
+        payload = { data: { pickups, notifications } };
       } else return unavailable();
     } else if (data && typeof data === 'object' && 'error' in data && data.error && typeof data.error === 'object' && 'code' in data.error && typeof data.error.code === 'string') {
       const messages: Record<string, [number, string]> = { INVALID_BODY:[400, 'Test pickup request is invalid.'], SIGN_IN_REQUIRED:[401, 'Sign-in is required.'], FORBIDDEN:[403, 'Customer access is required.'], PROFILE_REQUIRED:[409, 'Save customer details first.'], REQUEST_CONFLICT:[409, 'This request key was already used.'], UNKNOWN_CATEGORY:[409, 'That category is not available.'], NO_RATE:[409, 'No rate is active for that category yet.'], PICKUP_UNAVAILABLE:[503, 'Test pickup requests are unavailable.'], PICKUP_SCHEMA_OUTDATED:[503, 'Pickup storage needs its migration; the database is behind the application.'] };

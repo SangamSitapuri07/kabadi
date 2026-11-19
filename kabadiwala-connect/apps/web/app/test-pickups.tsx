@@ -31,6 +31,9 @@ export function TestPickups() {
   const [message, setMessage] = useState('');
   const [estimate, setEstimate] = useState<Estimate | null>(null);
   const [pending, setPending] = useState<{requestKey:string; categoryId:string; estimatedGrams:number} | null>(null);
+  // What the server said about notifications. null means "not reported"; the UI
+  // then still assumes nothing is sent, because nothing is.
+  const [notifications, setNotifications] = useState<{configured:boolean; delivery:'none'|'some'} | null>(null);
 
   async function list() {
     setBusy(true); setMessage('');
@@ -42,6 +45,11 @@ export function TestPickups() {
       }
       if (!response.ok || !Array.isArray(json?.data?.pickups)) throw Error('unavailable');
       setItems(json.data.pickups);
+      // Only a recognised report is trusted; an unexpected shape falls back to
+      // "nothing is sent" rather than to a comforting claim.
+      const n = json.data.notifications;
+      setNotifications(n && n.configured === true && n.delivery === 'some'
+        ? { configured:true, delivery:'some' } : { configured:false, delivery:'none' });
     } catch { setItems(null); setMessage('Test requests could not be loaded. Please try again.'); }
     finally { setBusy(false); }
   }
@@ -143,6 +151,13 @@ export function TestPickups() {
       <label>Estimated weight in grams<input required type="number" min="1" max="10000000" step="1" value={grams} onChange={e => setGrams(e.target.value)} /></label>
     </fieldset><button type="submit" disabled={busy}>{pending ? 'Retry same test request' : 'Save test request'}</button></form>
     <p role="status">{message}</p>
+    {/* NOTIFICATIONS: deferred. This notice must be removed only when a real
+        channel exists and the server reports configured:true -- not before. */}
+    {notifications?.configured !== true && <p className="notifications-placeholder">
+      <strong>No updates will be sent yet.</strong> Notifications are not implemented, so you will not get an
+      email, SMS or WhatsApp message when this request is accepted, collected or paid. Check this page for the
+      current status. Your collector is not notified automatically either.
+    </p>}
     {estimate && <p className="estimate" role="status">
       Estimated {rupees(estimate.amountPaise)} for {estimate.categoryName} at {rupees(String(estimate.paisePerKg))} per kg. Rate reference {estimate.rateId.slice(0, 8)}… included in the request.
     </p>}

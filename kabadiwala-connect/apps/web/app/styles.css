@@ -66,3 +66,7 @@ footer { color: #71877a; font-size: .8rem; padding: 25px 0; border-top: 1px soli
 .payout-admin input:focus-visible, .payout-admin select:focus-visible { outline: 3px solid #21815b; outline-offset: 2px; }
 .payout-placeholder { border-left: 4px solid #b58a00; background: #fff8e1; padding: 10px 12px; color: #4a3a00; }
 .payout-placeholder strong { display: block; }
+/* Notifications: deferred. Same visual language as the payment notice -- it must
+   read as "this feature is missing", not as a normal informational aside. */
+.notifications-placeholder { border-left: 4px solid #8a4b00; background: #fff4e5; padding: 10px 12px; color: #4a2800; }
+.notifications-placeholder strong { display: block; }

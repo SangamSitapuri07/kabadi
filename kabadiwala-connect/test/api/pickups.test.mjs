@@ -101,7 +101,14 @@ test('pickup list separates priced requests from legacy free text and rejects ma
     const url = `http://127.0.0.1:${server.address().port}/api/v1/customer/pickups`;
     let response = await fetch(url);
     assert.equal(response.status,200);
-    assert.deepEqual(await response.json(), {data:{pickups:[priced, legacy]}});
+    {
+      const body = await response.json();
+      // Every list response now carries the notification descriptor; the rows
+      // themselves are unchanged.
+      assert.equal(body.data.notifications.configured, false);
+      assert.equal(body.data.notifications.delivery, 'none');
+      assert.deepEqual(body.data.pickups, [priced, legacy]);
+    }
     // A half-priced row is inconsistent and must fail closed.
     for (const bad of [
       {...priced, amountPaise:null},
@@ -802,5 +809,70 @@ test('the payout queue tells the browser that no provider can move money', async
     assert.equal(body.data.dues.length, 1);
     // The absence of a provider is stated by the server, not inferred by the UI.
     assert.deepEqual(body.data.payment, { configured: false, name: null, methods: ['cash','transfer','adjustment'] });
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
+test('the notification placeholder promises nothing and covers every real state change', async () => {
+  const { NOTIFICATION_EVENTS, NOTIFICATION_CHANNELS, NOTIFICATION_PROVIDER, isNotificationEvent } =
+    await import('../../apps/api/dist/notifications.js');
+
+  // Every event listed must correspond to a transition that actually exists in
+  // the store. If a feature is added without updating this list, or removed
+  // while the list keeps advertising it, that is a lie in the UI.
+  const source = await readFile(new URL('../../apps/api/src/pickups.ts', import.meta.url), 'utf8');
+  for (const [event, marker] of [
+    ['pickup-requested', 'INSERT INTO kabadi_pickup.requests'],
+    ['pickup-accepted', "SET status='accepted'"],
+    ['pickup-collected', "SET status='collected'"],
+    ['pickup-cancelled', "status='cancelled'"],
+    ['dispute-raised', 'SET dispute_status='],
+    ['payout-recorded', 'INSERT INTO kabadi_pickup.payouts'],
+  ]) {
+    assert.ok(NOTIFICATION_EVENTS.includes(event), `${event} must be listed`);
+    assert.ok(source.includes(marker), `${event} has no matching transition in the store`);
+  }
+  // Claiming delivery requires a transport; there is none, so this must be false
+  // and a test fails the moment someone flips it without building one.
+  assert.equal(NOTIFICATION_PROVIDER.configured, false);
+  assert.equal(NOTIFICATION_PROVIDER.delivery, 'none');
+  assert.deepEqual([...NOTIFICATION_PROVIDER.channels], []);
+  // Channels were considered, not silently defaulted to.
+  assert.deepEqual([...NOTIFICATION_CHANNELS], ['in-app', 'email', 'sms', 'whatsapp']);
+  assert.equal(isNotificationEvent('pickup-collected'), true);
+  for (const bad of ['pickup-paid', 'PICKUP-COLLECTED', '', null, 1]) {
+    assert.equal(isNotificationEvent(bad), false, `must reject ${JSON.stringify(bad)}`);
+  }
+});
+
+test('both pickup lists tell the browser that no notification will be sent', async () => {
+  const address = { name: 'Sample', addressLine: '12 Example', city: 'Ludhiana', state: 'Punjab', postalCode: '141001' };
+  const requested = { id: randomUUID(), status: 'requested', createdAt: '2026-11-20T10:00:00.000Z',
+    address, estimatedGrams: 2500, material: null,
+    categoryId: '123e4567-e89b-42d3-a456-426614174191', categoryName: 'Synthetic paper',
+    rateId: '123e4567-e89b-42d3-a456-426614174192', paisePerKg: 3245, amountPaise: '8113',
+    actualGrams: null, finalRateId: null, finalPaisePerKg: null, finalAmountPaise: null, collectedAt: null,
+    cancelledAt: null, cancellationReason: null, releasedAt: null, dispute: null, payout: null };
+  const auth = { origin:'http://localhost:3000', handler:async()=>{}, resolveIdentity:async()=>({userId:'customer-1',cookies:[]}),
+    onboardCustomer:async()=>({outcome:'ready'}),
+    customerDetails:{ get:async()=>({outcome:'ready', details:address}), save:async()=>({outcome:'saved'}) },
+    pickups:{ create:async()=>({outcome:'conflict'}), list:async()=>[requested], cancel:async()=>({outcome:'cancelled'}),
+      raiseDispute:async()=>({outcome:'raised'}) },
+    collector:{ open:async()=>[], mine:async()=>[], accept:async()=>({outcome:'accepted'}),
+      collect:async()=>({outcome:'accepted'}), release:async()=>({outcome:'released'}) },
+    disputes:{ openDisputes:async()=>[], resolveDispute:async()=>({outcome:'resolved'}), rejectDispute:async()=>({outcome:'rejected'}) },
+    payouts:{ unpaidCollectorDues:async()=>[], recordPayout:async()=>({outcome:'paid'}) } };
+  const server = createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/customer/pickups`,
+      { headers: { origin:'http://localhost:3000' } });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.data.pickups.length, 1);
+    // Same descriptor the admin queue returns, so the two screens cannot
+    // disagree about whether anything is sent.
+    assert.equal(body.data.notifications.configured, false);
+    assert.equal(body.data.notifications.delivery, 'none');
+    assert.deepEqual(body.data.notifications.channels, []);
+    assert.ok(body.data.notifications.events.includes('payout-recorded'));
   } finally { await new Promise(resolve=>server.close(resolve)); }
 });

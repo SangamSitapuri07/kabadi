@@ -35,6 +35,9 @@ export function PayoutAdmin({ disabled }: { disabled: boolean }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [payment, setPayment] = useState<Payment | null>(null);
+  // false = the collector will not be told. Kept as a boolean rather than the
+  // whole payload: the screen only needs to know whether it must say so.
+  const [notifies, setNotifies] = useState(false);
   const [methods, setMethods] = useState<Record<string,Method>>({});
   const [references, setReferences] = useState<Record<string,string>>({});
 
@@ -56,6 +59,10 @@ export function PayoutAdmin({ disabled }: { disabled: boolean }) {
         reported.methods.every((m: unknown) => typeof m === 'string' && (FALLBACK_METHODS as readonly string[]).includes(m))
         ? reported.methods as Method[] : [...FALLBACK_METHODS];
       setPayment({ configured: reported?.configured === true, name: typeof reported?.name === 'string' ? reported.name : null, methods });
+      // Notifications are deferred too: recording a payout tells nobody. Only a
+      // report that actually promises delivery clears the notice.
+      const n = json.data.notifications;
+      setNotifies(n?.configured === true && n?.delivery === 'some');
       const parsed = json.data.dues.map((v: unknown) => {
         if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
         const d = v as Record<string, unknown>;
@@ -116,6 +123,11 @@ export function PayoutAdmin({ disabled }: { disabled: boolean }) {
       {payment === null ? 'This build records payouts by hand and moves no money.'
         : payment.configured && payment.name ? `Connected provider: ${payment.name}.`
         : 'No payment provider is connected. Every payout below is a manual record; nothing is sent to a bank, a wallet or a provider.'}</p>
+    {!notifies && <p className="notifications-placeholder">
+      <strong>Recording a payout notifies nobody.</strong> Notifications are not implemented, so the collector will
+      not be told that this payment was recorded and the customer will not be told their receipt is available.
+      Tell them yourself.
+    </p>}
     <button type="button" onClick={() => load()} disabled={disabled || busy}>Load unpaid dues</button>
     <p role="status" aria-live="polite">{message}</p>
     {items !== null && <div>
