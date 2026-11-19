@@ -83,6 +83,7 @@ export async function POST(request: Request, context: { params: Promise<{ reques
         NO_RATE: [409, 'No rate is in force for that category.'],
         LEGACY_REQUEST: [409, 'Older free-text requests cannot be priced.'],
         COLLECTOR_UNAVAILABLE: [503, 'Collector actions are unavailable.'],
+        PICKUP_SCHEMA_OUTDATED: [503, 'Pickup storage needs its migration; the database is behind the application.'],
       };
       const entry = messages[data.error.code]; if (!entry || entry[0] !== upstream.status) return unavailable();
       payload = { error: { code: data.error.code, message: entry[1] } };

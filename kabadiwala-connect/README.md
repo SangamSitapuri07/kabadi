@@ -484,6 +484,12 @@ a rate, a per-kg price or an amount from the client. A second collection returns
 request gets `NOT_ACCEPTED` (409). Every code the UI can show is enumerated in
 the same-origin bridges; anything unlisted fails closed as a 503.
 
+If the database is still at an older pickup schema, these routes answer
+`503 PICKUP_SCHEMA_OUTDATED` rather than a generic outage: the request list now
+selects collector columns that do not exist until version 3, so a half-upgraded
+database is reported as a migration that has not run. Run
+`npm run migrate:pickups` (with `PICKUP_MIGRATION_CONFIRM=yes`) and retry.
+
 The customer's own list now carries the lifecycle (`requested`, `accepted`,
 `collected`) plus, once collected, the measured weight, the collection-time rate
 and the final amount. The UI labels the request-time figure as an estimate and

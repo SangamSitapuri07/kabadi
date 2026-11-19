@@ -3,7 +3,7 @@ import type { ErrorRequestHandler } from 'express';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseCustomerDetails } from './customer-details.js';
 import type { CustomerDetails } from './customer-details.js';
-import { parsePickup } from './pickups.js';
+import { isMissingCollectorColumns, parsePickup } from './pickups.js';
 import type { CollectorOutcome, CreatePickupResult, Pickup } from './pickups.js';
 import { categoryName, rateValue, utcTimestamp } from './catalog.js';
 import type { CategoryPage, RatePage } from './catalog.js';
@@ -157,6 +157,9 @@ export function createApp(auth?: AuthMount) {
     } catch { detailsUnavailable(response); }
   });
   const pickupUnavailable = (res: express.Response) => res.status(503).json({ error: { code: 'PICKUP_UNAVAILABLE', message: 'Test pickup requests are unavailable.' } });
+  // A half-migrated database is an operator problem with a known fix, so it gets
+  // its own code instead of the generic unavailable message.
+  const pickupNeedsMigration = (res: express.Response) => res.status(503).json({ error: { code: 'PICKUP_SCHEMA_OUTDATED', message: 'Pickup storage needs its migration before requests can be read.' } });
   const settledEmpty = { actualGrams: null, finalRateId: null, finalPaisePerKg: null, finalAmountPaise: null, collectedAt: null };
   // The measured weight and the collection-time amount are the customer's
   // receipt, so every field is present together or the row is rejected.
@@ -199,7 +202,7 @@ export function createApp(auth?: AuthMount) {
         };
       });
       res.json({ data: { pickups: projected } });
-    } catch { pickupUnavailable(res); }
+    } catch (error) { if (isMissingCollectorColumns(error)) pickupNeedsMigration(res); else pickupUnavailable(res); }
   });
   app.post('/api/v1/customer/pickups', (req, res, next) => {
     if (!auth?.resolveIdentity || !auth.pickups) { pickupUnavailable(res); return; }
@@ -292,6 +295,8 @@ export function createApp(auth?: AuthMount) {
   app.use('/api/v1/collector/pickups', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   const collectorUnavailable = (res: express.Response) =>
     res.status(503).json({ error: { code: 'COLLECTOR_UNAVAILABLE', message: 'Collector actions are unavailable.' } });
+  const collectorNeedsMigration = (res: express.Response) =>
+    res.status(503).json({ error: { code: 'PICKUP_SCHEMA_OUTDATED', message: 'Pickup storage needs its migration before the collector queue can be used.' } });
 
   app.get('/api/v1/collector/pickups', async (req, res) => {
     if (!auth?.resolveIdentity || !auth.collector) { collectorUnavailable(res); return; }
@@ -321,7 +326,7 @@ export function createApp(auth?: AuthMount) {
           rateId: r.rateId, paisePerKg: r.paisePerKg, amountPaise: r.amountPaise, ...settled };
       });
       res.json({ data: { pickups: projected } });
-    } catch { collectorUnavailable(res); }
+    } catch (error) { if (isMissingCollectorColumns(error)) collectorNeedsMigration(res); else collectorUnavailable(res); }
   });
 
   // One guarded shape for both collector mutations: exact origin, bounded JSON,
@@ -380,7 +385,7 @@ export function createApp(auth?: AuthMount) {
         };
         const [status, code, message] = failures[result.outcome];
         res.status(status).json({ error: { code, message } });
-      } catch { collectorUnavailable(res); }
+      } catch (error) { if (isMissingCollectorColumns(error)) collectorNeedsMigration(res); else collectorUnavailable(res); }
     });
   }
 

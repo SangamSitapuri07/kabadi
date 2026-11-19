@@ -33,6 +33,9 @@ export function TestPickups() {
     try {
       const response = await fetch('/api/v1/customer/pickups', { cache:'no-store', signal:AbortSignal.timeout(10000) });
       const json = await response.json();
+      if (response.status === 503 && json?.error?.code === 'PICKUP_SCHEMA_OUTDATED') {
+        setItems(null); setMessage('The pickup database is behind this build. Run the pickup migration, then reload.'); return;
+      }
       if (!response.ok || !Array.isArray(json?.data?.pickups)) throw Error('unavailable');
       setItems(json.data.pickups);
     } catch { setItems(null); setMessage('Test requests could not be loaded. Please try again.'); }

@@ -309,6 +309,15 @@ export function createPickupStore(pool: pg.Pool) {
   };
 }
 
+// A v3 request set while the database is still at v2 fails on missing columns.
+// PostgreSQL reports that as SQLSTATE 42703 (undefined_column); recognising it
+// lets the API tell the operator to migrate instead of "unavailable".
+// Only the error code is inspected, never the message, so no SQL or data leaks.
+export function isMissingCollectorColumns(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === '42703';
+}
+
 export type CollectorOutcome =
   | { outcome: 'accepted' }
   | { outcome: 'collected'; finalAmountPaise: string; finalPaisePerKg: number; finalRateId: string; actualGrams: number }

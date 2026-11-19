@@ -89,6 +89,7 @@ export async function GET(request: Request) {
         FORBIDDEN: [403, 'Collector access is required.'],
         INVALID_VIEW: [400, 'View must be open or mine.'],
         COLLECTOR_UNAVAILABLE: [503, 'Collector actions are unavailable.'],
+        PICKUP_SCHEMA_OUTDATED: [503, 'Pickup storage needs its migration; the database is behind the application.'],
       };
       const entry = messages[data.error.code]; if (!entry || entry[0] !== upstream.status) return unavailable();
       payload = { error: { code: data.error.code, message: entry[1] } };

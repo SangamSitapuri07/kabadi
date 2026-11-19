@@ -618,6 +618,23 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.match(section.textContent,/Final amount ₹75\.90: 2300 g at ₹33\.00\/kg \(collection-time rate\)/);
       await unmount();
     });
+    await t.test('a schema-behind database tells the operator to migrate', async () => {
+      await mount(async (url, init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.includes('/collector/pickups?view=')) return json({error:{code:'PICKUP_SCHEMA_OUTDATED'}},503);
+        if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
+        if (url.endsWith('/customer/pickups') && !init?.method) return json({error:{code:'PICKUP_SCHEMA_OUTDATED'}},503);
+        return json({authenticated:true});
+      });
+      await clickButton('Open requests');
+      const queue=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector queue'));
+      assert.match(queue.textContent,/pickup database is behind this build/i);
+      await clickButton('Set up customer account');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Test pickup requests'));
+      await act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Load my test requests').click();});
+      assert.match(section.textContent,/pickup database is behind this build/i);
+      await unmount();
+    });
     await t.test('a still-active session after sign-out is not presented as signed out', async () => {
       await mount(async (url) => url.endsWith('sign-out') ? json({ success: true }) : json({ authenticated: true }));
       await click();

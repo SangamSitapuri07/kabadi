@@ -301,3 +301,36 @@ test('pickup migration walks v1 to v3 in one run and reports the real starting v
   assert.ok(created.includes('CHECK (version = 3)'));
   assert.ok(created.includes('INSERT INTO kabadi_pickup.schema_version VALUES (3)'));
 });
+
+// A database still at schema v2 breaks the v3 column list. That must read as
+// "migrate me", not as a generic outage, and must not leak SQL.
+test('an unmigrated database reports PICKUP_SCHEMA_OUTDATED instead of a vague outage', async () => {
+  const { isMissingCollectorColumns } = await import('../../apps/api/dist/pickups.js');
+  const undefinedColumn = Object.assign(new Error('column "actual_grams" does not exist'), { code: '42703' });
+  assert.equal(isMissingCollectorColumns(undefinedColumn), true);
+  // Unrelated database faults stay generic, so a real outage is not mislabelled.
+  for (const other of [null, undefined, new Error('boom'), { code: '08006' }, { code: '42P01' }, { code: 42703 }]) {
+    assert.equal(isMissingCollectorColumns(other), false, `expected generic: ${JSON.stringify(other)}`);
+  }
+
+  const missing = async () => { throw undefinedColumn; };
+  const auth = { origin:'http://localhost:3000', handler:async()=>{}, resolveIdentity:async()=>({userId:'someone',cookies:[]}),
+    pickups:{create:async()=>({outcome:'conflict'}), list:missing},
+    collector:{open:missing, mine:missing, accept:missing, collect:missing} };
+  const server = createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    for (const url of [`${base}/api/v1/customer/pickups`, `${base}/api/v1/collector/pickups?view=open`]) {
+      const response = await fetch(url);
+      assert.equal(response.status, 503);
+      const body = await response.json();
+      assert.equal(body.error.code, 'PICKUP_SCHEMA_OUTDATED', url);
+      assert.match(body.error.message, /migration/i);
+      assert.ok(!JSON.stringify(body).includes('actual_grams'), 'no SQL detail may leak');
+    }
+    const mutations = await fetch(`${base}/api/v1/collector/pickups/${randomUUID()}/accept`,
+      {method:'POST', headers:{origin:'http://localhost:3000','content-type':'application/json'}, body:'{}'});
+    assert.equal(mutations.status, 503);
+    assert.equal((await mutations.json()).error.code, 'PICKUP_SCHEMA_OUTDATED');
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});

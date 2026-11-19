@@ -127,7 +127,7 @@ async function handle(request: Request, method: 'GET' | 'POST') {
         payload = { data: { pickups } };
       } else return unavailable();
     } else if (data && typeof data === 'object' && 'error' in data && data.error && typeof data.error === 'object' && 'code' in data.error && typeof data.error.code === 'string') {
-      const messages: Record<string, [number, string]> = { INVALID_BODY:[400, 'Test pickup request is invalid.'], SIGN_IN_REQUIRED:[401, 'Sign-in is required.'], FORBIDDEN:[403, 'Customer access is required.'], PROFILE_REQUIRED:[409, 'Save customer details first.'], REQUEST_CONFLICT:[409, 'This request key was already used.'], UNKNOWN_CATEGORY:[409, 'That category is not available.'], NO_RATE:[409, 'No rate is active for that category yet.'], PICKUP_UNAVAILABLE:[503, 'Test pickup requests are unavailable.'] };
+      const messages: Record<string, [number, string]> = { INVALID_BODY:[400, 'Test pickup request is invalid.'], SIGN_IN_REQUIRED:[401, 'Sign-in is required.'], FORBIDDEN:[403, 'Customer access is required.'], PROFILE_REQUIRED:[409, 'Save customer details first.'], REQUEST_CONFLICT:[409, 'This request key was already used.'], UNKNOWN_CATEGORY:[409, 'That category is not available.'], NO_RATE:[409, 'No rate is active for that category yet.'], PICKUP_UNAVAILABLE:[503, 'Test pickup requests are unavailable.'], PICKUP_SCHEMA_OUTDATED:[503, 'Pickup storage needs its migration; the database is behind the application.'] };
       const entry = messages[data.error.code]; if (!entry || entry[0] !== upstream.status) return unavailable();
       payload = { error: { code:data.error.code, message:entry[1] } };
     } else return unavailable();

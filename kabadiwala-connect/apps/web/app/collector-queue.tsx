@@ -66,6 +66,9 @@ export function CollectorQueue({ disabled }: { disabled: boolean }) {
       const response = await fetch(`/api/v1/collector/pickups?view=${next}`, { cache:'no-store', signal:AbortSignal.timeout(10000) });
       const json = await response.json();
       if (response.status === 403) { setItems(null); setMessage('This account does not have collector access.'); return; }
+      if (response.status === 503 && json?.error?.code === 'PICKUP_SCHEMA_OUTDATED') {
+        setItems(null); setMessage('The pickup database is behind this build. Run the pickup migration, then reload.'); return;
+      }
       if (!response.ok || !Array.isArray(json?.data?.pickups)) throw Error('unavailable');
       const parsed = json.data.pickups.map(parse);
       if (parsed.some((p: CollectorPickup | null) => p === null)) throw Error('invalid');
@@ -107,6 +110,7 @@ export function CollectorQueue({ disabled }: { disabled: boolean }) {
       if (response.status === 403) { setMessage('This account does not have collector access.'); return; }
       if (response.status === 401) { setMessage('Your sign-in could not be confirmed.'); return; }
       if (response.status === 404) { setMessage('That request no longer exists. Refresh the queue.'); return; }
+      if (response.status === 503 && code === 'PICKUP_SCHEMA_OUTDATED') { setMessage('The pickup database is behind this build. Run the pickup migration, then reload.'); return; }
       throw Error('unavailable');
     } catch { setMessage('The action could not be confirmed. Check the queue before trying again.'); }
     finally { setBusy(false); }
