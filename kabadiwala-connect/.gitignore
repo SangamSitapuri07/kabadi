@@ -8,3 +8,5 @@ build/
 .next/
 *.tsbuildinfo
 *.log
+# Local tool output; never commit
+.cache/

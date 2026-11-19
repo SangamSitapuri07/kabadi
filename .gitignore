@@ -31,3 +31,6 @@ ml/datasets/**/*.jpg
 ml/datasets/**/*.jpeg
 ml/datasets/**/*.png
 ml/datasets/**/*.webp
+
+# Local tool output (platform cache dirs, audit reports); never commit
+.cache/
