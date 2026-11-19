@@ -176,6 +176,19 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 3)');
       currentVersion = 3;
     }
+    // The version row is a claim; verify the columns it promises. Without this a
+    // half-applied upgrade looks identical to a finished one and the migration
+    // would cheerfully report "nothing changed" over a broken table.
+    const V3_COLUMNS = ['collector_id', 'accepted_at', 'collected_at', 'actual_grams',
+      'final_rate_id', 'final_paise_per_kg', 'final_amount_paise'];
+    const found = await c.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema='kabadi_pickup' AND table_name='requests' AND column_name = ANY($1::text[])`, [V3_COLUMNS]);
+    const presentColumns = new Set(found.rows.map(r => r.column_name));
+    const absent = V3_COLUMNS.filter(name => !presentColumns.has(name));
+    if (absent.length) {
+      throw Error(`Pickup schema claims version ${currentVersion} but is missing: ${absent.join(', ')}`);
+    }
     // Report the outcome truthfully: an in-place upgrade is not the same event
     // as a fresh schema, and legacy rows are the operator's main concern.
     const counts = await c.query<{ legacy: string; total: string }>(

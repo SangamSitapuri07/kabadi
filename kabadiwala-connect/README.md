@@ -439,7 +439,9 @@ migrations. The `npm run migrate:*` scripts load `.env` themselves via
 environment variable always takes precedence over the file.
 
 To check the recorded version without changing anything, run
-`npm run pickups:version`. It prints the recorded version and whether a
+`npm run pickups:version`. It also checks that the columns version 3 promises
+really exist, and fails if the recorded version and the table disagree — a
+version row alone is not proof that an upgrade completed. It prints the recorded version and whether a
 migration is still needed, so nobody has to infer from log wording whether a
 migration actually ran. A migration run always prints what it did — `created`,
 `upgraded from version N to version 3`, or `already version 3; nothing changed`

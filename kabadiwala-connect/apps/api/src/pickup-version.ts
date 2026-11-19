@@ -22,8 +22,27 @@ try {
   } else {
     const rows = await pool.query<{ version: number }>('SELECT version FROM kabadi_pickup.schema_version');
     const version = rows.rows[0]?.version;
+    // A version row is only a claim; the collector slice needs these columns to
+    // actually exist. Checking both is what tells "already migrated" apart from
+    // "recorded as migrated but the columns are missing".
+    const expected = ['collector_id', 'accepted_at', 'collected_at', 'actual_grams',
+      'final_rate_id', 'final_paise_per_kg', 'final_amount_paise'];
+    const columns = await pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema='kabadi_pickup' AND table_name='requests' AND column_name = ANY($1::text[])`, [expected]);
+    const present = new Set(columns.rows.map(r => r.column_name));
+    const missing = expected.filter(name => !present.has(name));
     console.log(`Pickup schema version: ${version ?? 'unrecognized'} (expected 3).`);
-    if (version !== 3) console.log('Run the pickup migration to upgrade it.');
+    if (version !== 3) {
+      console.log('Run the pickup migration to upgrade it.');
+    } else if (missing.length) {
+      // The recorded version and the real table disagree; never report success.
+      console.log(`The recorded version is 3 but the table is missing: ${missing.join(', ')}.`);
+      console.log('The version row does not match the table. Inspect and restore before relying on this database.');
+      process.exitCode = 1;
+    } else {
+      console.log('Collector columns present: acceptance, measured weight and the final amount are available.');
+    }
   }
 } catch (error) {
   const hint = !process.env.AUTH_ENABLED && !process.env.DATABASE_URL;

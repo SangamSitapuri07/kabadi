@@ -242,7 +242,13 @@ test('collector list fails closed on a malformed or unsettled row', async () => 
 test('pickup migration walks v1 to v3 in one run and reports the real starting version', async () => {
   const { migratePickups } = await import('../../apps/api/dist/pickups.js');
   const statements = [];
-  function fakePool(version) {
+  const V3 = ['collector_id', 'accepted_at', 'collected_at', 'actual_grams',
+    'final_rate_id', 'final_paise_per_kg', 'final_amount_paise'];
+  // `columns` defaults to a table that really is at the claimed version, so the
+  // verification pass is exercised rather than bypassed.
+  // Any successful upgrade ends at v3, so the default fake models that end state;
+  // the damaged case below overrides it explicitly.
+  function fakePool(version, columns = version >= 1 ? V3 : []) {
     return { connect: async () => ({
       query: async (sql, params) => {
         statements.push(typeof sql === 'string' ? sql.replace(/\s+/g, ' ').trim() : sql);
@@ -251,6 +257,10 @@ test('pickup migration walks v1 to v3 in one run and reports the real starting v
         // Prerequisite schemas (authz, customer, catalog) are all at version 1.
         if (/^SELECT version FROM kabadi_(authz|customer|catalog)\.schema_version$/.test(sql)) return { rows: [{ version: 1 }] };
         if (sql.startsWith('SELECT version FROM kabadi_pickup.schema_version')) return { rows: [{ version }] };
+        if (sql.includes('information_schema.columns')) {
+          const wanted = new Set(params?.[0] ?? []);
+          return { rows: columns.filter(name => wanted.has(name)).map(name => ({ column_name: name })) };
+        }
         if (sql.includes('SELECT count(*)')) return { rows: [{ legacy: '1', total: '2' }] };
         return { rows: [] };
       },
@@ -280,6 +290,14 @@ test('pickup migration walks v1 to v3 in one run and reports the real starting v
   assert.ok(!v2only.includes('SET version = 2'));
   assert.ok(v2only.includes('ADD COLUMN collector_id'));
 
+  // A recorded version that the table does not honour is refused, not reported
+  // as a successful no-op. This is the "already version 3" lie.
+  statements.length = 0;
+  await assert.rejects(() => migratePickups(fakePool(3, ['collector_id', 'actual_grams'])),
+    /claims version 3 but is missing: accepted_at/);
+  const refused = statements.join('\n');
+  assert.ok(!refused.includes('SET version = 3'), 'nothing may be written when verification fails');
+
   // A current database is reported as unchanged, and an unknown version fails.
   assert.equal((await migratePickups(fakePool(3))).action, 'unchanged');
   await assert.rejects(() => migratePickups(fakePool(4)), /Unsupported schema/);
@@ -287,10 +305,14 @@ test('pickup migration walks v1 to v3 in one run and reports the real starting v
   // A fresh schema is 'created' from version 0 and lands directly at 3.
   statements.length = 0;
   const fresh = await migratePickups({ connect: async () => ({
-    query: async (sql) => {
+    query: async (sql, params) => {
       statements.push(typeof sql === 'string' ? sql.replace(/\s+/g, ' ').trim() : sql);
       if (sql.includes('pg_namespace')) return { rows: [{ exists: false }] };
       if (sql.includes('to_regclass')) return { rows: [{ marker: 'schema' }] };
+      if (sql.includes('information_schema.columns')) {
+        const wanted = new Set(params?.[0] ?? []);
+        return { rows: V3.filter(name => wanted.has(name)).map(name => ({ column_name: name })) };
+      }
       if (/^SELECT version FROM kabadi_(authz|customer|catalog)\.schema_version$/.test(sql)) return { rows: [{ version: 1 }] };
       if (sql.includes('SELECT count(*)')) return { rows: [{ legacy: '0', total: '0' }] };
       return { rows: [] };

@@ -63,6 +63,14 @@ try {
   const hint = environmentHint();
   const raw = error instanceof Error ? error.message : '';
   const reason = knownReasons.get(raw);
+  // A schema that lies about its version is not a network problem; say what is
+  // wrong so it is not retried blindly.
+  if (raw.startsWith('Pickup schema claims version')) {
+    console.error('Pickup migration stopped: the recorded version does not match the table.');
+    console.error(raw);
+    console.error('Inspect the table and restore from a known-good backup before continuing.');
+    process.exit(1);
+  }
   if (hint) console.error(`Pickup migration failed. ${hint}`);
   else if (reason) console.error(`Pickup migration failed: ${reason}`);
   else console.error('Pickup migration failed: the database could not be reached or refused the change. Check development configuration and schemas.');
