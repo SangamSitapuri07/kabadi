@@ -44,17 +44,17 @@ try {
   // Say exactly what happened, especially on an upgrade: legacy rows are kept
   // as-is and deliberately get no invented estimate.
   if (report.action === 'created') {
-    console.log('Pickup schema created at version 4; no pickup requests exist yet.');
+    console.log('Pickup schema created at version 5; no pickup requests exist yet.');
   } else if (report.action === 'upgraded') {
-    console.log(`Pickup schema upgraded from version ${report.fromVersion} to version 4. All existing requests were kept.`);
-    if (report.fromVersion < 4) {
-      console.log('Collector acceptance, actual weight, the collection-time final amount, cancellation and releasing a claim are now available.');
+    console.log(`Pickup schema upgraded from version ${report.fromVersion} to version 5. All existing requests were kept.`);
+    if (report.fromVersion < 5) {
+      console.log('Collector acceptance, actual weight, the collection-time final amount, cancellation, releasing a claim and customer disputes are now available.');
     }
     if (report.legacyRequests > 0) {
       console.log(`${report.legacyRequests} pre-pricing request(s) keep their free-text material and have no estimate. New requests will be priced from the catalog.`);
     }
   } else {
-    console.log('Pickup schema is already version 4; nothing changed.');
+    console.log('Pickup schema is already version 5; nothing changed.');
     if (report.legacyRequests > 0) {
       console.log(`${report.legacyRequests} pre-pricing request(s) still have no estimate.`);
     }

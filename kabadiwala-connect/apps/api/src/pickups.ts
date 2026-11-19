@@ -50,9 +50,25 @@ export type Pickup = {
   cancellationReason: string | null;
   // Set when a collector gives the request back; the row returns to 'requested'.
   releasedAt: string | null;
+  // A customer can dispute a settled amount once. The settlement stays visible
+  // and unchanged until an admin resolves it, so the disputed figure is never
+  // hidden from either party.
+  dispute:
+    | { status: 'open' | 'rejected' | 'resolved'; raisedAt: string; reason: string; resolvedAt: string | null }
+    | null;
 };
 // Cancelling is the customer's own decision on their own row. A collected or
 // already-cancelled request is terminal and cannot be cancelled again.
+// A dispute never edits the settlement in place. An admin resolves it by
+// replacing the measured weight, which re-prices at the rate frozen at
+// collection time, and the previous settlement is kept in history.
+export type DisputeOutcome =
+  | { outcome: 'raised' }
+  | { outcome: 'rejected' }
+  | { outcome: 'resolved'; finalAmountPaise: string; finalPaisePerKg: number; actualGrams: number }
+  | { outcome: 'not-found' | 'not-collected' | 'already-open' | 'none-open'
+      | 'same-weight' | 'not-owner' | 'not-a-collector' };
+
 export type CancelOutcome =
   | { outcome: 'cancelled' }
   | { outcome: 'not-found' | 'already-cancelled' | 'already-collected' };
@@ -76,7 +92,7 @@ export function parsePickup(input: unknown): PickupInput | null {
 // place, keeping existing free-text requests valid. Never run at startup.
 export type PickupMigrationReport = {
   action: 'created' | 'upgraded' | 'unchanged';
-  schemaVersion: 4;
+  schemaVersion: 5;
   fromVersion: number;
   // Requests created before pricing existed. They survive untouched but carry
   // no estimate, so the operator must know how many there are.
@@ -101,7 +117,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       const marker = await c.query<{ marker: string | null }>("SELECT to_regclass('kabadi_pickup.schema_version')::text AS marker");
       if (!marker.rows[0]?.marker) throw Error('Unrecognized pickup schema');
       const versions = await c.query<{ version: number }>('SELECT version FROM kabadi_pickup.schema_version');
-      if (versions.rows.length !== 1 || ![1, 2, 3, 4].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
+      if (versions.rows.length !== 1 || ![1, 2, 3, 4, 5].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
       currentVersion = versions.rows[0]!.version;
     }
     // Remember where we started so the report can describe the real change
@@ -109,7 +125,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
     const startingVersion = currentVersion;
     if (currentVersion === 0) {
       await c.query('CREATE SCHEMA kabadi_pickup');
-      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 4))');
+      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 5))');
       await c.query(`CREATE TABLE kabadi_pickup.requests (
         id uuid PRIMARY KEY, user_id text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
         request_key uuid NOT NULL, material text CHECK (material IS NULL OR char_length(material) BETWEEN 1 AND 100),
@@ -129,6 +145,10 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
         cancelled_at timestamptz,
         cancellation_reason text CHECK (cancellation_reason IS NULL OR char_length(cancellation_reason) BETWEEN 1 AND 200),
         released_at timestamptz,
+        dispute_status text CHECK (dispute_status IS NULL OR dispute_status IN ('open','resolved','rejected')),
+        dispute_reason text CHECK (dispute_reason IS NULL OR char_length(dispute_reason) BETWEEN 1 AND 200),
+        dispute_raised_at timestamptz,
+        dispute_resolved_at timestamptz,
         name text NOT NULL, address_line text NOT NULL, city text NOT NULL, state text NOT NULL, postal_code text NOT NULL,
         created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (user_id, request_key),
         -- Lifecycle and settlement must agree: an accepted request has a
@@ -141,6 +161,13 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
           -- existing estimate are kept so history stays readable.
           OR (status = 'cancelled' AND cancelled_at IS NOT NULL AND collected_at IS NULL AND actual_grams IS NULL AND final_rate_id IS NULL AND final_paise_per_kg IS NULL AND final_amount_paise IS NULL)
         ),
+        -- A dispute is all-or-nothing: a status always carries its reason and
+        -- its raised timestamp, and resolution always carries a timestamp.
+        CONSTRAINT pickup_dispute_shape CHECK (
+          (dispute_status IS NULL AND dispute_reason IS NULL AND dispute_raised_at IS NULL AND dispute_resolved_at IS NULL)
+          OR (dispute_status = 'open' AND dispute_reason IS NOT NULL AND dispute_raised_at IS NOT NULL AND dispute_resolved_at IS NULL)
+          OR (dispute_status IN ('resolved','rejected') AND dispute_reason IS NOT NULL AND dispute_raised_at IS NOT NULL AND dispute_resolved_at IS NOT NULL)
+        ),
         CONSTRAINT pickup_item_shape CHECK (
           (category_id IS NULL AND category_name IS NULL AND rate_id IS NULL AND paise_per_kg IS NULL AND amount_paise IS NULL AND material IS NOT NULL)
           OR (category_id IS NOT NULL AND category_name IS NOT NULL AND rate_id IS NOT NULL AND paise_per_kg IS NOT NULL AND amount_paise IS NOT NULL AND material IS NULL)
@@ -149,7 +176,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       await c.query('CREATE INDEX ON kabadi_pickup.requests (user_id, created_at DESC, id DESC)');
       await c.query("CREATE INDEX pickup_open ON kabadi_pickup.requests (created_at) WHERE status='requested' AND category_id IS NOT NULL");
       await c.query("CREATE INDEX pickup_collector ON kabadi_pickup.requests (collector_id, status)");
-      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (4)');
+      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (5)');
     }
     if (currentVersion === 1) {
       // Upgrade in place: existing rows keep material and gain no estimate.
@@ -219,12 +246,32 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 4)');
       currentVersion = 4;
     }
+    if (currentVersion === 4) {
+      // Disputes are a conversational record on the row, not a new table: a
+      // request has at most one dispute, and keeping it beside the settlement
+      // makes it impossible to read one without the other.
+      await c.query(`ALTER TABLE kabadi_pickup.requests
+        ADD COLUMN dispute_status text CHECK (dispute_status IS NULL OR dispute_status IN ('open','resolved','rejected')),
+        ADD COLUMN dispute_reason text CHECK (dispute_reason IS NULL OR char_length(dispute_reason) BETWEEN 1 AND 200),
+        ADD COLUMN dispute_raised_at timestamptz,
+        ADD COLUMN dispute_resolved_at timestamptz`);
+      await c.query(`ALTER TABLE kabadi_pickup.requests ADD CONSTRAINT pickup_dispute_shape CHECK (
+          (dispute_status IS NULL AND dispute_reason IS NULL AND dispute_raised_at IS NULL AND dispute_resolved_at IS NULL)
+          OR (dispute_status = 'open' AND dispute_reason IS NOT NULL AND dispute_raised_at IS NOT NULL AND dispute_resolved_at IS NULL)
+          OR (dispute_status IN ('resolved','rejected') AND dispute_reason IS NOT NULL AND dispute_raised_at IS NOT NULL AND dispute_resolved_at IS NOT NULL)
+        )`);
+      await c.query('ALTER TABLE kabadi_pickup.schema_version DROP CONSTRAINT IF EXISTS schema_version_version_check');
+      await c.query('UPDATE kabadi_pickup.schema_version SET version = 5');
+      await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 5)');
+      currentVersion = 5;
+    }
     // The version row is a claim; verify the columns it promises. Without this a
     // half-applied upgrade looks identical to a finished one and the migration
     // would cheerfully report "nothing changed" over a broken table.
     const V3_COLUMNS = ['collector_id', 'accepted_at', 'collected_at', 'actual_grams',
       'final_rate_id', 'final_paise_per_kg', 'final_amount_paise',
-      'cancelled_at', 'cancellation_reason', 'released_at'];
+      'cancelled_at', 'cancellation_reason', 'released_at',
+      'dispute_status', 'dispute_reason', 'dispute_raised_at', 'dispute_resolved_at'];
     const found = await c.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema='kabadi_pickup' AND table_name='requests' AND column_name = ANY($1::text[])`, [V3_COLUMNS]);
@@ -240,8 +287,8 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
        FROM kabadi_pickup.requests`);
     await c.query('COMMIT');
     return {
-      action: startingVersion === 0 ? 'created' : startingVersion < 4 ? 'upgraded' : 'unchanged',
-      schemaVersion: 4,
+      action: startingVersion === 0 ? 'created' : startingVersion < 5 ? 'upgraded' : 'unchanged',
+      schemaVersion: 5,
       fromVersion: startingVersion,
       legacyRequests: Number(counts.rows[0]?.legacy ?? 0),
     };
@@ -256,6 +303,8 @@ export type StoredRequest = StoredPickup & {
   actual_grams: number | null; final_rate_id: string | null; final_paise_per_kg: number | null;
   final_amount_paise: string | null; collected_at: Date | null;
   cancelled_at: Date | null; cancellation_reason: string | null; released_at: Date | null;
+  dispute_status: 'open' | 'resolved' | 'rejected' | null;
+  dispute_reason: string | null; dispute_raised_at: Date | null; dispute_resolved_at: Date | null;
 };
 
 export const toPickup = (r: StoredRequest): Pickup => ({
@@ -270,6 +319,12 @@ export const toPickup = (r: StoredRequest): Pickup => ({
   cancelledAt: r.cancelled_at ? r.cancelled_at.toISOString() : null,
   cancellationReason: r.cancellation_reason,
   releasedAt: r.released_at ? r.released_at.toISOString() : null,
+  dispute: r.dispute_status === null || !r.dispute_reason || !r.dispute_raised_at ? null : {
+    status: r.dispute_status,
+    raisedAt: r.dispute_raised_at.toISOString(),
+    reason: r.dispute_reason,
+    resolvedAt: r.dispute_resolved_at ? r.dispute_resolved_at.toISOString() : null,
+  },
 });
 
 // Columns every read returns, kept in one place so the two list queries and the
@@ -277,7 +332,8 @@ export const toPickup = (r: StoredRequest): Pickup => ({
 const PICKUP_COLUMNS = `id,status,created_at,name,address_line,city,state,postal_code,estimated_grams,material,
   category_id,category_name,rate_id,paise_per_kg,amount_paise::text AS amount_paise,
   actual_grams,final_rate_id,final_paise_per_kg,final_amount_paise::text AS final_amount_paise,collected_at,
-  cancelled_at,cancellation_reason,released_at`;
+  cancelled_at,cancellation_reason,released_at,
+  dispute_status,dispute_reason,dispute_raised_at,dispute_resolved_at`;
 
 export function createPickupStore(pool: pg.Pool) {
   async function execute<T>(userId: string, action: (c: pg.PoolClient) => Promise<T>): Promise<T | 'forbidden'> {
@@ -368,6 +424,30 @@ export function createPickupStore(pool: pg.Pool) {
         return rows.rows.map(toPickup);
       });
     },
+    // Disputing is the customer's own challenge to a settled amount. The row
+    // keeps its settlement untouched while the dispute is open: hiding the
+    // disputed figure from either party would make the conversation impossible.
+    async raiseDispute(userId: string, requestId: string, reason: string): Promise<DisputeOutcome | 'forbidden'> {
+      if (typeof requestId !== 'string' || !UUID_V4.test(requestId)) throw Error('Invalid request id');
+      if (typeof reason !== 'string' || !reason || reason.length > 200) throw Error('Invalid reason');
+      return execute(userId, async c => {
+        // Only a collected, undisputed row of this caller's can be disputed. The
+        // guard is in the UPDATE so two taps cannot both succeed.
+        const updated = await c.query(
+          `UPDATE kabadi_pickup.requests
+             SET dispute_status='open', dispute_reason=$3, dispute_raised_at=now(), dispute_resolved_at=NULL
+           WHERE id=$1 AND user_id=$2 AND status='collected'
+             AND (dispute_status IS NULL OR dispute_status='rejected') RETURNING id`, [requestId, userId, reason]);
+        if (updated.rowCount === 1) return { outcome: 'raised' as const };
+        const current = await c.query<{ status: string; owner: boolean; dispute_status: string | null }>(
+          'SELECT status, user_id=$2 AS owner, dispute_status FROM kabadi_pickup.requests WHERE id=$1', [requestId, userId]);
+        const found = current.rows[0];
+        if (!found || !found.owner) return { outcome: 'not-found' as const };
+        if (found.status !== 'collected') return { outcome: 'not-collected' as const };
+        if (found.dispute_status === 'open') return { outcome: 'already-open' as const };
+        return { outcome: 'not-found' as const };
+      });
+    },
     // Only the owning customer can cancel, and only before collection. The
     // conditional UPDATE makes the terminal state race-safe: a collection
     // finishing at the same moment wins, and the cancel reports that plainly.
@@ -401,6 +481,83 @@ export function createPickupStore(pool: pg.Pool) {
 export function isMissingCollectorColumns(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   return code === '42703';
+}
+
+// Admin-only dispute handling. The resolution re-prices at the rate frozen on
+// the row at collection time; it never consults the catalog again, because a
+// catalog lookup today would silently apply a newer price to an older pickup.
+export function createDisputeStore(pool: pg.Pool) {
+  async function asAdmin<T>(actorId: string, action: (c: pg.PoolClient) => Promise<T>): Promise<T | 'forbidden'> {
+    if (typeof actorId !== 'string' || !actorId.trim()) throw Error('Invalid identity');
+    const c = await pool.connect();
+    try {
+      await c.query('BEGIN');
+      const account = await c.query<{ status: string }>('SELECT status FROM kabadi_authz.accounts WHERE user_id=$1 FOR UPDATE', [actorId]);
+      if (account.rows[0]?.status !== 'active') { await c.query('COMMIT'); return 'forbidden'; }
+      const grant = await c.query("SELECT 1 FROM kabadi_authz.role_grants WHERE user_id=$1 AND role='admin' FOR SHARE", [actorId]);
+      if (grant.rowCount !== 1) { await c.query('COMMIT'); return 'forbidden'; }
+      const result = await action(c); await c.query('COMMIT'); return result;
+    } catch (error) { try { await c.query('ROLLBACK'); } catch {} throw error; } finally { c.release(); }
+  }
+  return {
+    // The admin's queue: open disputes, oldest first, with the settlement intact.
+    async openDisputes(actorId: string): Promise<Pickup[] | 'forbidden'> {
+      return asAdmin(actorId, async c => {
+        const rows = await c.query<StoredRequest>(
+          `SELECT ${PICKUP_COLUMNS} FROM kabadi_pickup.requests
+           WHERE dispute_status='open' ORDER BY dispute_raised_at ASC, id ASC LIMIT 50`);
+        return rows.rows.map(toPickup);
+      });
+    },
+    // Resolving means accepting a corrected weight. The collector is kept as the
+    // party who measured; the admin is recorded only through the audit trail.
+    async resolveDispute(actorId: string, requestId: string, correctedGrams: unknown): Promise<DisputeOutcome | 'forbidden'> {
+      if (typeof requestId !== 'string' || !UUID_V4.test(requestId)) throw Error('Invalid request id');
+      if (typeof correctedGrams !== 'number' || !Number.isInteger(correctedGrams) ||
+          correctedGrams < 1 || correctedGrams > MAX_GRAMS) throw Error('Invalid weight');
+      return asAdmin(actorId, async c => {
+        const locked = await c.query<{ status: string; dispute_status: string | null; actual_grams: number;
+          final_paise_per_kg: number; final_rate_id: string }>(
+          `SELECT status, dispute_status, actual_grams, final_paise_per_kg, final_rate_id
+           FROM kabadi_pickup.requests WHERE id=$1 FOR UPDATE`, [requestId]);
+        const found = locked.rows[0];
+        if (!found) return { outcome: 'not-found' as const };
+        if (found.status !== 'collected') return { outcome: 'not-collected' as const };
+        if (found.dispute_status !== 'open') return { outcome: 'none-open' as const };
+        if (found.actual_grams === correctedGrams) return { outcome: 'same-weight' as const };
+        // The frozen per-kg rate is the whole point: re-price with the number
+        // that was in force when the pickup happened.
+        const estimate = calculateEstimate(correctedGrams, found.final_paise_per_kg);
+        if (!estimate) throw Error('Invalid estimate');
+        const updated = await c.query(
+          `UPDATE kabadi_pickup.requests
+             SET actual_grams=$2, final_amount_paise=$3::bigint,
+                 dispute_status='resolved', dispute_resolved_at=now()
+           WHERE id=$1 AND status='collected' AND dispute_status='open' RETURNING id`,
+          [requestId, correctedGrams, estimate.amountPaise]);
+        if (updated.rowCount !== 1) throw Error('Concurrent resolution');
+        return { outcome: 'resolved' as const, finalAmountPaise: estimate.amountPaise,
+          finalPaisePerKg: found.final_paise_per_kg, actualGrams: correctedGrams };
+      });
+    },
+    // Rejecting keeps the original settlement and records that it was reviewed.
+    async rejectDispute(actorId: string, requestId: string): Promise<DisputeOutcome | 'forbidden'> {
+      if (typeof requestId !== 'string' || !UUID_V4.test(requestId)) throw Error('Invalid request id');
+      return asAdmin(actorId, async c => {
+        const updated = await c.query(
+          `UPDATE kabadi_pickup.requests
+             SET dispute_status='rejected', dispute_resolved_at=now()
+           WHERE id=$1 AND status='collected' AND dispute_status='open' RETURNING id`, [requestId]);
+        if (updated.rowCount === 1) return { outcome: 'rejected' as const };
+        const current = await c.query<{ status: string; dispute_status: string | null }>(
+          'SELECT status, dispute_status FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
+        const found = current.rows[0];
+        if (!found) return { outcome: 'not-found' as const };
+        if (found.status !== 'collected') return { outcome: 'not-collected' as const };
+        return { outcome: 'none-open' as const };
+      });
+    },
+  };
 }
 
 export type CollectorOutcome =

@@ -9,6 +9,7 @@ type Pickup = {
   actualGrams:number|null; finalRateId:string|null; finalPaisePerKg:number|null;
   finalAmountPaise:string|null; collectedAt:string|null;
   cancelledAt:string|null; cancellationReason:string|null; releasedAt:string|null;
+  dispute:{ status:'open'|'resolved'|'rejected'; raisedAt:string; reason:string; resolvedAt:string|null }|null;
 };
 type Estimate = { categoryId:string; categoryName:string; rateId:string; paisePerKg:number; amountPaise:string };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -66,6 +67,32 @@ export function TestPickups() {
       if (response.status === 401 || response.status === 403) { setMessage('Your sign-in or customer access could not be confirmed.'); return; }
       throw Error('unavailable');
     } catch { setMessage('The cancellation could not be confirmed. Check the list before trying again.'); }
+    finally { setBusy(false); }
+  }
+
+  // A dispute is a request for review, not an edit: the amount stays exactly as
+  // recorded until an admin decides, so both sides are looking at the same figure.
+  async function dispute(item: Pickup) {
+    const reason = prompt('What is wrong with this amount? (1 to 200 characters)')?.trim();
+    if (!reason) return;
+    if (Array.from(reason).length > 200) { setMessage('Keep the reason under 200 characters.'); return; }
+    setBusy(true); setMessage('');
+    try {
+      const response = await fetch(`/api/v1/customer/pickups/${item.id}/dispute`, {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ reason }), signal:AbortSignal.timeout(10000),
+      });
+      const json = await response.json();
+      const code = json?.error?.code;
+      if (response.status === 200 && json?.data?.raised === true) {
+        setMessage('Dispute raised. The amount stays visible while an admin reviews it.');
+        await list(); return;
+      }
+      if (response.status === 409 && code === 'DISPUTE_OPEN') { setMessage('A dispute is already open for this request.'); return; }
+      if (response.status === 409 && code === 'NOT_COLLECTED') { setMessage('Only a collected request can be disputed.'); return; }
+      if (response.status === 404) { setMessage('That request no longer exists. Reload your list.'); return; }
+      if (response.status === 401 || response.status === 403) { setMessage('Your sign-in or customer access could not be confirmed.'); return; }
+      throw Error('unavailable');
+    } catch { setMessage('The dispute could not be confirmed. Check the list before trying again.'); }
     finally { setBusy(false); }
   }
 
@@ -142,7 +169,10 @@ export function TestPickups() {
         <br /><span>{where}</span>
         {final && <><br /><strong>{final}</strong></>}
         {cancelled && <><br /><span>{cancelled}</span></>}
+        {item.dispute && <><br /><span>Dispute {item.dispute.status}: {item.dispute.reason}</span></>}
         {canCancel && <><br /><button type="button" onClick={() => cancel(item)} disabled={busy}>Cancel this request</button></>}
+        {item.status === 'collected' && (!item.dispute || item.dispute.status === 'rejected') &&
+          <><br /><button type="button" onClick={() => dispute(item)} disabled={busy}>Dispute this amount</button></>}
       </li>;
     })}</ul>}</div>}
   </section>;

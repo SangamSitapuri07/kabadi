@@ -426,9 +426,10 @@ production readiness/security review is implied.
 
 A new separate `kabadi_pickup` schema requires the existing auth, authorization,
 customer **and catalog** schemas, because request rows reference catalog
-categories and rates. The schema is version 4; an older schema is upgraded in
-place one version at a time to version 4 in a single run, keeping every legacy
-row. Version 3 added collection; version 4 added cancellation and release. It is explicitly migrated, never on startup, and creates
+categories and rates. The schema is version 5; an older schema is upgraded in
+place one version at a time to version 5 in a single run, keeping every legacy
+row. Version 3 added collection, version 4 cancellation and release, and
+version 5 customer disputes. It is explicitly migrated, never on startup, and creates
 no pickup requests. Version checks do not detect all schema drift; upgrades and
 restore have not been tested. Before running on any local development database,
 independently inspect the target, back it up, and obtain explicit approval. Do
@@ -447,7 +448,7 @@ the same check and refuses rather than reporting a no-op on a table that does no
 match its recorded version. It prints the recorded version and whether a
 migration is still needed, so nobody has to infer from log wording whether a
 migration actually ran. A migration run always prints what it did — `created`,
-`upgraded from version N to version 4`, or `already version 4; nothing changed`
+`upgraded from version N to version 5`, or `already version 5; nothing changed`
 — so a no-op can never be mistaken for an upgrade. If the printed text does not
 match this description, the built `dist` output is older than the source: run
 `npm run build:api` after pulling. No secrets or customer data should be shared in chat.
@@ -455,8 +456,8 @@ match this description, the built `dist` output is older than the source: run
 Run migrations **from this `kabadiwala-connect` directory**, because `.env` is
 resolved relative to the current directory and lives here. Running from
 the parent repository root fails with `.env: not found`. The command reports what
-it actually did: `created`, `upgraded from version N to version 4`, or
-`already version 4; nothing changed`, plus how many pre-pricing requests still
+it actually did: `created`, `upgraded from version N to version 5`, or
+`already version 5; nothing changed`, plus how many pre-pricing requests still
 exist without an estimate.
 
 ### Collector acceptance and the final amount (development API)
@@ -536,6 +537,40 @@ receive the money.
 Neither action notifies anybody: there is no messaging, no dispute process and no
 retention policy yet. Cancelling after a collector has accepted leaves that
 collector with no signal beyond the row disappearing from their queue.
+
+### Disputes (development API)
+
+A settled amount can be challenged once, and only by the customer who owns the
+request:
+
+- `POST /api/v1/customer/pickups/:requestId/dispute` with `{"reason":"…"}` — the
+  reason is **required** here (1–200 characters), unlike cancellation: an admin
+  must know what to check. Only a `collected` request can be disputed, and only
+  one dispute can be open at a time. The settlement is **not** hidden or altered
+  while the dispute is open, so both sides discuss the same figure.
+- `GET /api/v1/admin/disputes` — open disputes, oldest first, with the recorded
+  weight, the frozen per-kg rate and the customer's stated reason.
+- `POST /api/v1/admin/disputes/:requestId/resolve` with
+  `{"correctedGrams":2000}` — accepts a corrected weight and recalculates the
+  amount using the **per-kg rate frozen on the row at collection time**. It never
+  queries the catalog: a fresh lookup would silently apply today's price to an
+  older pickup. The `UPDATE` does not touch `final_rate_id` or
+  `final_paise_per_kg`, so those cannot drift; only `actual_grams` and the
+  derived `final_amount_paise` change. A weight identical to the recorded one is
+  refused (`SAME_WEIGHT`) rather than counted as a correction.
+- `POST /api/v1/admin/disputes/:requestId/reject` with `{}` — keeps the original
+  settlement exactly as recorded and marks the dispute reviewed. The customer may
+  dispute again after a rejection; they may not while one is open.
+
+Admin access is re-checked inside the store's transaction against an active
+account holding an `admin` grant, not trusted from the route. The browser never
+sends a price, a rate or a total: only the corrected weight.
+
+What a dispute does **not** do: it does not move money, notify anyone, or
+preserve the previous weight as a separate history row. The correction overwrites
+`actual_grams` and the amount, so the earlier figure survives only in backups.
+That is a deliberate simplification for this slice and the first thing to change
+if a real dispute trail is required.
 
 ### Customer self-onboarding (development API)
 

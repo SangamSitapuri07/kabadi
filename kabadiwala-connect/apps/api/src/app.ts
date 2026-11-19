@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseCustomerDetails } from './customer-details.js';
 import type { CustomerDetails } from './customer-details.js';
 import { isMissingCollectorColumns, parsePickup } from './pickups.js';
-import type { CancelOutcome, CollectorOutcome, CreatePickupResult, Pickup } from './pickups.js';
+import type { CancelOutcome, CollectorOutcome, CreatePickupResult, DisputeOutcome, Pickup } from './pickups.js';
 import { categoryName, rateValue, utcTimestamp } from './catalog.js';
 import type { CategoryPage, RatePage } from './catalog.js';
 
@@ -17,6 +17,12 @@ type AuthMount = {
     create: (userId: string, input: unknown) => Promise<CreatePickupResult | 'forbidden'>;
     list: (userId: string) => Promise<Pickup[] | 'forbidden'>;
     cancel: (userId: string, requestId: string, reason: string | null) => Promise<CancelOutcome | 'forbidden'>;
+    raiseDispute: (userId: string, requestId: string, reason: string) => Promise<DisputeOutcome | 'forbidden'>;
+  };
+  disputes?: {
+    openDisputes: (actorId: string) => Promise<Pickup[] | 'forbidden'>;
+    resolveDispute: (actorId: string, requestId: string, grams: unknown) => Promise<DisputeOutcome | 'forbidden'>;
+    rejectDispute: (actorId: string, requestId: string) => Promise<DisputeOutcome | 'forbidden'>;
   };
   collector?: {
     open: (userId: string) => Promise<Pickup[] | 'forbidden'>;
@@ -176,7 +182,18 @@ export function createApp(auth?: AuthMount) {
     if (r.releasedAt !== null && !iso(r.releasedAt)) throw Error('Invalid result');
     if (r.cancellationReason !== null && (r.status !== 'cancelled' || !text(r.cancellationReason, 200))) throw Error('Invalid result');
     if ((r.status === 'cancelled') !== (r.cancelledAt !== null)) throw Error('Invalid result');
-    return { cancelledAt: r.cancelledAt, cancellationReason: r.cancellationReason, releasedAt: r.releasedAt };
+    // A dispute exists only on a collected request, and only with a reason and a
+    // timestamp; a resolved one always carries its resolution time.
+    const d = r.dispute;
+    if (d !== null) {
+      if (r.status !== 'collected') throw Error('Invalid result');
+      if (!['open', 'resolved', 'rejected'].includes(d.status)) throw Error('Invalid result');
+      if (!text(d.reason, 200) || !iso(d.raisedAt)) throw Error('Invalid result');
+      if ((d.status === 'open') !== (d.resolvedAt === null)) throw Error('Invalid result');
+      if (d.resolvedAt !== null && !iso(d.resolvedAt)) throw Error('Invalid result');
+    }
+    return { cancelledAt: r.cancelledAt, cancellationReason: r.cancellationReason,
+      releasedAt: r.releasedAt, dispute: d };
   };
   const fullySettled = (r: Pickup) => {
     if (!Number.isInteger(r.actualGrams) || (r.actualGrams as number) < 1 || (r.actualGrams as number) > 10000000 ||
@@ -248,6 +265,47 @@ export function createApp(auth?: AuthMount) {
       res.json({ data: { created: result.outcome === 'created', estimate } });
     } catch { pickupUnavailable(res); }
   });
+  // A customer can challenge a settled amount. The settlement is not hidden or
+  // changed while open; an admin later re-weighs and re-prices at the frozen
+  // collection rate.
+  app.post('/api/v1/customer/pickups/:requestId/dispute', (req, res, next) => {
+    if (!auth?.resolveIdentity || !auth.pickups) { pickupUnavailable(res); return; }
+    if (req.get('origin') !== auth.origin) { res.status(403).json({ error: { code: 'INVALID_ORIGIN', message: 'Request origin is not allowed.' } }); return; }
+    const length = req.get('content-length');
+    if (!length || !/^\d+$/.test(length) || Number(length) > 4096 || req.get('transfer-encoding')) {
+      res.status(413).json({ error: { code: 'INVALID_BODY', message: 'Request body is invalid or too large.' } }); return;
+    }
+    if (!req.is('application/json')) { res.status(415).json({ error: { code: 'INVALID_CONTENT_TYPE', message: 'JSON is required.' } }); return; }
+    next();
+  }, express.json({ limit: '4kb', strict: true }), async (req, res) => {
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const requestId = req.params.requestId;
+      if (!uuid.test(requestId)) { res.status(400).json({ error: { code: 'INVALID_REQUEST_ID', message: 'Request id is invalid.' } }); return; }
+      const body = req.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        res.status(400).json({ error: { code: 'INVALID_BODY', message: 'A JSON object is required.' } }); return;
+      }
+      // A reason is required here, unlike cancellation: an admin has to know
+      // what to check before they can decide anything.
+      const keys = Object.keys(body);
+      const reason = (body as Record<string, unknown>).reason;
+      if (keys.length !== 1 || keys[0] !== 'reason' || !text(reason, 200)) {
+        res.status(400).json({ error: { code: 'INVALID_REASON', message: 'A reason of 1 to 200 characters is required.' } }); return;
+      }
+      const result = await auth!.pickups!.raiseDispute(id, requestId, reason as string);
+      if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Customer access is required.' } }); return; }
+      if (result.outcome === 'raised') { res.json({ data: { raised: true } }); return; }
+      const failures: Record<'not-found' | 'not-collected' | 'already-open', [number, string, string]> = {
+        'not-found': [404, 'REQUEST_NOT_FOUND', 'That request does not exist.'],
+        'not-collected': [409, 'NOT_COLLECTED', 'Only a collected request can be disputed.'],
+        'already-open': [409, 'DISPUTE_OPEN', 'A dispute is already open for this request.'],
+      };
+      const [status, code, message] = failures[result.outcome as 'not-found' | 'not-collected' | 'already-open'];
+      res.status(status).json({ error: { code, message } });
+    } catch (error) { if (isMissingCollectorColumns(error)) pickupNeedsMigration(res); else pickupUnavailable(res); }
+  });
+
   // Cancelling is the customer's own action on their own request. It stops a
   // request from sitting open forever; it is not a dispute or a refund, and a
   // collected request can never be cancelled.
@@ -292,6 +350,84 @@ export function createApp(auth?: AuthMount) {
       res.status(status).json({ error: { code, message } });
     } catch (error) { if (isMissingCollectorColumns(error)) pickupNeedsMigration(res); else pickupUnavailable(res); }
   });
+  // ---- Admin dispute handling -------------------------------------------
+  // The admin grant is checked inside the store's transaction, not trusted from
+  // the route, so a stale session cannot resolve anything.
+  const disputeUnavailable = (res: express.Response) => res.status(503).json({ error: { code: 'DISPUTE_UNAVAILABLE', message: 'Dispute handling is unavailable.' } });
+  const disputeNeedsMigration = (res: express.Response) => res.status(503).json({ error: { code: 'PICKUP_SCHEMA_OUTDATED', message: 'Pickup storage needs its migration before disputes can be handled.' } });
+  app.use('/api/v1/admin/disputes', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  app.get('/api/v1/admin/disputes', async (req, res) => {
+    if (!auth?.resolveIdentity || !auth.disputes) { disputeUnavailable(res); return; }
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const rows = await auth.disputes.openDisputes(id);
+      if (rows === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Admin access is required.' } }); return; }
+      if (!Array.isArray(rows) || rows.length > 50) throw Error('Invalid result');
+      const projected = (rows as Pickup[]).map(r => {
+        const address = parseCustomerDetails(r.address);
+        if (!address || r.status !== 'collected' || !uuid.test(r.id) || r.dispute === null || r.dispute.status !== 'open' ||
+            typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt)) ||
+            !Number.isInteger(r.estimatedGrams) || !uuid.test(r.categoryId as string) || !text(r.categoryName, 100)) throw Error('Invalid result');
+        return { id: r.id, status: r.status, createdAt: r.createdAt, address, estimatedGrams: r.estimatedGrams,
+          categoryId: r.categoryId, categoryName: r.categoryName, rateId: r.rateId,
+          paisePerKg: r.paisePerKg, amountPaise: r.amountPaise, ...fullySettled(r), ...terminalState(r) };
+      });
+      res.json({ data: { disputes: projected } });
+    } catch (error) { if (isMissingCollectorColumns(error)) disputeNeedsMigration(res); else disputeUnavailable(res); }
+  });
+
+  // Resolving accepts a corrected weight; rejecting keeps the settlement. Both
+  // require an exact Origin, a bounded body and a UUID in the path.
+  for (const action of ['resolve', 'reject'] as const) {
+    app.post(`/api/v1/admin/disputes/:requestId/${action}`, (req, res, next) => {
+      if (!auth?.resolveIdentity || !auth.disputes) { disputeUnavailable(res); return; }
+      if (req.get('origin') !== auth!.origin) { res.status(403).json({ error: { code: 'INVALID_ORIGIN', message: 'Request origin is not allowed.' } }); return; }
+      const length = req.get('content-length');
+      if (!length || !/^\d+$/.test(length) || Number(length) > 4096 || req.get('transfer-encoding')) {
+        res.status(413).json({ error: { code: 'INVALID_BODY', message: 'Request body is invalid or too large.' } }); return;
+      }
+      if (!req.is('application/json')) { res.status(415).json({ error: { code: 'INVALID_CONTENT_TYPE', message: 'JSON is required.' } }); return; }
+      next();
+    }, express.json({ limit: '4kb', strict: true }), async (req, res) => {
+      try {
+        const id = await detailsAuth(req, res); if (id === null) return;
+        const requestId = req.params.requestId;
+        if (!uuid.test(requestId)) { res.status(400).json({ error: { code: 'INVALID_REQUEST_ID', message: 'Request id is invalid.' } }); return; }
+        const body = req.body;
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          res.status(400).json({ error: { code: 'INVALID_BODY', message: 'A JSON object is required.' } }); return;
+        }
+        const keys = Object.keys(body);
+        let result: DisputeOutcome | 'forbidden';
+        if (action === 'reject') {
+          if (keys.length !== 0) { res.status(400).json({ error: { code: 'INVALID_BODY', message: 'An empty JSON object is required.' } }); return; }
+          result = await auth!.disputes!.rejectDispute(id, requestId);
+        } else {
+          const grams = (body as Record<string, unknown>).correctedGrams;
+          if (keys.length !== 1 || keys[0] !== 'correctedGrams' || typeof grams !== 'number' ||
+              !Number.isInteger(grams) || grams < 1 || grams > 10000000) {
+            res.status(400).json({ error: { code: 'INVALID_WEIGHT', message: 'Corrected weight must be 1 to 10,000,000 grams.' } }); return;
+          }
+          result = await auth!.disputes!.resolveDispute(id, requestId, grams);
+        }
+        if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Admin access is required.' } }); return; }
+        if (result.outcome === 'resolved') {
+          res.json({ data: { resolved: true, actualGrams: result.actualGrams,
+            finalPaisePerKg: result.finalPaisePerKg, finalAmountPaise: result.finalAmountPaise } }); return;
+        }
+        if (result.outcome === 'rejected') { res.json({ data: { rejected: true } }); return; }
+        const failures: Record<'not-found' | 'not-collected' | 'none-open' | 'same-weight', [number, string, string]> = {
+          'not-found': [404, 'REQUEST_NOT_FOUND', 'That request does not exist.'],
+          'not-collected': [409, 'NOT_COLLECTED', 'Only a collected request can be disputed.'],
+          'none-open': [409, 'NO_OPEN_DISPUTE', 'There is no open dispute for this request.'],
+          'same-weight': [409, 'SAME_WEIGHT', 'That is the weight already recorded; nothing to correct.'],
+        };
+        const [status, code, message] = failures[result.outcome as 'not-found' | 'not-collected' | 'none-open' | 'same-weight'];
+        res.status(status).json({ error: { code, message } });
+      } catch (error) { if (isMissingCollectorColumns(error)) disputeNeedsMigration(res); else disputeUnavailable(res); }
+    });
+  }
+
   // Development-only admin writes. Identity comes exclusively from the session;
   // the catalog store checks the active admin grant inside the write transaction.
   // No route here provisions roles or bypasses catalog schema migration.

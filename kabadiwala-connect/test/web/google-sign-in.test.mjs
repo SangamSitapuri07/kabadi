@@ -45,6 +45,12 @@ const collectorCompiled = babel.transformSync(await readFile('apps/web/app/colle
   plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
 });
 await writeFile(join(temp,'collector-queue.js'),collectorCompiled.code);
+const disputeCompiled = babel.transformSync(await readFile('apps/web/app/dispute-admin.tsx','utf8'), {
+  filename:'dispute-admin.tsx',babelrc:false,configFile:false,
+  presets:[[require('next/dist/compiled/babel/preset-typescript'),{allExtensions:true,isTSX:true}],[require('next/dist/compiled/babel/preset-react'),{runtime:'automatic'}]],
+  plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
+});
+await writeFile(join(temp,'dispute-admin.js'),disputeCompiled.code);
 const { GoogleSignIn } = createRequire(modulePath)(modulePath);
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 
@@ -747,6 +753,81 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       await clickButton('Open requests');
       await act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Accept this request').click();});
       assert.match(section.textContent,/cannot accept your own request/i);
+      await unmount();
+    });
+    await t.test('customer disputes a collected amount and sees it stays visible', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174150';
+      const address={name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'};
+      const settled={ id:requestId, status:'collected', createdAt:'2026-11-18T17:00:00.000Z', address,
+        estimatedGrams:2500, material:null, categoryId:'123e4567-e89b-42d3-a456-426614174151',
+        categoryName:'Synthetic paper', rateId:'123e4567-e89b-42d3-a456-426614174152', paisePerKg:3245,
+        amountPaise:'8113', actualGrams:2300, finalRateId:'123e4567-e89b-42d3-a456-426614174153',
+        finalPaisePerKg:3245, finalAmountPaise:'7464', collectedAt:'2026-11-20T10:00:00.000Z',
+        cancelledAt:null, cancellationReason:null, releasedAt:null, dispute:null };
+      const disputed={ ...settled, dispute:{ status:'open', raisedAt:'2026-11-21T08:00:00.000Z',
+        reason:'It weighed closer to 2 kg', resolvedAt:null } };
+      let posts=[], rows=[settled];
+      await mount(async (url, init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
+        if (url.includes('/dispute')) {
+          posts.push([url, JSON.parse(init.body ?? '{}')]);
+          rows=[disputed];
+          return json({data:{raised:true}});
+        }
+        if (url.endsWith('/customer/pickups')) return json({data:{pickups:rows}});
+        return json({authenticated:true});
+      });
+      // The dispute prompt is a native dialog; stub it with a fixed reason.
+      globalThis.prompt=()=>'It weighed closer to 2 kg';
+      await clickButton('Set up customer account');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Test pickup requests'));
+      const load=async()=>act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Load my test requests').click();});
+      await load();
+      assert.match(section.textContent,/Final amount ₹74\.64/);
+      const button=[...section.querySelectorAll('button')].find(b=>b.textContent==='Dispute this amount');
+      assert.ok(button,'a collected amount can be disputed');
+      await act(async()=>{button.click();});
+      // Only the reason is sent: no weight, no amount, no status.
+      assert.equal(posts.length,1);
+      assert.ok(posts[0][0].endsWith(`/${requestId}/dispute`));
+      assert.deepEqual(posts[0][1], { reason:'It weighed closer to 2 kg' });
+      // The disputed amount is still shown, and the button is gone while it is open.
+      assert.match(section.textContent,/Final amount ₹74\.64/);
+      assert.match(section.textContent,/Dispute open: It weighed closer to 2 kg/);
+      assert.equal([...section.querySelectorAll('button')].filter(b=>b.textContent==='Dispute this amount').length,0);
+      await unmount();
+    });
+    await t.test('admin corrects a disputed weight and the response shows the frozen rate', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174160';
+      const row={ id:requestId, categoryName:'Synthetic paper', estimatedGrams:2500, actualGrams:2300,
+        finalPaisePerKg:3245, finalAmountPaise:'7464',
+        address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'},
+        dispute:{ reason:'It weighed closer to 2 kg', raisedAt:'2026-11-21T08:00:00.000Z' } };
+      let posts=[];
+      await mount(async (url, init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.includes('/admin/disputes/')) {
+          posts.push([url, JSON.parse(init.body ?? '{}')]);
+          return json({data:{resolved:true, actualGrams:2000, finalPaisePerKg:3245, finalAmountPaise:'6490'}});
+        }
+        if (url.endsWith('/admin/disputes')) return json({data:{disputes:[row]}});
+        return json({authenticated:true});
+      });
+      globalThis.confirm=()=>true;
+      await clickButton('Load open disputes');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Disputed amounts'));
+      assert.match(section.textContent,/recorded 2300 g at ₹32\.45\/kg = ₹74\.64/);
+      assert.match(section.textContent,/Customer says: It weighed closer to 2 kg/);
+      const input=section.querySelector('input');
+      const setter=Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set;
+      await act(async()=>{setter.call(input,'2000'); input.dispatchEvent(new dom.window.Event('input',{bubbles:true}));});
+      await act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Correct the weight').click();});
+      // Only the corrected weight is sent; the browser never supplies a price.
+      assert.equal(posts.length,1);
+      assert.ok(posts[0][0].endsWith(`/${requestId}/resolve`));
+      assert.deepEqual(posts[0][1], { correctedGrams:2000 });
+      assert.match(section.textContent,/Corrected 2000 g, final amount ₹64\.90 at ₹32\.45\/kg/);
       await unmount();
     });
     await t.test('a still-active session after sign-out is not presented as signed out', async () => {

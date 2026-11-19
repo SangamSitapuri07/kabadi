@@ -88,7 +88,7 @@ test('pickup list separates priced requests from legacy free text and rejects ma
   const id = randomUUID();
   const address = {name:'Sample', addressLine:'12 Example', city:'Ludhiana', state:'Punjab', postalCode:'141001'};
   const empty = { actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null,
-    cancelledAt:null, cancellationReason:null, releasedAt:null };
+    cancelledAt:null, cancellationReason:null, releasedAt:null, dispute:null };
   const priced = { id, status:'requested', createdAt:'2026-11-18T17:00:00.000Z', address, estimatedGrams:500,
     material:null, categoryId, categoryName:'Paper', rateId:randomUUID(), paisePerKg:3245, amountPaise:'1623', ...empty };
   const legacy = { ...priced, categoryId:null, categoryName:null, rateId:null, paisePerKg:null, amountPaise:null, material:'Old paper' };
@@ -126,7 +126,7 @@ test('collector routes derive the actor from the session and map every state out
   const openRow = { id:requestId, status:'requested', createdAt:'2026-11-18T17:00:00.000Z', address, estimatedGrams:2500,
     material:null, categoryId, categoryName:'Paper', rateId:randomUUID(), paisePerKg:3245, amountPaise:'8113',
     actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null,
-    cancelledAt:null, cancellationReason:null, releasedAt:null };
+    cancelledAt:null, cancellationReason:null, releasedAt:null, dispute:null };
   const called = [];
   let outcome={outcome:'accepted'}, rows=[openRow];
   const collector = {
@@ -209,7 +209,7 @@ test('collector list fails closed on a malformed or unsettled row', async () => 
   const base = { id:randomUUID(), status:'requested', createdAt:'2026-11-18T17:00:00.000Z', address, estimatedGrams:2500,
     material:null, categoryId, categoryName:'Paper', rateId:randomUUID(), paisePerKg:3245, amountPaise:'8113',
     actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null,
-    cancelledAt:null, cancellationReason:null, releasedAt:null };
+    cancelledAt:null, cancellationReason:null, releasedAt:null, dispute:null };
   const collected = {...base, status:'collected', actualGrams:2300, finalRateId:randomUUID(), finalPaisePerKg:3300,
     finalAmountPaise:'7590', collectedAt:'2026-11-20T10:00:00.000Z'};
   let rows=[collected];
@@ -242,12 +242,13 @@ test('collector list fails closed on a malformed or unsettled row', async () => 
 // ---- Schema migration ----------------------------------------------------
 // A recording fake client asserts the SQL the migration emits, so the v1 -> v3
 // chain is checked without a live database.
-test('pickup migration walks v1 to v4 in one run and reports the real starting version', async () => {
+test('pickup migration walks v1 to v5 in one run and reports the real starting version', async () => {
   const { migratePickups } = await import('../../apps/api/dist/pickups.js');
   const statements = [];
   const V3 = ['collector_id', 'accepted_at', 'collected_at', 'actual_grams',
     'final_rate_id', 'final_paise_per_kg', 'final_amount_paise',
-    'cancelled_at', 'cancellation_reason', 'released_at'];
+    'cancelled_at', 'cancellation_reason', 'released_at',
+    'dispute_status', 'dispute_reason', 'dispute_raised_at', 'dispute_resolved_at'];
   // `columns` defaults to a table that really is at the claimed version, so the
   // verification pass is exercised rather than bypassed.
   // Any successful upgrade ends at v3, so the default fake models that end state;
@@ -273,7 +274,7 @@ test('pickup migration walks v1 to v4 in one run and reports the real starting v
   }
 
   const report = await migratePickups(fakePool(1));
-  assert.deepEqual(report, { action: 'upgraded', schemaVersion: 4, fromVersion: 1, legacyRequests: 1 });
+  assert.deepEqual(report, { action: 'upgraded', schemaVersion: 5, fromVersion: 1, legacyRequests: 1 });
   const all = statements.join('\n');
   // Both upgrade steps ran, in order, and each pinned its own version.
   assert.ok(all.indexOf('SET version = 2') < all.indexOf('ADD COLUMN collector_id'), 'v2 upgrade precedes v3');
@@ -288,13 +289,16 @@ test('pickup migration walks v1 to v4 in one run and reports the real starting v
   assert.ok(all.includes("ADD CONSTRAINT requests_status_check CHECK (status IN ('requested','accepted','collected','cancelled'))"));
   assert.ok(all.includes('ADD CONSTRAINT pickup_cancel_reason CHECK'));
   assert.ok(all.includes('SET version = 4'));
+  assert.ok(all.indexOf('SET version = 4') < all.indexOf('ADD COLUMN dispute_status'), 'v4 precedes v5');
+  assert.ok(all.includes('ADD CONSTRAINT pickup_dispute_shape CHECK'));
+  assert.ok(all.includes('SET version = 5'));
   // Existing rows are never rewritten or deleted by the upgrade.
   assert.ok(!/DELETE FROM kabadi_pickup\.requests/i.test(all));
   assert.ok(!/UPDATE kabadi_pickup\.requests SET (material|status)/i.test(all));
 
   // A v2 database takes the last two steps and stays 'upgraded'.
   statements.length = 0;
-  assert.deepEqual(await migratePickups(fakePool(2)), { action: 'upgraded', schemaVersion: 4, fromVersion: 2, legacyRequests: 1 });
+  assert.deepEqual(await migratePickups(fakePool(2)), { action: 'upgraded', schemaVersion: 5, fromVersion: 2, legacyRequests: 1 });
   const v2only = statements.join('\n');
   assert.ok(!v2only.includes('SET version = 2'));
   assert.ok(v2only.includes('ADD COLUMN collector_id'));
@@ -302,7 +306,7 @@ test('pickup migration walks v1 to v4 in one run and reports the real starting v
 
   // A v3 database — the owner's current state — takes only the cancellation step.
   statements.length = 0;
-  assert.deepEqual(await migratePickups(fakePool(3)), { action: 'upgraded', schemaVersion: 4, fromVersion: 3, legacyRequests: 1 });
+  assert.deepEqual(await migratePickups(fakePool(3)), { action: 'upgraded', schemaVersion: 5, fromVersion: 3, legacyRequests: 1 });
   const v3only = statements.join('\n');
   assert.ok(!v3only.includes('ADD COLUMN collector_id'), 'v3 columns are not re-added');
   assert.ok(v3only.includes('ADD COLUMN cancelled_at'));
@@ -311,14 +315,14 @@ test('pickup migration walks v1 to v4 in one run and reports the real starting v
   // A recorded version that the table does not honour is refused, not reported
   // as a successful no-op. This is the "already version 3" lie.
   statements.length = 0;
-  await assert.rejects(() => migratePickups(fakePool(4, ['collector_id', 'actual_grams'])),
-    /claims version 4 but is missing: accepted_at/);
+  await assert.rejects(() => migratePickups(fakePool(5, ['collector_id', 'actual_grams'])),
+    /claims version 5 but is missing: accepted_at/);
   const refused = statements.join('\n');
   assert.ok(!refused.includes('SET version = 3'), 'nothing may be written when verification fails');
 
   // A current database is reported as unchanged, and an unknown version fails.
-  assert.equal((await migratePickups(fakePool(4))).action, 'unchanged');
-  await assert.rejects(() => migratePickups(fakePool(5)), /Unsupported schema/);
+  assert.equal((await migratePickups(fakePool(5))).action, 'unchanged');
+  await assert.rejects(() => migratePickups(fakePool(6)), /Unsupported schema/);
 
   // A fresh schema is 'created' from version 0 and lands directly at 3.
   statements.length = 0;
@@ -336,10 +340,10 @@ test('pickup migration walks v1 to v4 in one run and reports the real starting v
       return { rows: [] };
     }, release: () => {},
   }) });
-  assert.deepEqual(fresh, { action: 'created', schemaVersion: 4, fromVersion: 0, legacyRequests: 0 });
+  assert.deepEqual(fresh, { action: 'created', schemaVersion: 5, fromVersion: 0, legacyRequests: 0 });
   const created = statements.join('\n');
-  assert.ok(created.includes('CHECK (version = 4)'));
-  assert.ok(created.includes('INSERT INTO kabadi_pickup.schema_version VALUES (4)'));
+  assert.ok(created.includes('CHECK (version = 5)'));
+  assert.ok(created.includes('INSERT INTO kabadi_pickup.schema_version VALUES (5)'));
   // A fresh table defines the cancellation columns directly, not via ALTER.
   assert.ok(created.includes('cancelled_at timestamptz'));
   assert.ok(created.includes('released_at timestamptz'));
@@ -550,4 +554,77 @@ test('store SQL encodes ownership, terminal states and the self-accept guard', a
     return { rows: [], rowCount: 0 };
   });
   assert.equal(await createCollectorStore(suspended.pool).release('col-3', requestId), 'forbidden');
+});
+
+// ---- Disputes ------------------------------------------------------------
+test('customer raises a dispute only on their own collected request', async () => {
+  const requestId = randomUUID();
+  const called = [];
+  let outcome = { outcome: 'raised' };
+  const auth = { origin:'http://localhost:3000', handler:async()=>{}, resolveIdentity:async()=>({userId:'owner',cookies:[]}),
+    pickups:{ create:async()=>({outcome:'conflict'}), list:async()=>[],
+      cancel:async()=>({outcome:'cancelled'}),
+      raiseDispute:async (id, rid, reason)=>{ called.push([id, rid, reason]); return outcome; } },
+    collector:{ open:async()=>[], mine:async()=>[], accept:async()=>({outcome:'accepted'}),
+      collect:async()=>({outcome:'accepted'}), release:async()=>({outcome:'released'}) } };
+  const server = createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+  try {
+    const url = `http://127.0.0.1:${server.address().port}/api/v1/customer/pickups/${requestId}/dispute`;
+    const post = (body, headers={}) => fetch(url, { method:'POST',
+      headers:{ origin:'http://localhost:3000', 'content-type':'application/json', ...headers }, body });
+    let response = await post(JSON.stringify({ reason: 'The weight was about 2 kg, not 2.3' }));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { data: { raised: true } });
+    assert.deepEqual(called.pop(), ['owner', requestId, 'The weight was about 2 kg, not 2.3']);
+    // Unlike cancellation, a dispute must say why: an admin has to know what to check.
+    for (const body of ['{}', '{"reason":""}', '{"reason":"  "}', `{"reason":"${'x'.repeat(201)}"}`,
+      '{"reason":"a","actualGrams":1}', '{"correctedGrams":2000}']) {
+      assert.equal((await post(body)).status, 400, `expected rejection: ${body.slice(0,50)}`);
+    }
+    assert.equal(called.length, 0, 'a rejected body never reaches the store');
+    assert.equal((await post('{"reason":"valid reason here"}', { origin:'https://evil.example' })).status, 403);
+    for (const [v, status, code] of [
+      [{outcome:'not-found'}, 404, 'REQUEST_NOT_FOUND'],
+      [{outcome:'not-collected'}, 409, 'NOT_COLLECTED'],
+      [{outcome:'already-open'}, 409, 'DISPUTE_OPEN'],
+    ]) {
+      outcome = v; response = await post(JSON.stringify({ reason:'valid reason here' }));
+      assert.equal(response.status, status); assert.equal((await response.json()).error.code, code);
+    }
+    outcome = 'forbidden'; assert.equal((await post('{"reason":"valid reason here"}')).status, 403);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
+test('admin resolves a dispute by re-pricing at the frozen rate, never a fresh lookup', async () => {
+  const { createDisputeStore } = await import('../../apps/api/dist/pickups.js');
+  const requestId = randomUUID();
+  const seen = [];
+  // The row was collected at 3245 paise/kg. The catalog's current rate is
+  // deliberately different; a resolution must ignore it entirely.
+  const pool = { connect: async () => ({
+    query: async (sql, params) => {
+      const text = typeof sql === 'string' ? sql.replace(/\s+/g,' ').trim() : '';
+      seen.push({ text, params });
+      if (text.startsWith('SELECT status FROM kabadi_authz.accounts')) return { rows: [{ status: 'active' }] };
+      if (text.includes("role='admin'")) return { rows: [{}], rowCount: 1 };
+      if (text.includes('FOR UPDATE')) return { rows: [{ status: 'collected', dispute_status: 'open',
+        actual_grams: 2300, final_paise_per_kg: 3245, final_rate_id: randomUUID() }] };
+      return { rows: [], rowCount: 1 };
+    }, release: () => {},
+  }) };
+  const store = createDisputeStore(pool);
+  const result = await store.resolveDispute('admin-1', requestId, 2000);
+  assert.deepEqual(result, { outcome: 'resolved', actualGrams: 2000, finalPaisePerKg: 3245, finalAmountPaise: '6490' });
+  // No catalog read at all: the frozen rate is the only price input.
+  assert.ok(!seen.some(q => q.text.includes('kabadi_catalog.rates')), 'resolution must not query the catalog');
+  const update = seen.find(q => q.text.startsWith('UPDATE kabadi_pickup.requests'));
+  assert.match(update.text, /final_amount_paise=\$3::bigint/);
+  // The per-kg rate is not in the SET list at all: it cannot drift because it is
+  // never written again. Only the weight and the derived amount change.
+  assert.doesNotMatch(update.text, /SET[^]*final_paise_per_kg\s*=/, 'the frozen per-kg rate is never rewritten');
+  assert.doesNotMatch(update.text, /final_rate_id\s*=/, 'the frozen rate id is never rewritten');
+  assert.match(update.text, /dispute_status='resolved'/);
+  assert.deepEqual(update.params, [requestId, 2000, '6490']);
+  // 2000 g at 3245 = 6490 paise exactly, no rounding surprise.
+  assert.equal(6490, Math.round(2000 * 3245 / 1000));
 });

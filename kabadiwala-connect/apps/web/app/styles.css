@@ -46,3 +46,12 @@ footer { color: #71877a; font-size: .8rem; padding: 25px 0; border-top: 1px soli
 .collector-queue label { display: grid; gap: 5px; color: #294f3d; font-weight: 700; margin: 8px 0; }
 .collector-queue input { width: 100%; border: 1px solid #cfded1; border-radius: 8px; padding: 10px; color: #18362c; font: inherit; background: white; }
 .collector-queue input:focus-visible { outline: 3px solid #21815b; outline-offset: 2px; }
+
+/* Dispute handling: a correction is a review, so it is visually separate from
+   the customer's own estimate and the collector's queue. */
+.dispute-admin { margin-top: 20px; max-width: 420px; }
+.dispute-admin h2 { color: #18362c; font-size: 1.1rem; }
+.dispute-admin li { margin: 12px 0; overflow-wrap: anywhere; }
+.dispute-admin label { display: grid; gap: 5px; color: #294f3d; font-weight: 700; margin: 8px 0; }
+.dispute-admin input { width: 100%; border: 1px solid #cfded1; border-radius: 8px; padding: 10px; color: #18362c; font: inherit; background: white; }
+.dispute-admin input:focus-visible { outline: 3px solid #21815b; outline-offset: 2px; }
