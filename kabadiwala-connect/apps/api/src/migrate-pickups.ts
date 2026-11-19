@@ -16,10 +16,24 @@ try {
   if (status.missing || status.problems) throw new Error('Authentication schema is not ready.');
   pool = new pg.Pool({ connectionString: config.databaseURL, max: 1, connectionTimeoutMillis: 5000 });
   pool.on('error', () => console.error('An idle pickup database connection failed.'));
-  await migratePickups(pool);
-  console.log('Pickup schema migration completed; no pickup requests were created.');
+  const report = await migratePickups(pool);
+  // Say exactly what happened, especially on an upgrade: legacy rows are kept
+  // as-is and deliberately get no invented estimate.
+  if (report.action === 'created') {
+    console.log('Pickup schema created at version 2; no pickup requests exist yet.');
+  } else if (report.action === 'upgraded') {
+    console.log(`Pickup schema upgraded from version 1 to version 2. All existing requests were kept.`);
+    if (report.legacyRequests > 0) {
+      console.log(`${report.legacyRequests} pre-pricing request(s) keep their free-text material and have no estimate. New requests will be priced from the catalog.`);
+    }
+  } else {
+    console.log('Pickup schema is already version 2; nothing changed.');
+    if (report.legacyRequests > 0) {
+      console.log(`${report.legacyRequests} pre-pricing request(s) still have no estimate.`);
+    }
+  }
 } catch {
-  console.error('Pickup migration failed; check development configuration and schemas.');
+  console.error('Pickup migration failed; check development configuration and schemas. No changes were committed.');
   process.exitCode = 1;
 } finally {
   if (pool) await pool.end();

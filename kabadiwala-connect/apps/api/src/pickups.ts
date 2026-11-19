@@ -53,7 +53,14 @@ export function parsePickup(input: unknown): PickupInput | null {
 
 // Version 2 adds the pricing snapshot. Version 1 databases are upgraded in
 // place, keeping existing free-text requests valid. Never run at startup.
-export async function migratePickups(pool: pg.Pool) {
+export type PickupMigrationReport = {
+  action: 'created' | 'upgraded' | 'unchanged';
+  schemaVersion: 2;
+  // Requests created before pricing existed. They survive untouched but carry
+  // no estimate, so the operator must know how many there are.
+  legacyRequests: number;
+};
+export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationReport> {
   const c = await pool.connect();
   try {
     await c.query('BEGIN');
@@ -113,7 +120,17 @@ export async function migratePickups(pool: pg.Pool) {
       await c.query('UPDATE kabadi_pickup.schema_version SET version = 2');
       await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 2)');
     }
+    // Report the outcome truthfully: an in-place upgrade is not the same event
+    // as a fresh schema, and legacy rows are the operator's main concern.
+    const counts = await c.query<{ legacy: string; total: string }>(
+      `SELECT count(*) FILTER (WHERE category_id IS NULL)::text AS legacy, count(*)::text AS total
+       FROM kabadi_pickup.requests`);
     await c.query('COMMIT');
+    return {
+      action: currentVersion === 0 ? 'created' : currentVersion === 1 ? 'upgraded' : 'unchanged',
+      schemaVersion: 2,
+      legacyRequests: Number(counts.rows[0]?.legacy ?? 0),
+    };
   } catch (error) { try { await c.query('ROLLBACK'); } catch {} throw error; } finally { c.release(); }
 }
 

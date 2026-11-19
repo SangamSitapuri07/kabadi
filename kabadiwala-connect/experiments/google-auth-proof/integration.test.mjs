@@ -130,8 +130,12 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     await accountPool.query('CREATE SCHEMA kabadi_pickup');
     assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 1);
     await accountPool.query('DROP SCHEMA kabadi_pickup');
-    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
-    assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
+    const freshPickup = pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'});
+    assert.equal(freshPickup.status, 0);
+    assert.match(freshPickup.stdout, /created at version 2/i, 'a fresh schema says so');
+    const rerunPickup = pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'});
+    assert.equal(rerunPickup.status, 0);
+    assert.match(rerunPickup.stdout, /already version 2; nothing changed/i, 'a re-run must not claim it did work');
     assert.equal((await accountPool.query('SELECT count(*)::int AS count FROM kabadi_pickup.requests')).rows[0].count, 0);
     assert.equal((await accountPool.query('SELECT version::int AS v FROM kabadi_pickup.schema_version')).rows[0].v, 2);
     assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.categories')).rows[0].n, 0);
@@ -175,7 +179,11 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       await accountPool.query(`INSERT INTO kabadi_pickup.requests
         (id,user_id,request_key,material,estimated_grams,name,address_line,city,state,postal_code)
         VALUES ($1,$2,$3,'Old newspapers',1200,'Legacy','12 Example Road','Ludhiana','Punjab','141001')`,[legacyId,legacyUser,legacyKey]);
-      assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 0);
+      const upgradedRun = pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'});
+      assert.equal(upgradedRun.status, 0);
+      assert.match(upgradedRun.stdout, /upgraded from version 1 to version 2/i);
+      assert.match(upgradedRun.stdout, /1 pre-pricing request\(s\) keep their free-text material and have no estimate/i,
+        'the operator must be told legacy rows survive without a price');
       assert.equal((await accountPool.query('SELECT version::int AS v FROM kabadi_pickup.schema_version')).rows[0].v, 2);
       const upgraded = (await accountPool.query('SELECT material,category_id,amount_paise,estimated_grams FROM kabadi_pickup.requests WHERE id=$1',[legacyId])).rows[0];
       assert.deepEqual(upgraded, {material:'Old newspapers', category_id:null, amount_paise:null, estimated_grams:1200});

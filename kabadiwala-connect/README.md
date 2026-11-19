@@ -4,6 +4,11 @@ Independent greenfield workspace for the web-first recycling marketplace. It
 does not use the legacy applications in the parent repository. Notion is the
 primary planning and progress record.
 
+> **Run every command in this file from this `kabadiwala-connect` directory.**
+> The parent `kabadi` folder is a different, similarly named monorepo that also
+> has a `package.json`; commands, `.env`, and `--env-file=.env` all resolve
+> against the current directory, so running them one level up fails.
+
 ## Setup and verification
 
 Node.js 22 or newer and npm are required. No accounts, secrets, paid services or
@@ -429,7 +434,16 @@ independently inspect the target, back it up, and obtain explicit approval. Do
 not run on production data. After `npm run build:api` the approved command is
 `PICKUP_MIGRATION_CONFIRM=yes node --env-file=.env apps/api/dist/migrate-pickups.js`;
 PowerShell users set and later remove the environment variable as for the other
-migrations. No secrets or customer data should be shared in chat.
+migrations. The `npm run migrate:*` scripts load `.env` themselves via
+`--env-file-if-exists`, so `npm run migrate:pickups` works too; a real
+environment variable always takes precedence over the file. No secrets or customer data should be shared in chat.
+
+Run migrations **from this `kabadiwala-connect` directory**, because `.env` is
+resolved relative to the current directory and lives here. Running from
+the parent repository root fails with `.env: not found`. The command reports what
+it actually did: `created`, `upgraded from version 1 to version 2`, or
+`already version 2; nothing changed`, plus how many pre-pricing requests still
+exist without an estimate.
 
 ### Customer self-onboarding (development API)
 
