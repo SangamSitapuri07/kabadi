@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseCustomerDetails } from './customer-details.js';
 import type { CustomerDetails } from './customer-details.js';
 import { isMissingCollectorColumns, parsePickup } from './pickups.js';
-import type { CollectorOutcome, CreatePickupResult, Pickup } from './pickups.js';
+import type { CancelOutcome, CollectorOutcome, CreatePickupResult, Pickup } from './pickups.js';
 import { categoryName, rateValue, utcTimestamp } from './catalog.js';
 import type { CategoryPage, RatePage } from './catalog.js';
 
@@ -13,12 +13,17 @@ type AuthMount = {
   handler: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
   resolveIdentity?: (cookie?: string) => Promise<{ userId: string | null; cookies: string[] }>;
   onboardCustomer?: (userId: string) => Promise<'ready' | 'forbidden'>;
-  pickups?: { create: (userId: string, input: unknown) => Promise<CreatePickupResult | 'forbidden'>; list: (userId: string) => Promise<Pickup[] | 'forbidden'> };
+  pickups?: {
+    create: (userId: string, input: unknown) => Promise<CreatePickupResult | 'forbidden'>;
+    list: (userId: string) => Promise<Pickup[] | 'forbidden'>;
+    cancel: (userId: string, requestId: string, reason: string | null) => Promise<CancelOutcome | 'forbidden'>;
+  };
   collector?: {
     open: (userId: string) => Promise<Pickup[] | 'forbidden'>;
     mine: (userId: string) => Promise<Pickup[] | 'forbidden'>;
     accept: (userId: string, requestId: string) => Promise<CollectorOutcome | 'forbidden'>;
     collect: (userId: string, requestId: string, grams: unknown) => Promise<CollectorOutcome | 'forbidden'>;
+    release: (userId: string, requestId: string) => Promise<CollectorOutcome | 'forbidden'>;
   };
   catalog?: { listCategories: (actorId:string, after:string | null) => Promise<CategoryPage | 'forbidden'>; listRates: (actorId:string, categoryId:string, after:string | null) => Promise<RatePage | 'not-found' | 'forbidden'>; createCategory: (actorId: string, name: unknown, key:string) => Promise<{id:string} | 'duplicate' | 'conflict' | 'forbidden'>; addRate: (actorId: string, categoryId: string, effectiveFrom: unknown, rate: unknown, key:string) => Promise<{id:string} | 'invalid-time' | 'not-found' | 'conflict' | 'forbidden'> };
   customerDetails?: { read: (userId: string) => Promise<CustomerDetails | null | 'forbidden'>; write: (userId: string, input: unknown) => Promise<'saved' | 'forbidden'> };
@@ -163,6 +168,16 @@ export function createApp(auth?: AuthMount) {
   const settledEmpty = { actualGrams: null, finalRateId: null, finalPaisePerKg: null, finalAmountPaise: null, collectedAt: null };
   // The measured weight and the collection-time amount are the customer's
   // receipt, so every field is present together or the row is rejected.
+  // Cancellation and release extend the row without changing its money. They
+  // are validated the same way: a reason only exists on a cancelled row.
+  const terminalState = (r: Pickup) => {
+    const iso = (v: unknown) => typeof v === 'string' && !Number.isNaN(Date.parse(v));
+    if (r.cancelledAt !== null && !iso(r.cancelledAt)) throw Error('Invalid result');
+    if (r.releasedAt !== null && !iso(r.releasedAt)) throw Error('Invalid result');
+    if (r.cancellationReason !== null && (r.status !== 'cancelled' || !text(r.cancellationReason, 200))) throw Error('Invalid result');
+    if ((r.status === 'cancelled') !== (r.cancelledAt !== null)) throw Error('Invalid result');
+    return { cancelledAt: r.cancelledAt, cancellationReason: r.cancellationReason, releasedAt: r.releasedAt };
+  };
   const fullySettled = (r: Pickup) => {
     if (!Number.isInteger(r.actualGrams) || (r.actualGrams as number) < 1 || (r.actualGrams as number) > 10000000 ||
         !uuid.test(r.finalRateId as string) || !Number.isInteger(r.finalPaisePerKg) ||
@@ -185,7 +200,7 @@ export function createApp(auth?: AuthMount) {
       // client, and the two shapes (priced item or legacy free text) stay apart.
       const projected = result.map(r => {
         const address = parseCustomerDetails(r.address);
-        if (!address || !['requested','accepted','collected'].includes(r.status) || typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt)) ||
+        if (!address || !['requested','accepted','collected','cancelled'].includes(r.status) || typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt)) ||
             !Number.isInteger(r.estimatedGrams) || r.estimatedGrams < 1 || r.estimatedGrams > 10000000 || !uuid.test(r.id)) throw Error('Invalid result');
         const priced = r.categoryId !== null;
         if (priced) {
@@ -195,10 +210,11 @@ export function createApp(auth?: AuthMount) {
         // A collected request is only returned once it is fully settled; a
         // half-written settlement is treated as corrupt rather than priced.
         const settled = r.status !== 'collected' ? settledEmpty : fullySettled(r);
+        const terminal = terminalState(r);
         return {
           id: r.id, status: r.status, createdAt: r.createdAt, address, estimatedGrams: r.estimatedGrams,
           material: r.material, categoryId: r.categoryId, categoryName: r.categoryName,
-          rateId: r.rateId, paisePerKg: r.paisePerKg, amountPaise: r.amountPaise, ...settled,
+          rateId: r.rateId, paisePerKg: r.paisePerKg, amountPaise: r.amountPaise, ...settled, ...terminal,
         };
       });
       res.json({ data: { pickups: projected } });
@@ -231,6 +247,50 @@ export function createApp(auth?: AuthMount) {
           typeof estimate.amountPaise !== 'string' || !/^\d{1,16}$/.test(estimate.amountPaise)) throw Error('Invalid estimate');
       res.json({ data: { created: result.outcome === 'created', estimate } });
     } catch { pickupUnavailable(res); }
+  });
+  // Cancelling is the customer's own action on their own request. It stops a
+  // request from sitting open forever; it is not a dispute or a refund, and a
+  // collected request can never be cancelled.
+  app.post('/api/v1/customer/pickups/:requestId/cancel', (req, res, next) => {
+    if (!auth?.resolveIdentity || !auth.pickups) { pickupUnavailable(res); return; }
+    if (req.get('origin') !== auth.origin) { res.status(403).json({ error: { code: 'INVALID_ORIGIN', message: 'Request origin is not allowed.' } }); return; }
+    const length = req.get('content-length');
+    if (!length || !/^\d+$/.test(length) || Number(length) > 4096 || req.get('transfer-encoding')) {
+      res.status(413).json({ error: { code: 'INVALID_BODY', message: 'Request body is invalid or too large.' } }); return;
+    }
+    if (!req.is('application/json')) { res.status(415).json({ error: { code: 'INVALID_CONTENT_TYPE', message: 'JSON is required.' } }); return; }
+    next();
+  }, express.json({ limit: '4kb', strict: true }), async (req, res) => {
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const requestId = req.params.requestId;
+      if (!uuid.test(requestId)) { res.status(400).json({ error: { code: 'INVALID_REQUEST_ID', message: 'Request id is invalid.' } }); return; }
+      const body = req.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        res.status(400).json({ error: { code: 'INVALID_BODY', message: 'A JSON object is required.' } }); return;
+      }
+      // An optional reason is bounded text; it is never required, because a
+      // customer should not have to justify cancelling their own request.
+      const keys = Object.keys(body);
+      const rawReason = (body as Record<string, unknown>).reason;
+      if (keys.length > 1 || (keys.length === 1 && keys[0] !== 'reason')) {
+        res.status(400).json({ error: { code: 'INVALID_BODY', message: 'Only an optional reason is accepted.' } }); return;
+      }
+      if (keys.length === 1 && rawReason !== undefined && !text(rawReason, 200)) {
+        res.status(400).json({ error: { code: 'INVALID_REASON', message: 'The reason must be 1 to 200 characters.' } }); return;
+      }
+      const reason = keys.length === 1 ? (rawReason as string) : null;
+      const result = await auth!.pickups!.cancel(id, requestId, reason);
+      if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Customer access is required.' } }); return; }
+      if (result.outcome === 'cancelled') { res.json({ data: { cancelled: true } }); return; }
+      const failures: Record<'not-found' | 'already-cancelled' | 'already-collected', [number, string, string]> = {
+        'not-found': [404, 'REQUEST_NOT_FOUND', 'That request does not exist.'],
+        'already-cancelled': [409, 'ALREADY_CANCELLED', 'This request is already cancelled.'],
+        'already-collected': [409, 'ALREADY_COLLECTED', 'A collected request cannot be cancelled.'],
+      };
+      const [status, code, message] = failures[result.outcome];
+      res.status(status).json({ error: { code, message } });
+    } catch (error) { if (isMissingCollectorColumns(error)) pickupNeedsMigration(res); else pickupUnavailable(res); }
   });
   // Development-only admin writes. Identity comes exclusively from the session;
   // the catalog store checks the active admin grant inside the write transaction.
@@ -313,7 +373,7 @@ export function createApp(auth?: AuthMount) {
       const paiseOk = (value: unknown) => value === null || (typeof value === 'string' && /^\d{1,16}$/.test(value));
       const projected = (rows as Pickup[]).map(r => {
         const address = parseCustomerDetails(r.address);
-        if (!address || !['requested','accepted','collected'].includes(r.status) || !uuid.test(r.id) ||
+        if (!address || !['requested','accepted','collected','cancelled'].includes(r.status) || !uuid.test(r.id) ||
             typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt)) ||
             !Number.isInteger(r.estimatedGrams) || r.estimatedGrams < 1 || r.estimatedGrams > 10000000) throw Error('Invalid result');
         if (r.categoryId === null) throw Error('Invalid result');
@@ -323,7 +383,7 @@ export function createApp(auth?: AuthMount) {
         const settled = r.status === 'collected' ? fullySettled(r) : settledEmpty;
         return { id: r.id, status: r.status, createdAt: r.createdAt, address, estimatedGrams: r.estimatedGrams,
           material: r.material, categoryId: r.categoryId, categoryName: r.categoryName,
-          rateId: r.rateId, paisePerKg: r.paisePerKg, amountPaise: r.amountPaise, ...settled };
+          rateId: r.rateId, paisePerKg: r.paisePerKg, amountPaise: r.amountPaise, ...settled, ...terminalState(r) };
       });
       res.json({ data: { pickups: projected } });
     } catch (error) { if (isMissingCollectorColumns(error)) collectorNeedsMigration(res); else collectorUnavailable(res); }
@@ -331,7 +391,7 @@ export function createApp(auth?: AuthMount) {
 
   // One guarded shape for both collector mutations: exact origin, bounded JSON,
   // then the session, then the store's own authorization and state checks.
-  for (const action of ['accept', 'collect'] as const) {
+  for (const action of ['accept', 'collect', 'release'] as const) {
     app.post(`/api/v1/collector/pickups/:requestId/${action}`, (req, res, next) => {
       if (!auth?.resolveIdentity || !auth.collector) { collectorUnavailable(res); return; }
       if (req.get('origin') !== auth!.origin) { res.status(403).json({ error: { code: 'INVALID_ORIGIN', message: 'Request origin is not allowed.' } }); return; }
@@ -352,9 +412,11 @@ export function createApp(auth?: AuthMount) {
         }
         const keys = Object.keys(body);
         let result: CollectorOutcome | 'forbidden';
-        if (action === 'accept') {
+        if (action === 'accept' || action === 'release') {
           if (keys.length !== 0) { res.status(400).json({ error: { code: 'INVALID_BODY', message: 'An empty JSON object is required.' } }); return; }
-          result = await auth!.collector!.accept(id, requestId);
+          result = action === 'accept'
+            ? await auth!.collector!.accept(id, requestId)
+            : await auth!.collector!.release(id, requestId);
         } else {
           if (keys.length !== 1 || !('actualGrams' in body)) {
             res.status(400).json({ error: { code: 'INVALID_BODY', message: 'Only actualGrams is accepted.' } }); return;
@@ -369,19 +431,24 @@ export function createApp(auth?: AuthMount) {
         }
         if (result === 'forbidden') { res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Collector access is required.' } }); return; }
         if (result.outcome === 'accepted') { res.json({ data: { accepted: true } }); return; }
+        if (result.outcome === 'released') { res.json({ data: { released: true } }); return; }
         if (result.outcome === 'collected') {
           res.json({ data: { collected: true, actualGrams: result.actualGrams,
             finalPaisePerKg: result.finalPaisePerKg, finalAmountPaise: result.finalAmountPaise,
             finalRateId: result.finalRateId } });
           return;
         }
-        const failures: Record<'not-found' | 'already-accepted' | 'not-accepted' | 'already-collected' | 'no-rate' | 'legacy-request', [number, string, string]> = {
+        const failures: Record<'not-found' | 'already-accepted' | 'not-accepted' | 'already-collected'
+          | 'no-rate' | 'legacy-request' | 'own-request' | 'cancelled' | 'not-owner', [number, string, string]> = {
           'not-found': [404, 'REQUEST_NOT_FOUND', 'That request does not exist.'],
           'already-accepted': [409, 'ALREADY_ACCEPTED', 'Another collector already accepted this request.'],
           'not-accepted': [409, 'NOT_ACCEPTED', 'Accept this request before recording a collection.'],
           'already-collected': [409, 'ALREADY_COLLECTED', 'This request was already collected.'],
           'no-rate': [409, 'NO_RATE', 'No rate is in force for that category.'],
           'legacy-request': [409, 'LEGACY_REQUEST', 'Older free-text requests cannot be priced.'],
+          'own-request': [409, 'OWN_REQUEST', 'A collector cannot accept their own request.'],
+          'cancelled': [409, 'REQUEST_CANCELLED', 'The customer cancelled this request.'],
+          'not-owner': [409, 'NOT_YOUR_CLAIM', 'Another collector holds this request.'],
         };
         const [status, code, message] = failures[result.outcome];
         res.status(status).json({ error: { code, message } });

@@ -426,8 +426,9 @@ production readiness/security review is implied.
 
 A new separate `kabadi_pickup` schema requires the existing auth, authorization,
 customer **and catalog** schemas, because request rows reference catalog
-categories and rates. The schema is version 3; a version 1 schema is upgraded in
-place through version 2 to version 3 in one run, keeping every legacy row. It is explicitly migrated, never on startup, and creates
+categories and rates. The schema is version 4; an older schema is upgraded in
+place one version at a time to version 4 in a single run, keeping every legacy
+row. Version 3 added collection; version 4 added cancellation and release. It is explicitly migrated, never on startup, and creates
 no pickup requests. Version checks do not detect all schema drift; upgrades and
 restore have not been tested. Before running on any local development database,
 independently inspect the target, back it up, and obtain explicit approval. Do
@@ -441,10 +442,12 @@ environment variable always takes precedence over the file.
 To check the recorded version without changing anything, run
 `npm run pickups:version`. It also checks that the columns version 3 promises
 really exist, and fails if the recorded version and the table disagree — a
-version row alone is not proof that an upgrade completed. It prints the recorded version and whether a
+version row alone is not proof that an upgrade completed. The migration performs
+the same check and refuses rather than reporting a no-op on a table that does not
+match its recorded version. It prints the recorded version and whether a
 migration is still needed, so nobody has to infer from log wording whether a
 migration actually ran. A migration run always prints what it did — `created`,
-`upgraded from version N to version 3`, or `already version 3; nothing changed`
+`upgraded from version N to version 4`, or `already version 4; nothing changed`
 — so a no-op can never be mistaken for an upgrade. If the printed text does not
 match this description, the built `dist` output is older than the source: run
 `npm run build:api` after pulling. No secrets or customer data should be shared in chat.
@@ -452,8 +455,8 @@ match this description, the built `dist` output is older than the source: run
 Run migrations **from this `kabadiwala-connect` directory**, because `.env` is
 resolved relative to the current directory and lives here. Running from
 the parent repository root fails with `.env: not found`. The command reports what
-it actually did: `created`, `upgraded from version N to version 3`, or
-`already version 3; nothing changed`, plus how many pre-pricing requests still
+it actually did: `created`, `upgraded from version N to version 4`, or
+`already version 4; nothing changed`, plus how many pre-pricing requests still
 exist without an estimate.
 
 ### Collector acceptance and the final amount (development API)
@@ -499,6 +502,40 @@ the collected figure as the final amount. No cancellation, reassignment,
 dispute handling, notification, payout or retention policy exists yet, and
 collection requires the `collector` role to be granted with the development role
 tool — no self-service collector signup exists.
+
+### Cancellation and releasing a claim (development API)
+
+Two ways a request stops being work, with deliberately different consequences:
+
+- `POST /api/v1/customer/pickups/:requestId/cancel` with `{}` or
+  `{"reason":"..."}` — the customer's own decision on their own row. The reason
+  is optional, because nobody should have to justify cancelling their request;
+  when given it is trimmed text of 1–200 characters. Cancelling is terminal:
+  `collected` and already-`cancelled` requests answer 409 and change nothing.
+  The conditional `UPDATE ... WHERE id=$1 AND user_id=$2 AND status IN
+  ('requested','accepted')` is what makes it race-safe — if a collection commits
+  first, the cancellation loses and says so rather than erasing a settled amount.
+  A cancelled request keeps its stored estimate and its history; the row drops
+  `collector_id` so a cancelled request cannot linger in a collector's queue.
+  Someone else's request answers 404, never 403: the existence of another
+  customer's pickup is not this caller's business.
+- `POST /api/v1/collector/pickups/:requestId/release` with `{}` — a collector
+  giving a claim back. This is **not** a cancellation: the customer still wants
+  the pickup, so the row returns to `requested` with no collector, and
+  `released_at` records that it was once claimed. Only the collector holding the
+  claim can release it; the update requires `status='accepted' AND
+  collector_id=$2`.
+
+A collector may never accept their own request. `accept` carries
+`AND user_id <> $2` in its `UPDATE`, so the rule is enforced by the statement
+rather than by a check that could be bypassed between read and write; the loser
+gets `OWN_REQUEST` (409) and the UI explains it. This matters because a collector
+records the weight — self-acceptance would let one person set the quantity and
+receive the money.
+
+Neither action notifies anybody: there is no messaging, no dispute process and no
+retention policy yet. Cancelling after a collector has accepted leaves that
+collector with no signal beyond the row disappearing from their queue.
 
 ### Customer self-onboarding (development API)
 

@@ -635,6 +635,120 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.match(section.textContent,/pickup database is behind this build/i);
       await unmount();
     });
+    await t.test('customer can cancel an accepted request and sees the terminal state', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174120';
+      const address={name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'};
+      const row={ id:requestId, status:'accepted', createdAt:'2026-11-18T17:00:00.000Z', address, estimatedGrams:2500,
+        material:null, categoryId:'123e4567-e89b-42d3-a456-426614174121', categoryName:'Synthetic paper',
+        rateId:'123e4567-e89b-42d3-a456-426614174122', paisePerKg:3245, amountPaise:'8113',
+        actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null,
+        cancelledAt:null, cancellationReason:null, releasedAt:null };
+      const cancelled={ ...row, status:'cancelled', cancelledAt:'2026-11-21T09:00:00.000Z', cancellationReason:'Changed my mind' };
+      let posts=[], rows=[row];
+      await mount(async (url, init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
+        if (url.includes('/cancel')) {
+          posts.push([url, JSON.parse(init.body ?? '{}')]);
+          rows=[cancelled];
+          return json({data:{cancelled:true}});
+        }
+        if (url.endsWith('/customer/pickups')) return json({data:{pickups:rows}});
+        return json({authenticated:true});
+      });
+      globalThis.confirm=()=>true;
+      await clickButton('Set up customer account');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Test pickup requests'));
+      const load=async()=>act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Load my test requests').click();});
+      await load();
+      // An accepted request can still be cancelled; the button is offered.
+      const cancel=[...section.querySelectorAll('button')].find(b=>b.textContent==='Cancel this request');
+      assert.ok(cancel, 'an accepted request offers cancellation');
+      await act(async()=>{cancel.click();});
+      // The cancel call sends an empty body — no status, no collector, no price.
+      assert.equal(posts.length,1);
+      assert.ok(posts[0][0].endsWith(`/${requestId}/cancel`));
+      assert.deepEqual(posts[0][1], {});
+      // The row reports the terminal state and no cancel button remains.
+      assert.match(section.textContent,/Cancelled: Changed my mind/);
+      assert.equal([...section.querySelectorAll('button')].filter(b=>b.textContent==='Cancel this request').length, 0);
+      await unmount();
+    });
+    await t.test('a collected request offers no cancel and a lost race is explained', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174123';
+      const row={ id:requestId, status:'collected', createdAt:'2026-11-18T17:00:00.000Z',
+        address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'},
+        estimatedGrams:2500, material:null, categoryId:'123e4567-e89b-42d3-a456-426614174124',
+        categoryName:'Synthetic paper', rateId:'123e4567-e89b-42d3-a456-426614174125', paisePerKg:3245,
+        amountPaise:'8113', actualGrams:2300, finalRateId:'123e4567-e89b-42d3-a456-426614174126',
+        finalPaisePerKg:3245, finalAmountPaise:'7464', collectedAt:'2026-11-20T10:00:00.000Z',
+        cancelledAt:null, cancellationReason:null, releasedAt:null };
+      let cancelCalls=0;
+      await mount(async (url, init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/account/customer')) return json({data:{customer:'ready'}});
+        if (url.includes('/cancel')) { cancelCalls++; return json({error:{code:'ALREADY_COLLECTED'}},409); }
+        if (url.endsWith('/customer/pickups')) return json({data:{pickups:[row]}});
+        return json({authenticated:true});
+      });
+      await clickButton('Set up customer account');
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Test pickup requests'));
+      await act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Load my test requests').click();});
+      // Settled money stays visible and the row cannot be cancelled.
+      assert.match(section.textContent,/Final amount ₹74\.64/);
+      assert.equal([...section.querySelectorAll('button')].filter(b=>b.textContent==='Cancel this request').length, 0);
+      assert.equal(cancelCalls, 0, 'a collected request never offers a cancel call');
+      await unmount();
+    });
+    await t.test('collector can release a claim back to the open queue', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174130';
+      const base={ id:requestId, createdAt:'2026-11-18T17:00:00.000Z',
+        address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'},
+        estimatedGrams:2500, material:null, categoryId:'123e4567-e89b-42d3-a456-426614174131',
+        categoryName:'Synthetic paper', rateId:'123e4567-e89b-42d3-a456-426614174132', paisePerKg:3245,
+        amountPaise:'8113', actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null,
+        collectedAt:null, cancelledAt:null, cancellationReason:null, releasedAt:null };
+      let posts=[], mine=[{...base, status:'accepted'}];
+      await mount(async (url, init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.includes('/collector/pickups?view=')) return json({data:{pickups: url.includes('view=mine') ? mine : [{...base, status:'requested'}]}});
+        if (url.endsWith('/release')) {
+          posts.push(JSON.parse(init.body ?? '{}'));
+          mine=[];
+          return json({data:{released:true}});
+        }
+        return json({authenticated:true});
+      });
+      globalThis.confirm=()=>true;
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector queue'));
+      await clickButton('My accepted and collected');
+      const release=[...section.querySelectorAll('button')].find(b=>b.textContent==='Release this request');
+      assert.ok(release, 'an accepted claim can be released');
+      await act(async()=>{release.click();});
+      // Release carries no body at all.
+      assert.deepEqual(posts, [{}]);
+      assert.match(section.textContent,/Request released/i);
+      await unmount();
+    });
+    await t.test('collector is told why their own request cannot be accepted', async () => {
+      const row={ id:'123e4567-e89b-42d3-a456-426614174140', status:'requested', createdAt:'2026-11-18T17:00:00.000Z',
+        address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'},
+        estimatedGrams:2500, material:null, categoryId:'123e4567-e89b-42d3-a456-426614174141',
+        categoryName:'Synthetic paper', rateId:'123e4567-e89b-42d3-a456-426614174142', paisePerKg:3245,
+        amountPaise:'8113', actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null,
+        collectedAt:null, cancelledAt:null, cancellationReason:null, releasedAt:null };
+      await mount(async (url, init) => {
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.includes('/collector/pickups?view=')) return json({data:{pickups:[row]}});
+        if (url.endsWith('/accept')) return json({error:{code:'OWN_REQUEST'}},409);
+        return json({authenticated:true});
+      });
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector queue'));
+      await clickButton('Open requests');
+      await act(async()=>{[...section.querySelectorAll('button')].find(b=>b.textContent==='Accept this request').click();});
+      assert.match(section.textContent,/cannot accept your own request/i);
+      await unmount();
+    });
     await t.test('a still-active session after sign-out is not presented as signed out', async () => {
       await mount(async (url) => url.endsWith('sign-out') ? json({ success: true }) : json({ authenticated: true }));
       await click();

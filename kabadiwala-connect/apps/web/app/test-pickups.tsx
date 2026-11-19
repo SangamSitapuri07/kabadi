@@ -2,12 +2,13 @@
 import { useState } from 'react';
 
 type Pickup = {
-  id:string; status:'requested'|'accepted'|'collected'; createdAt:string; estimatedGrams:number;
+  id:string; status:'requested'|'accepted'|'collected'|'cancelled'; createdAt:string; estimatedGrams:number;
   address:{name:string;addressLine:string;city:string;state:string;postalCode:string};
   material:string|null; categoryId:string|null; categoryName:string|null;
   rateId:string|null; paisePerKg:number|null; amountPaise:string|null;
   actualGrams:number|null; finalRateId:string|null; finalPaisePerKg:number|null;
   finalAmountPaise:string|null; collectedAt:string|null;
+  cancelledAt:string|null; cancellationReason:string|null; releasedAt:string|null;
 };
 type Estimate = { categoryId:string; categoryName:string; rateId:string; paisePerKg:number; amountPaise:string };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -39,6 +40,32 @@ export function TestPickups() {
       if (!response.ok || !Array.isArray(json?.data?.pickups)) throw Error('unavailable');
       setItems(json.data.pickups);
     } catch { setItems(null); setMessage('Test requests could not be loaded. Please try again.'); }
+    finally { setBusy(false); }
+  }
+
+  // Cancelling is the customer's own call and is terminal. A collected request
+  // cannot be cancelled, so the button is not offered once it is settled.
+  async function cancel(item: Pickup) {
+    if (!confirm('Cancel this request? A collected request cannot be cancelled, and this cannot be undone.')) return;
+    setBusy(true); setMessage('');
+    try {
+      const response = await fetch(`/api/v1/customer/pickups/${item.id}/cancel`, {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:'{}', signal:AbortSignal.timeout(10000),
+      });
+      const json = await response.json();
+      const code = json?.error?.code;
+      if (response.status === 200 && json?.data?.cancelled === true) {
+        setMessage(item.status === 'accepted'
+          ? 'Request cancelled. A collector had accepted it, so it no longer appears in their queue.'
+          : 'Request cancelled.');
+        await list(); return;
+      }
+      if (response.status === 409 && code === 'ALREADY_COLLECTED') { setMessage('This request was already collected, so it cannot be cancelled.'); return; }
+      if (response.status === 409 && code === 'ALREADY_CANCELLED') { setMessage('This request is already cancelled.'); return; }
+      if (response.status === 404) { setMessage('That request no longer exists. Reload your list.'); return; }
+      if (response.status === 401 || response.status === 403) { setMessage('Your sign-in or customer access could not be confirmed.'); return; }
+      throw Error('unavailable');
+    } catch { setMessage('The cancellation could not be confirmed. Check the list before trying again.'); }
     finally { setBusy(false); }
   }
 
@@ -104,11 +131,18 @@ export function TestPickups() {
         item.finalPaisePerKg !== null && item.actualGrams !== null
         ? `Final amount ${rupees(item.finalAmountPaise)}: ${item.actualGrams} g at ${rupees(String(item.finalPaisePerKg))}/kg (collection-time rate).`
         : null;
+      // Cancellation is explained in the row, not only in a status word.
+      const cancelled = item.status === 'cancelled'
+        ? `Cancelled${item.cancellationReason ? `: ${item.cancellationReason}` : ''}${item.cancelledAt ? ` · ${new Date(item.cancelledAt).toLocaleString()}` : ''}`
+        : null;
+      const canCancel = item.status === 'requested' || item.status === 'accepted';
       return <li key={item.id}>
         <span>{summary}</span>
         <br /><span>{saved}</span>
         <br /><span>{where}</span>
         {final && <><br /><strong>{final}</strong></>}
+        {cancelled && <><br /><span>{cancelled}</span></>}
+        {canCancel && <><br /><button type="button" onClick={() => cancel(item)} disabled={busy}>Cancel this request</button></>}
       </li>;
     })}</ul>}</div>}
   </section>;

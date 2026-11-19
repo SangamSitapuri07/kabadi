@@ -4,11 +4,12 @@ import { useState } from 'react';
 // Mirrors the collector bridge contract. Amounts are decimal strings so no
 // floating-point rupee conversion happens in the browser.
 type CollectorPickup = {
-  id:string; status:'requested'|'accepted'|'collected'; createdAt:string; estimatedGrams:number;
+  id:string; status:'requested'|'accepted'|'collected'|'cancelled'; createdAt:string; estimatedGrams:number;
   address:{name:string;addressLine:string;city:string;state:string;postalCode:string};
   categoryId:string; categoryName:string; rateId:string; paisePerKg:number; amountPaise:string;
   actualGrams:number|null; finalRateId:string|null; finalPaisePerKg:number|null;
   finalAmountPaise:string|null; collectedAt:string|null;
+  cancelledAt:string|null; cancellationReason:string|null; releasedAt:string|null;
 };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -21,7 +22,7 @@ function rupees(amountPaise: string): string {
 function parse(value: unknown): CollectorPickup | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const v = value as Record<string, unknown>;
-  if (!uuid.test(String(v.id ?? '')) || !['requested','accepted','collected'].includes(String(v.status)) ||
+  if (!uuid.test(String(v.id ?? '')) || !['requested','accepted','collected','cancelled'].includes(String(v.status)) ||
       typeof v.createdAt !== 'string' || !Number.isInteger(v.estimatedGrams) ||
       !uuid.test(String(v.categoryId ?? '')) || !uuid.test(String(v.rateId ?? '')) ||
       typeof v.categoryName !== 'string' || !Number.isInteger(v.paisePerKg) ||
@@ -46,6 +47,9 @@ function parse(value: unknown): CollectorPickup | null {
     finalPaisePerKg: (v.finalPaisePerKg as number | null) ?? null,
     finalAmountPaise: (v.finalAmountPaise as string | null) ?? null,
     collectedAt: (v.collectedAt as string | null) ?? null,
+    cancelledAt: (v.cancelledAt as string | null) ?? null,
+    cancellationReason: (v.cancellationReason as string | null) ?? null,
+    releasedAt: (v.releasedAt as string | null) ?? null,
   };
 }
 
@@ -78,8 +82,9 @@ export function CollectorQueue({ disabled }: { disabled: boolean }) {
     finally { setBusy(false); }
   }
 
-  async function act(id: string, action: 'accept'|'collect') {
-    const payload = action === 'accept' ? {} : { actualGrams: Number(grams[id]) };
+  async function act(id: string, action: 'accept'|'collect'|'release') {
+    if (action === 'release' && !confirm('Release this request back to the open queue? It stops being yours and another collector can take it.')) return;
+    const payload = action === 'collect' ? { actualGrams: Number(grams[id]) } : {};
     if (action === 'collect') {
       const value = Number(grams[id]);
       if (!Number.isInteger(value) || value < 1 || value > 10000000) {
@@ -94,6 +99,9 @@ export function CollectorQueue({ disabled }: { disabled: boolean }) {
       });
       const json = await response.json();
       const code = json?.error?.code;
+      if (response.status === 200 && action === 'release') {
+        await load('open', 'Request released. It is back in the open queue for any collector.'); return;
+      }
       if (response.status === 200 && action === 'accept') {
         await load('mine', 'Request accepted. Record the weight when you collect it.'); return;
       }
@@ -107,6 +115,9 @@ export function CollectorQueue({ disabled }: { disabled: boolean }) {
       if (response.status === 409 && code === 'NOT_ACCEPTED') { setMessage('Accept the request before recording a collection.'); return; }
       if (response.status === 409 && code === 'NO_RATE') { setMessage('No rate is in force for this category, so it cannot be settled.'); return; }
       if (response.status === 409 && code === 'LEGACY_REQUEST') { setMessage('Older free-text requests cannot be priced.'); return; }
+      if (response.status === 409 && code === 'OWN_REQUEST') { setMessage('You cannot accept your own request; another collector has to take it.'); return; }
+      if (response.status === 409 && code === 'REQUEST_CANCELLED') { setMessage('The customer cancelled this request. Nothing more to do.'); return; }
+      if (response.status === 409 && code === 'NOT_YOUR_CLAIM') { setMessage('Another collector now holds this request. Refresh your queue.'); return; }
       if (response.status === 403) { setMessage('This account does not have collector access.'); return; }
       if (response.status === 401) { setMessage('Your sign-in could not be confirmed.'); return; }
       if (response.status === 404) { setMessage('That request no longer exists. Refresh the queue.'); return; }
@@ -116,7 +127,11 @@ export function CollectorQueue({ disabled }: { disabled: boolean }) {
     finally { setBusy(false); }
   }
 
-  const shown = items === null ? null : items.filter(p => view === 'open' ? p.status === 'requested' : p.status !== 'requested');
+  // Cancelled claims are not work for this collector any more; they are shown
+  // only so a request does not vanish without explanation.
+  const shown = items === null ? null : items.filter(p => view === 'open'
+    ? p.status === 'requested'
+    : p.status === 'accepted' || p.status === 'collected' || p.status === 'cancelled');
 
   return <section className="collector-queue">
     <h2>Collector queue</h2>
@@ -138,6 +153,7 @@ export function CollectorQueue({ disabled }: { disabled: boolean }) {
             <button type="button" onClick={() => act(item.id, 'accept')} disabled={disabled || busy}>Accept this request</button>
           </div>}
           {item.status === 'accepted' && <div>
+            <button type="button" onClick={() => act(item.id, 'release')} disabled={disabled || busy}>Release this request</button>
             <label>Actual weight in grams
               <input type="number" min="1" max="10000000" step="1" value={grams[item.id] ?? ''} autoComplete="off"
                 onChange={e => setGrams(g => ({ ...g, [item.id]: e.target.value }))} />

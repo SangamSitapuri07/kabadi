@@ -27,7 +27,7 @@ export type PickupEstimate = {
 // have no estimate. They are listed so history is not silently dropped.
 export type Pickup = {
   id: string;
-  status: 'requested' | 'accepted' | 'collected';
+  status: 'requested' | 'accepted' | 'collected' | 'cancelled';
   createdAt: string;
   address: CustomerDetails;
   estimatedGrams: number;
@@ -44,7 +44,19 @@ export type Pickup = {
   finalPaisePerKg: number | null;
   finalAmountPaise: string | null;
   collectedAt: string | null;
+  // Cancellation is terminal. A cancelled request keeps whatever estimate or
+  // settlement it already had; nothing is erased or refunded.
+  cancelledAt: string | null;
+  cancellationReason: string | null;
+  // Set when a collector gives the request back; the row returns to 'requested'.
+  releasedAt: string | null;
 };
+// Cancelling is the customer's own decision on their own row. A collected or
+// already-cancelled request is terminal and cannot be cancelled again.
+export type CancelOutcome =
+  | { outcome: 'cancelled' }
+  | { outcome: 'not-found' | 'already-cancelled' | 'already-collected' };
+
 export type CreatePickupResult =
   | { outcome: 'created'; estimate: PickupEstimate }
   | { outcome: 'replayed'; estimate: PickupEstimate }
@@ -64,7 +76,7 @@ export function parsePickup(input: unknown): PickupInput | null {
 // place, keeping existing free-text requests valid. Never run at startup.
 export type PickupMigrationReport = {
   action: 'created' | 'upgraded' | 'unchanged';
-  schemaVersion: 3;
+  schemaVersion: 4;
   fromVersion: number;
   // Requests created before pricing existed. They survive untouched but carry
   // no estimate, so the operator must know how many there are.
@@ -89,7 +101,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       const marker = await c.query<{ marker: string | null }>("SELECT to_regclass('kabadi_pickup.schema_version')::text AS marker");
       if (!marker.rows[0]?.marker) throw Error('Unrecognized pickup schema');
       const versions = await c.query<{ version: number }>('SELECT version FROM kabadi_pickup.schema_version');
-      if (versions.rows.length !== 1 || ![1, 2, 3].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
+      if (versions.rows.length !== 1 || ![1, 2, 3, 4].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
       currentVersion = versions.rows[0]!.version;
     }
     // Remember where we started so the report can describe the real change
@@ -97,7 +109,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
     const startingVersion = currentVersion;
     if (currentVersion === 0) {
       await c.query('CREATE SCHEMA kabadi_pickup');
-      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 3))');
+      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 4))');
       await c.query(`CREATE TABLE kabadi_pickup.requests (
         id uuid PRIMARY KEY, user_id text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
         request_key uuid NOT NULL, material text CHECK (material IS NULL OR char_length(material) BETWEEN 1 AND 100),
@@ -106,7 +118,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
         paise_per_kg integer CHECK (paise_per_kg BETWEEN 0 AND 1000000000),
         amount_paise bigint CHECK (amount_paise >= 0),
         estimated_grams integer NOT NULL CHECK (estimated_grams BETWEEN 1 AND 10000000),
-        status text NOT NULL DEFAULT 'requested' CHECK (status IN ('requested','accepted','collected')),
+        status text NOT NULL DEFAULT 'requested' CHECK (status IN ('requested','accepted','collected','cancelled')),
         collector_id text REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
         accepted_at timestamptz,
         collected_at timestamptz,
@@ -114,6 +126,9 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
         final_rate_id uuid REFERENCES kabadi_catalog.rates(id) ON DELETE RESTRICT,
         final_paise_per_kg integer CHECK (final_paise_per_kg BETWEEN 0 AND 1000000000),
         final_amount_paise bigint CHECK (final_amount_paise >= 0),
+        cancelled_at timestamptz,
+        cancellation_reason text CHECK (cancellation_reason IS NULL OR char_length(cancellation_reason) BETWEEN 1 AND 200),
+        released_at timestamptz,
         name text NOT NULL, address_line text NOT NULL, city text NOT NULL, state text NOT NULL, postal_code text NOT NULL,
         created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (user_id, request_key),
         -- Lifecycle and settlement must agree: an accepted request has a
@@ -121,7 +136,10 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
         CONSTRAINT pickup_lifecycle CHECK (
           (status = 'requested' AND collector_id IS NULL AND accepted_at IS NULL AND collected_at IS NULL AND actual_grams IS NULL AND final_rate_id IS NULL AND final_paise_per_kg IS NULL AND final_amount_paise IS NULL)
           OR (status = 'accepted' AND collector_id IS NOT NULL AND accepted_at IS NOT NULL AND collected_at IS NULL AND actual_grams IS NULL AND final_rate_id IS NULL AND final_paise_per_kg IS NULL AND final_amount_paise IS NULL)
-          OR (status = 'collected' AND collector_id IS NOT NULL AND accepted_at IS NOT NULL AND collected_at IS NOT NULL AND actual_grams IS NOT NULL AND final_rate_id IS NOT NULL AND final_paise_per_kg IS NOT NULL AND final_amount_paise IS NOT NULL)
+          OR (status = 'collected' AND collector_id IS NOT NULL AND accepted_at IS NOT NULL AND collected_at IS NOT NULL AND actual_grams IS NOT NULL AND final_rate_id IS NOT NULL AND final_paise_per_kg IS NOT NULL AND final_amount_paise IS NOT NULL AND cancelled_at IS NULL)
+          -- Cancelled rows are terminal and never settle; the collector and the
+          -- existing estimate are kept so history stays readable.
+          OR (status = 'cancelled' AND cancelled_at IS NOT NULL AND collected_at IS NULL AND actual_grams IS NULL AND final_rate_id IS NULL AND final_paise_per_kg IS NULL AND final_amount_paise IS NULL)
         ),
         CONSTRAINT pickup_item_shape CHECK (
           (category_id IS NULL AND category_name IS NULL AND rate_id IS NULL AND paise_per_kg IS NULL AND amount_paise IS NULL AND material IS NOT NULL)
@@ -131,7 +149,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       await c.query('CREATE INDEX ON kabadi_pickup.requests (user_id, created_at DESC, id DESC)');
       await c.query("CREATE INDEX pickup_open ON kabadi_pickup.requests (created_at) WHERE status='requested' AND category_id IS NOT NULL");
       await c.query("CREATE INDEX pickup_collector ON kabadi_pickup.requests (collector_id, status)");
-      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (3)');
+      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (4)');
     }
     if (currentVersion === 1) {
       // Upgrade in place: existing rows keep material and gain no estimate.
@@ -176,11 +194,37 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 3)');
       currentVersion = 3;
     }
+    if (currentVersion === 3) {
+      // Cancellation is terminal and never settles. Releasing a claim is not a
+      // status change: the row goes back to 'requested' with no collector, and
+      // released_at records that it was once claimed.
+      await c.query('ALTER TABLE kabadi_pickup.requests DROP CONSTRAINT IF EXISTS requests_status_check');
+      await c.query(`ALTER TABLE kabadi_pickup.requests ADD CONSTRAINT requests_status_check CHECK (status IN ('requested','accepted','collected','cancelled'))`);
+      await c.query(`ALTER TABLE kabadi_pickup.requests
+        ADD COLUMN cancelled_at timestamptz,
+        ADD COLUMN cancellation_reason text CHECK (cancellation_reason IS NULL OR char_length(cancellation_reason) BETWEEN 1 AND 200),
+        ADD COLUMN released_at timestamptz`);
+      await c.query('ALTER TABLE kabadi_pickup.requests DROP CONSTRAINT IF EXISTS pickup_lifecycle');
+      await c.query(`ALTER TABLE kabadi_pickup.requests ADD CONSTRAINT pickup_lifecycle CHECK (
+          (status = 'requested' AND collector_id IS NULL AND accepted_at IS NULL AND collected_at IS NULL AND actual_grams IS NULL AND final_rate_id IS NULL AND final_paise_per_kg IS NULL AND final_amount_paise IS NULL AND cancelled_at IS NULL)
+          OR (status = 'accepted' AND collector_id IS NOT NULL AND accepted_at IS NOT NULL AND collected_at IS NULL AND actual_grams IS NULL AND final_rate_id IS NULL AND final_paise_per_kg IS NULL AND final_amount_paise IS NULL AND cancelled_at IS NULL)
+          OR (status = 'collected' AND collector_id IS NOT NULL AND accepted_at IS NOT NULL AND collected_at IS NOT NULL AND actual_grams IS NOT NULL AND final_rate_id IS NOT NULL AND final_paise_per_kg IS NOT NULL AND final_amount_paise IS NOT NULL AND cancelled_at IS NULL)
+          OR (status = 'cancelled' AND cancelled_at IS NOT NULL AND collected_at IS NULL AND actual_grams IS NULL AND final_rate_id IS NULL AND final_paise_per_kg IS NULL AND final_amount_paise IS NULL)
+        )`);
+      // A cancellation reason is only meaningful on a cancelled row.
+      await c.query(`ALTER TABLE kabadi_pickup.requests ADD CONSTRAINT pickup_cancel_reason CHECK (
+          (status = 'cancelled') OR (cancellation_reason IS NULL))`);
+      await c.query('ALTER TABLE kabadi_pickup.schema_version DROP CONSTRAINT IF EXISTS schema_version_version_check');
+      await c.query('UPDATE kabadi_pickup.schema_version SET version = 4');
+      await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 4)');
+      currentVersion = 4;
+    }
     // The version row is a claim; verify the columns it promises. Without this a
     // half-applied upgrade looks identical to a finished one and the migration
     // would cheerfully report "nothing changed" over a broken table.
     const V3_COLUMNS = ['collector_id', 'accepted_at', 'collected_at', 'actual_grams',
-      'final_rate_id', 'final_paise_per_kg', 'final_amount_paise'];
+      'final_rate_id', 'final_paise_per_kg', 'final_amount_paise',
+      'cancelled_at', 'cancellation_reason', 'released_at'];
     const found = await c.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema='kabadi_pickup' AND table_name='requests' AND column_name = ANY($1::text[])`, [V3_COLUMNS]);
@@ -196,8 +240,8 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
        FROM kabadi_pickup.requests`);
     await c.query('COMMIT');
     return {
-      action: startingVersion === 0 ? 'created' : startingVersion < 3 ? 'upgraded' : 'unchanged',
-      schemaVersion: 3,
+      action: startingVersion === 0 ? 'created' : startingVersion < 4 ? 'upgraded' : 'unchanged',
+      schemaVersion: 4,
       fromVersion: startingVersion,
       legacyRequests: Number(counts.rows[0]?.legacy ?? 0),
     };
@@ -207,10 +251,11 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
 type StoredPickup = { category_id: string | null; estimated_grams: number; category_name: string | null; rate_id: string | null; paise_per_kg: number | null; amount_paise: string | null };
 export type StoredRequest = StoredPickup & {
   material: string | null;
-  id: string; status: 'requested' | 'accepted' | 'collected'; created_at: Date;
+  id: string; status: 'requested' | 'accepted' | 'collected' | 'cancelled'; created_at: Date;
   name: string; address_line: string; city: string; state: string; postal_code: string;
   actual_grams: number | null; final_rate_id: string | null; final_paise_per_kg: number | null;
   final_amount_paise: string | null; collected_at: Date | null;
+  cancelled_at: Date | null; cancellation_reason: string | null; released_at: Date | null;
 };
 
 export const toPickup = (r: StoredRequest): Pickup => ({
@@ -222,13 +267,17 @@ export const toPickup = (r: StoredRequest): Pickup => ({
   actualGrams: r.actual_grams, finalRateId: r.final_rate_id,
   finalPaisePerKg: r.final_paise_per_kg, finalAmountPaise: r.final_amount_paise,
   collectedAt: r.collected_at ? r.collected_at.toISOString() : null,
+  cancelledAt: r.cancelled_at ? r.cancelled_at.toISOString() : null,
+  cancellationReason: r.cancellation_reason,
+  releasedAt: r.released_at ? r.released_at.toISOString() : null,
 });
 
 // Columns every read returns, kept in one place so the two list queries and the
 // collector queries cannot drift apart.
 const PICKUP_COLUMNS = `id,status,created_at,name,address_line,city,state,postal_code,estimated_grams,material,
   category_id,category_name,rate_id,paise_per_kg,amount_paise::text AS amount_paise,
-  actual_grams,final_rate_id,final_paise_per_kg,final_amount_paise::text AS final_amount_paise,collected_at`;
+  actual_grams,final_rate_id,final_paise_per_kg,final_amount_paise::text AS final_amount_paise,collected_at,
+  cancelled_at,cancellation_reason,released_at`;
 
 export function createPickupStore(pool: pg.Pool) {
   async function execute<T>(userId: string, action: (c: pg.PoolClient) => Promise<T>): Promise<T | 'forbidden'> {
@@ -319,6 +368,29 @@ export function createPickupStore(pool: pg.Pool) {
         return rows.rows.map(toPickup);
       });
     },
+    // Only the owning customer can cancel, and only before collection. The
+    // conditional UPDATE makes the terminal state race-safe: a collection
+    // finishing at the same moment wins, and the cancel reports that plainly.
+    async cancel(userId: string, requestId: string, reason: string | null): Promise<CancelOutcome | 'forbidden'> {
+      if (typeof requestId !== 'string' || !UUID_V4.test(requestId)) throw Error('Invalid request id');
+      return execute(userId, async c => {
+        const updated = await c.query(
+          `UPDATE kabadi_pickup.requests
+             SET status='cancelled', cancelled_at=now(), cancellation_reason=$3,
+                 collector_id=NULL, accepted_at=NULL
+           WHERE id=$1 AND user_id=$2 AND status IN ('requested','accepted') RETURNING id`,
+          [requestId, userId, reason]);
+        if (updated.rowCount === 1) return { outcome: 'cancelled' as const };
+        const current = await c.query<{ status: string; owner: boolean }>(
+          'SELECT status, user_id=$2 AS owner FROM kabadi_pickup.requests WHERE id=$1', [requestId, userId]);
+        const found = current.rows[0];
+        // Someone else's request is reported as absent, never as forbidden: the
+        // existence of another customer's pickup is not this caller's business.
+        if (!found || !found.owner) return { outcome: 'not-found' as const };
+        if (found.status === 'cancelled') return { outcome: 'already-cancelled' as const };
+        return { outcome: 'already-collected' as const };
+      });
+    },
   };
 }
 
@@ -334,7 +406,9 @@ export function isMissingCollectorColumns(error: unknown): boolean {
 export type CollectorOutcome =
   | { outcome: 'accepted' }
   | { outcome: 'collected'; finalAmountPaise: string; finalPaisePerKg: number; finalRateId: string; actualGrams: number }
-  | { outcome: 'not-found' | 'already-accepted' | 'not-accepted' | 'already-collected' | 'no-rate' | 'legacy-request' };
+  | { outcome: 'released' }
+  | { outcome: 'not-found' | 'already-accepted' | 'not-accepted' | 'already-collected'
+      | 'no-rate' | 'legacy-request' | 'own-request' | 'cancelled' | 'not-owner' };
 
 // Collector-side actions. Every method derives the actor from the session and
 // re-checks the collector grant inside the transaction; ownership of a request
@@ -377,18 +451,23 @@ export function createCollectorStore(pool: pg.Pool) {
     async accept(userId: string, requestId: string): Promise<CollectorOutcome | 'forbidden'> {
       if (typeof requestId !== 'string' || !UUID_V4.test(requestId)) throw Error('Invalid request id');
       return asCollector(userId, async c => {
+        // A collector must never take their own request: they would set the
+        // weight and receive the money at a price they chose to accept.
         const updated = await c.query(
           `UPDATE kabadi_pickup.requests SET status='accepted', collector_id=$2, accepted_at=now()
-           WHERE id=$1 AND status='requested' AND category_id IS NOT NULL RETURNING id`, [requestId, userId]);
+           WHERE id=$1 AND status='requested' AND category_id IS NOT NULL AND user_id <> $2 RETURNING id`,
+          [requestId, userId]);
         if (updated.rowCount === 1) return { outcome: 'accepted' as const };
-        const current = await c.query<{ status: string; category_id: string | null }>(
-          'SELECT status, category_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
+        const current = await c.query<{ status: string; category_id: string | null; user_id: string }>(
+          'SELECT status, category_id, user_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
         const found = current.rows[0];
         if (!found) return { outcome: 'not-found' as const };
         if (found.category_id === null) return { outcome: 'legacy-request' as const };
-        return found.status === 'requested'
-          ? { outcome: 'not-found' as const }
-          : { outcome: 'already-accepted' as const };
+        // Still 'requested' after the guarded UPDATE can only mean the ordering
+        // constraint held: the requester is this collector.
+        if (found.status === 'requested') return { outcome: 'own-request' as const };
+        if (found.status === 'cancelled') return { outcome: 'cancelled' as const };
+        return { outcome: 'already-accepted' as const };
       });
     },
     // Collection settles the request: the final rate is the newest rate already
@@ -402,6 +481,7 @@ export function createCollectorStore(pool: pg.Pool) {
           'SELECT status, collector_id, category_id FROM kabadi_pickup.requests WHERE id=$1 FOR UPDATE', [requestId]);
         const found = locked.rows[0];
         if (!found) return { outcome: 'not-found' as const };
+        if (found.status === 'cancelled') return { outcome: 'cancelled' as const };
         if (found.status === 'collected') return { outcome: 'already-collected' as const };
         if (found.status !== 'accepted' || found.collector_id !== userId) return { outcome: 'not-accepted' as const };
         if (found.category_id === null) return { outcome: 'legacy-request' as const };
@@ -421,6 +501,29 @@ export function createCollectorStore(pool: pg.Pool) {
         if (updated.rowCount !== 1) throw Error('Concurrent collection');
         return { outcome: 'collected' as const, finalAmountPaise: estimate.amountPaise,
           finalPaisePerKg: chosen.paise_per_kg, finalRateId: chosen.id, actualGrams: grams };
+      });
+    },
+    // Giving a claim back is not a cancellation: the customer still wants the
+    // pickup, so the row returns to the open queue. released_at keeps the fact
+    // that it was once claimed, which matters for dispute history.
+    async release(userId: string, requestId: string): Promise<CollectorOutcome | 'forbidden'> {
+      if (typeof requestId !== 'string' || !UUID_V4.test(requestId)) throw Error('Invalid request id');
+      return asCollector(userId, async c => {
+        const updated = await c.query(
+          `UPDATE kabadi_pickup.requests
+             SET status='requested', collector_id=NULL, accepted_at=NULL, released_at=now()
+           WHERE id=$1 AND status='accepted' AND collector_id=$2 RETURNING id`, [requestId, userId]);
+        if (updated.rowCount === 1) return { outcome: 'released' as const };
+        const current = await c.query<{ status: string; collector_id: string | null }>(
+          'SELECT status, collector_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
+        const found = current.rows[0];
+        if (!found) return { outcome: 'not-found' as const };
+        if (found.status === 'cancelled') return { outcome: 'cancelled' as const };
+        if (found.status === 'collected') return { outcome: 'already-collected' as const };
+        // 'requested' means someone released it or nobody claimed it; either way
+        // there is no claim of this collector's to give back.
+        if (found.status === 'requested') return { outcome: 'not-accepted' as const };
+        return { outcome: 'not-accepted' as const };
       });
     },
   };

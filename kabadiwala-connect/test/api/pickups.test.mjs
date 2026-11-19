@@ -87,7 +87,8 @@ test('pickup API uses session identity, returns the server estimate, and sanitiz
 test('pickup list separates priced requests from legacy free text and rejects malformed rows', async () => {
   const id = randomUUID();
   const address = {name:'Sample', addressLine:'12 Example', city:'Ludhiana', state:'Punjab', postalCode:'141001'};
-  const empty = { actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null };
+  const empty = { actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null,
+    cancelledAt:null, cancellationReason:null, releasedAt:null };
   const priced = { id, status:'requested', createdAt:'2026-11-18T17:00:00.000Z', address, estimatedGrams:500,
     material:null, categoryId, categoryName:'Paper', rateId:randomUUID(), paisePerKg:3245, amountPaise:'1623', ...empty };
   const legacy = { ...priced, categoryId:null, categoryName:null, rateId:null, paisePerKg:null, amountPaise:null, material:'Old paper' };
@@ -124,7 +125,8 @@ test('collector routes derive the actor from the session and map every state out
   const address = {name:'Sample', addressLine:'12 Example', city:'Ludhiana', state:'Punjab', postalCode:'141001'};
   const openRow = { id:requestId, status:'requested', createdAt:'2026-11-18T17:00:00.000Z', address, estimatedGrams:2500,
     material:null, categoryId, categoryName:'Paper', rateId:randomUUID(), paisePerKg:3245, amountPaise:'8113',
-    actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null };
+    actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null,
+    cancelledAt:null, cancellationReason:null, releasedAt:null };
   const called = [];
   let outcome={outcome:'accepted'}, rows=[openRow];
   const collector = {
@@ -206,7 +208,8 @@ test('collector list fails closed on a malformed or unsettled row', async () => 
   const address = {name:'Sample', addressLine:'12 Example', city:'Ludhiana', state:'Punjab', postalCode:'141001'};
   const base = { id:randomUUID(), status:'requested', createdAt:'2026-11-18T17:00:00.000Z', address, estimatedGrams:2500,
     material:null, categoryId, categoryName:'Paper', rateId:randomUUID(), paisePerKg:3245, amountPaise:'8113',
-    actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null };
+    actualGrams:null, finalRateId:null, finalPaisePerKg:null, finalAmountPaise:null, collectedAt:null,
+    cancelledAt:null, cancellationReason:null, releasedAt:null };
   const collected = {...base, status:'collected', actualGrams:2300, finalRateId:randomUUID(), finalPaisePerKg:3300,
     finalAmountPaise:'7590', collectedAt:'2026-11-20T10:00:00.000Z'};
   let rows=[collected];
@@ -239,11 +242,12 @@ test('collector list fails closed on a malformed or unsettled row', async () => 
 // ---- Schema migration ----------------------------------------------------
 // A recording fake client asserts the SQL the migration emits, so the v1 -> v3
 // chain is checked without a live database.
-test('pickup migration walks v1 to v3 in one run and reports the real starting version', async () => {
+test('pickup migration walks v1 to v4 in one run and reports the real starting version', async () => {
   const { migratePickups } = await import('../../apps/api/dist/pickups.js');
   const statements = [];
   const V3 = ['collector_id', 'accepted_at', 'collected_at', 'actual_grams',
-    'final_rate_id', 'final_paise_per_kg', 'final_amount_paise'];
+    'final_rate_id', 'final_paise_per_kg', 'final_amount_paise',
+    'cancelled_at', 'cancellation_reason', 'released_at'];
   // `columns` defaults to a table that really is at the claimed version, so the
   // verification pass is exercised rather than bypassed.
   // Any successful upgrade ends at v3, so the default fake models that end state;
@@ -269,7 +273,7 @@ test('pickup migration walks v1 to v3 in one run and reports the real starting v
   }
 
   const report = await migratePickups(fakePool(1));
-  assert.deepEqual(report, { action: 'upgraded', schemaVersion: 3, fromVersion: 1, legacyRequests: 1 });
+  assert.deepEqual(report, { action: 'upgraded', schemaVersion: 4, fromVersion: 1, legacyRequests: 1 });
   const all = statements.join('\n');
   // Both upgrade steps ran, in order, and each pinned its own version.
   assert.ok(all.indexOf('SET version = 2') < all.indexOf('ADD COLUMN collector_id'), 'v2 upgrade precedes v3');
@@ -279,28 +283,42 @@ test('pickup migration walks v1 to v3 in one run and reports the real starting v
   assert.ok(all.includes('CREATE INDEX pickup_open'));
   assert.ok(all.includes('CREATE INDEX pickup_collector'));
   assert.ok(all.includes('SET version = 3'));
+  // The cancellation step runs last and adds its own columns and checks.
+  assert.ok(all.indexOf('SET version = 3') < all.indexOf('ADD COLUMN cancelled_at'), 'v3 precedes v4');
+  assert.ok(all.includes("ADD CONSTRAINT requests_status_check CHECK (status IN ('requested','accepted','collected','cancelled'))"));
+  assert.ok(all.includes('ADD CONSTRAINT pickup_cancel_reason CHECK'));
+  assert.ok(all.includes('SET version = 4'));
   // Existing rows are never rewritten or deleted by the upgrade.
   assert.ok(!/DELETE FROM kabadi_pickup\.requests/i.test(all));
   assert.ok(!/UPDATE kabadi_pickup\.requests SET (material|status)/i.test(all));
 
-  // A v2 database takes only the second step and stays 'upgraded'.
+  // A v2 database takes the last two steps and stays 'upgraded'.
   statements.length = 0;
-  assert.deepEqual(await migratePickups(fakePool(2)), { action: 'upgraded', schemaVersion: 3, fromVersion: 2, legacyRequests: 1 });
+  assert.deepEqual(await migratePickups(fakePool(2)), { action: 'upgraded', schemaVersion: 4, fromVersion: 2, legacyRequests: 1 });
   const v2only = statements.join('\n');
   assert.ok(!v2only.includes('SET version = 2'));
   assert.ok(v2only.includes('ADD COLUMN collector_id'));
+  assert.ok(v2only.includes('ADD COLUMN cancelled_at'));
+
+  // A v3 database — the owner's current state — takes only the cancellation step.
+  statements.length = 0;
+  assert.deepEqual(await migratePickups(fakePool(3)), { action: 'upgraded', schemaVersion: 4, fromVersion: 3, legacyRequests: 1 });
+  const v3only = statements.join('\n');
+  assert.ok(!v3only.includes('ADD COLUMN collector_id'), 'v3 columns are not re-added');
+  assert.ok(v3only.includes('ADD COLUMN cancelled_at'));
+  assert.ok(v3only.includes('SET version = 4'));
 
   // A recorded version that the table does not honour is refused, not reported
   // as a successful no-op. This is the "already version 3" lie.
   statements.length = 0;
-  await assert.rejects(() => migratePickups(fakePool(3, ['collector_id', 'actual_grams'])),
-    /claims version 3 but is missing: accepted_at/);
+  await assert.rejects(() => migratePickups(fakePool(4, ['collector_id', 'actual_grams'])),
+    /claims version 4 but is missing: accepted_at/);
   const refused = statements.join('\n');
   assert.ok(!refused.includes('SET version = 3'), 'nothing may be written when verification fails');
 
   // A current database is reported as unchanged, and an unknown version fails.
-  assert.equal((await migratePickups(fakePool(3))).action, 'unchanged');
-  await assert.rejects(() => migratePickups(fakePool(4)), /Unsupported schema/);
+  assert.equal((await migratePickups(fakePool(4))).action, 'unchanged');
+  await assert.rejects(() => migratePickups(fakePool(5)), /Unsupported schema/);
 
   // A fresh schema is 'created' from version 0 and lands directly at 3.
   statements.length = 0;
@@ -318,10 +336,13 @@ test('pickup migration walks v1 to v3 in one run and reports the real starting v
       return { rows: [] };
     }, release: () => {},
   }) });
-  assert.deepEqual(fresh, { action: 'created', schemaVersion: 3, fromVersion: 0, legacyRequests: 0 });
+  assert.deepEqual(fresh, { action: 'created', schemaVersion: 4, fromVersion: 0, legacyRequests: 0 });
   const created = statements.join('\n');
-  assert.ok(created.includes('CHECK (version = 3)'));
-  assert.ok(created.includes('INSERT INTO kabadi_pickup.schema_version VALUES (3)'));
+  assert.ok(created.includes('CHECK (version = 4)'));
+  assert.ok(created.includes('INSERT INTO kabadi_pickup.schema_version VALUES (4)'));
+  // A fresh table defines the cancellation columns directly, not via ALTER.
+  assert.ok(created.includes('cancelled_at timestamptz'));
+  assert.ok(created.includes('released_at timestamptz'));
 });
 
 // A database still at schema v2 breaks the v3 column list. That must read as
@@ -355,4 +376,178 @@ test('an unmigrated database reports PICKUP_SCHEMA_OUTDATED instead of a vague o
     assert.equal(mutations.status, 503);
     assert.equal((await mutations.json()).error.code, 'PICKUP_SCHEMA_OUTDATED');
   } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
+// ---- Cancellation and release --------------------------------------------
+test('customer cancel is own-row only, optional reason, and terminal', async () => {
+  const requestId = randomUUID();
+  const called = [];
+  let outcome = { outcome: 'cancelled' };
+  const auth = { origin:'http://localhost:3000', handler:async()=>{}, resolveIdentity:async()=>({userId:'owner',cookies:[]}),
+    pickups:{ create:async()=>({outcome:'conflict'}), list:async()=>[],
+      cancel:async (id, rid, reason)=>{ called.push([id, rid, reason]); return outcome; } },
+    collector:{ open:async()=>[], mine:async()=>[], accept:async()=>({outcome:'accepted'}),
+      collect:async()=>({outcome:'accepted'}), release:async()=>({outcome:'released'}) } };
+  const server = createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+  try {
+    const url = `http://127.0.0.1:${server.address().port}/api/v1/customer/pickups/${requestId}/cancel`;
+    const post = (body, headers={}) => fetch(url, { method:'POST',
+      headers:{ origin:'http://localhost:3000', 'content-type':'application/json', ...headers }, body });
+    // No reason at all is the normal case: cancelling needs no justification.
+    let response = await post('{}');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { data: { cancelled: true } });
+    assert.deepEqual(called.pop(), ['owner', requestId, null]);
+    // A reason is optional, bounded, and trimmed by the same text rule.
+    response = await post(JSON.stringify({ reason: 'Found another collector' }));
+    assert.equal(response.status, 200);
+    assert.deepEqual(called.pop(), ['owner', requestId, 'Found another collector']);
+    for (const body of ['{"reason":""}', '{"reason":"   "}', `{"reason":"${'x'.repeat(201)}"}`,
+      '{"reason":"a","status":"collected"}', '{"collectorId":"x"}', '[]', 'null']) {
+      assert.equal((await post(body)).status, 400, `expected rejection: ${body.slice(0,60)}`);
+    }
+    assert.equal(called.length, 0, 'a rejected body never reaches the store');
+    // Guards match every other write.
+    assert.equal((await post('{}', { origin:'https://evil.example' })).status, 403);
+    assert.equal((await post('{}', { 'content-type':'text/plain' })).status, 415);
+    assert.equal((await fetch(url.replace(requestId, 'not-a-uuid'), { method:'POST',
+      headers:{ origin:'http://localhost:3000', 'content-type':'application/json' }, body:'{}' })).status, 400);
+
+    for (const [v, status, code] of [
+      [{outcome:'not-found'}, 404, 'REQUEST_NOT_FOUND'],
+      [{outcome:'already-cancelled'}, 409, 'ALREADY_CANCELLED'],
+      [{outcome:'already-collected'}, 409, 'ALREADY_COLLECTED'],
+    ]) {
+      outcome = v;
+      response = await post('{}');
+      assert.equal(response.status, status); assert.equal((await response.json()).error.code, code);
+    }
+    outcome = 'forbidden'; assert.equal((await post('{}')).status, 403);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
+test('collector release returns the claim to the open queue and is distinct from cancel', async () => {
+  const requestId = randomUUID();
+  const called = [];
+  let outcome = { outcome: 'released' };
+  const auth = { origin:'http://localhost:3000', handler:async()=>{}, resolveIdentity:async()=>({userId:'col-1',cookies:[]}),
+    pickups:{ create:async()=>({outcome:'conflict'}), list:async()=>[], cancel:async()=>({outcome:'cancelled'}) },
+    collector:{ open:async()=>[], mine:async()=>[], accept:async()=>({outcome:'accepted'}),
+      collect:async()=>({outcome:'accepted'}),
+      release:async (id, rid)=>{ called.push([id, rid]); return outcome; } } };
+  const server = createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+  try {
+    const url = `http://127.0.0.1:${server.address().port}/api/v1/collector/pickups/${requestId}/release`;
+    const post = (body='{}') => fetch(url, { method:'POST',
+      headers:{ origin:'http://localhost:3000', 'content-type':'application/json' }, body });
+    let response = await post();
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { data: { released: true } });
+    assert.deepEqual(called.pop(), ['col-1', requestId]);
+    // Release takes no body at all, so a weight cannot be smuggled in.
+    assert.equal((await post('{"actualGrams":2300}')).status, 400);
+    assert.equal(called.length, 0);
+    for (const [v, status, code] of [
+      [{outcome:'not-found'}, 404, 'REQUEST_NOT_FOUND'],
+      [{outcome:'not-accepted'}, 409, 'NOT_ACCEPTED'],
+      [{outcome:'already-collected'}, 409, 'ALREADY_COLLECTED'],
+      [{outcome:'cancelled'}, 409, 'REQUEST_CANCELLED'],
+    ]) {
+      outcome = v;
+      response = await post();
+      assert.equal(response.status, status); assert.equal((await response.json()).error.code, code);
+    }
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
+test('a collector cannot accept their own request and the UI is told why', async () => {
+  const requestId = randomUUID();
+  let outcome = { outcome: 'own-request' };
+  const auth = { origin:'http://localhost:3000', handler:async()=>{}, resolveIdentity:async()=>({userId:'both',cookies:[]}),
+    pickups:{ create:async()=>({outcome:'conflict'}), list:async()=>[], cancel:async()=>({outcome:'cancelled'}) },
+    collector:{ open:async()=>[], mine:async()=>[], accept:async()=>outcome, collect:async()=>outcome,
+      release:async()=>({outcome:'released'}) } };
+  const server = createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+  try {
+    const base = `http://127.0.0.1:${server.address().port}/api/v1/collector/pickups/${requestId}`;
+    const post = (path, body) => fetch(`${base}/${path}`, { method:'POST',
+      headers:{ origin:'http://localhost:3000', 'content-type':'application/json' }, body:JSON.stringify(body) });
+    let response = await post('accept', {});
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error.code, 'OWN_REQUEST');
+    // The same rule blocks a self-collection attempt.
+    outcome = { outcome: 'cancelled' };
+    response = await post('collect', { actualGrams: 2300 });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error.code, 'REQUEST_CANCELLED');
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
+// The store's guarantees are in its SQL, so assert on the statements a fake
+// client actually receives: a status the WHERE clause does not allow cannot be
+// updated, which is what makes "cancel loses to a collection" true.
+test('store SQL encodes ownership, terminal states and the self-accept guard', async () => {
+  const { createPickupStore, createCollectorStore } = await import('../../apps/api/dist/pickups.js');
+  function recordingPool(responder) {
+    const seen = [];
+    return { seen, pool: { connect: async () => ({
+      query: async (sql, params) => {
+        const text = typeof sql === 'string' ? sql.replace(/\s+/g,' ').trim() : '';
+        seen.push({ text, params });
+        return responder(text, params);
+      },
+      release: () => {},
+    }) } };
+  }
+  // A generic healthy responder: account active, collector grant present, and
+  // every UPDATE reports one affected row unless a scenario overrides it.
+  const healthy = text => {
+    if (text.startsWith('SELECT status FROM kabadi_authz.accounts')) return { rows: [{ status: 'active' }] };
+    if (text.includes('FROM kabadi_authz.role_grants')) return { rows: [{}], rowCount: 1 };
+    if (text.includes('FOR UPDATE')) return { rows: [{ status: 'accepted', collector_id: 'col-1', category_id: randomUUID() }] };
+    if (text.includes('FROM kabadi_catalog.rates')) return { rows: [{ id: randomUUID(), paise_per_kg: 3245 }] };
+    return { rows: [], rowCount: 1 };
+  };
+
+  const requestId = randomUUID();
+  const cancels = recordingPool(healthy);
+  await createPickupStore(cancels.pool).cancel('owner', requestId, 'no longer needed');
+  const cancelSql = cancels.seen.find(q => q.text.startsWith('UPDATE kabadi_pickup.requests'));
+  assert.ok(cancelSql, 'cancel issues an UPDATE');
+  // Ownership, a terminal-state whitelist, and the reason are all in the SQL.
+  assert.match(cancelSql.text, /WHERE id=\$1 AND user_id=\$2 AND status IN \('requested','accepted'\)/);
+  assert.match(cancelSql.text, /status='cancelled'/);
+  assert.match(cancelSql.text, /cancelled_at=now\(\)/);
+  assert.deepEqual(cancelSql.params, [requestId, 'owner', 'no longer needed']);
+  // A cancelled row drops its claim so the queue cannot show a phantom owner.
+  assert.match(cancelSql.text, /collector_id=NULL/);
+
+  const releases = recordingPool(healthy);
+  await createCollectorStore(releases.pool).release('col-1', requestId);
+  const releaseSql = releases.seen.find(q => q.text.startsWith('UPDATE kabadi_pickup.requests'));
+  assert.match(releaseSql.text, /SET status='requested', collector_id=NULL, accepted_at=NULL, released_at=now\(\)/);
+  assert.match(releaseSql.text, /WHERE id=\$1 AND status='accepted' AND collector_id=\$2/);
+
+  const accepts = recordingPool(healthy);
+  await createCollectorStore(accepts.pool).accept('col-1', requestId);
+  const acceptSql = accepts.seen.find(q => q.text.startsWith('UPDATE kabadi_pickup.requests'));
+  assert.match(acceptSql.text, /AND user_id <> \$2/, 'a collector may never claim their own request');
+  assert.match(acceptSql.text, /AND status='requested'/);
+
+  // A collector without the grant is refused before any row is touched.
+  const ungranted = recordingPool(text => {
+    if (text.startsWith('SELECT status FROM kabadi_authz.accounts')) return { rows: [{ status: 'active' }] };
+    if (text.includes('FROM kabadi_authz.role_grants')) return { rows: [], rowCount: 0 };
+    return { rows: [], rowCount: 0 };
+  });
+  assert.equal(await createCollectorStore(ungranted.pool).accept('col-2', requestId), 'forbidden');
+  assert.ok(!ungranted.seen.some(q => q.text.startsWith('UPDATE')), 'no write without a grant');
+
+  // A suspended account is refused even with the grant row present.
+  const suspended = recordingPool(text => {
+    if (text.startsWith('SELECT status FROM kabadi_authz.accounts')) return { rows: [{ status: 'suspended' }] };
+    if (text.includes('FROM kabadi_authz.role_grants')) return { rows: [{}], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  });
+  assert.equal(await createCollectorStore(suspended.pool).release('col-3', requestId), 'forbidden');
 });

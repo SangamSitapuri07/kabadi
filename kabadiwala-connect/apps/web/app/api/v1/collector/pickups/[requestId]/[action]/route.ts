@@ -32,11 +32,11 @@ export async function POST(request: Request, context: { params: Promise<{ reques
     if (!input || typeof input !== 'object' || Array.isArray(input)) return error(400, 'INVALID_BODY', 'Request is invalid.');
     const { requestId, action } = await context.params;
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) return error(400, 'INVALID_REQUEST_ID', 'Request id is invalid.');
-    if (action !== 'accept' && action !== 'collect') return error(404, 'NOT_FOUND', 'That collector action does not exist.');
+    if (action !== 'accept' && action !== 'collect' && action !== 'release') return error(404, 'NOT_FOUND', 'That collector action does not exist.');
 
     const keys = Object.keys(input as Record<string, unknown>);
     let body: string;
-    if (action === 'accept') {
+    if (action === 'accept' || action === 'release') {
       if (keys.length !== 0) return error(400, 'INVALID_BODY', 'An empty JSON object is required.');
       body = '{}';
     } else {
@@ -61,6 +61,9 @@ export async function POST(request: Request, context: { params: Promise<{ reques
       if (action === 'accept') {
         if (d.accepted !== true) return unavailable();
         payload = { data: { accepted: true } };
+      } else if (action === 'release') {
+        if (d.released !== true) return unavailable();
+        payload = { data: { released: true } };
       } else {
         if (d.collected !== true || !Number.isInteger(d.actualGrams) || !Number.isInteger(d.finalPaisePerKg) ||
           typeof d.finalAmountPaise !== 'string' || !/^\d{1,16}$/.test(d.finalAmountPaise) ||
@@ -82,6 +85,9 @@ export async function POST(request: Request, context: { params: Promise<{ reques
         ALREADY_COLLECTED: [409, 'This request was already collected.'],
         NO_RATE: [409, 'No rate is in force for that category.'],
         LEGACY_REQUEST: [409, 'Older free-text requests cannot be priced.'],
+        OWN_REQUEST: [409, 'A collector cannot accept their own request.'],
+        REQUEST_CANCELLED: [409, 'The customer cancelled this request.'],
+        NOT_YOUR_CLAIM: [409, 'Another collector holds this request.'],
         COLLECTOR_UNAVAILABLE: [503, 'Collector actions are unavailable.'],
         PICKUP_SCHEMA_OUTDATED: [503, 'Pickup storage needs its migration; the database is behind the application.'],
       };

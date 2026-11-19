@@ -32,14 +32,14 @@ function projectPickup(input: unknown) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('Invalid response');
   const v = input as Record<string, unknown>;
   const address = project(v.address, false);
-  if (!address || !uuid.test(String(v.id ?? '')) || !['requested', 'accepted', 'collected'].includes(String(v.status)) ||
+  if (!address || !uuid.test(String(v.id ?? '')) || !['requested', 'accepted', 'collected', 'cancelled'].includes(String(v.status)) ||
     typeof v.createdAt !== 'string' || Number.isNaN(Date.parse(v.createdAt)) ||
     !Number.isInteger(v.estimatedGrams) || (v.estimatedGrams as number) < 1 || (v.estimatedGrams as number) > 10000000 ||
     !uuid.test(String(v.categoryId ?? '')) || typeof v.categoryName !== 'string' || !v.categoryName.trim() ||
     Array.from(v.categoryName).length > 100 || /[\uD800-\uDFFF\u0000-\u001f\u007f-\u009f]/u.test(v.categoryName) ||
     !uuid.test(String(v.rateId ?? '')) || !Number.isInteger(v.paisePerKg) ||
     (v.paisePerKg as number) < 0 || (v.paisePerKg as number) > 1000000000 || !money(v.amountPaise)) throw Error('Invalid response');
-  const base = { id: v.id as string, status: v.status as 'requested' | 'accepted' | 'collected',
+  const base = { id: v.id as string, status: v.status as 'requested' | 'accepted' | 'collected' | 'cancelled',
     createdAt: v.createdAt, address, estimatedGrams: v.estimatedGrams as number,
     categoryId: v.categoryId as string, categoryName: v.categoryName as string, rateId: v.rateId as string,
     paisePerKg: v.paisePerKg as number, amountPaise: v.amountPaise as string };
