@@ -436,7 +436,13 @@ not run on production data. After `npm run build:api` the approved command is
 PowerShell users set and later remove the environment variable as for the other
 migrations. The `npm run migrate:*` scripts load `.env` themselves via
 `--env-file-if-exists`, so `npm run migrate:pickups` works too; a real
-environment variable always takes precedence over the file. No secrets or customer data should be shared in chat.
+environment variable always takes precedence over the file.
+
+To check the recorded version without changing anything:
+
+```sh
+node --env-file=.env -e "const pg=require('pg');const p=new pg.Pool({connectionString:process.env.DATABASE_URL});p.query('SELECT version FROM kabadi_pickup.schema_version').then(r=>console.log('pickups schema version:', r.rows[0].version)).finally(()=>p.end())"
+``` No secrets or customer data should be shared in chat.
 
 Run migrations **from this `kabadiwala-connect` directory**, because `.env` is
 resolved relative to the current directory and lives here. Running from

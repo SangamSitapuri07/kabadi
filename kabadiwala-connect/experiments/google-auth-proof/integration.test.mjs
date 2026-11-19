@@ -130,6 +130,19 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     await accountPool.query('CREATE SCHEMA kabadi_pickup');
     assert.equal(pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'}).status, 1);
     await accountPool.query('DROP SCHEMA kabadi_pickup');
+    // A migration run without configuration must name the cause, not blame the
+    // schema, and must never echo connection details.
+    {
+      const bare = spawnSync(process.execPath, ['apps/api/dist/migrate-pickups.js'], {
+        cwd:root, encoding:'utf8', timeout:20000,
+        env:{PATH:process.env.PATH, PICKUP_MIGRATION_CONFIRM:'yes'},
+      });
+      assert.equal(bare.status, 1);
+      assert.match(bare.stderr, /No configuration was loaded/);
+      assert.match(bare.stderr, /kabadiwala-connect directory/);
+      assert.match(bare.stderr, /No changes were committed/);
+      assert.ok(!bare.stderr.includes(databaseURL), 'the error must not leak the database URL');
+    }
     const freshPickup = pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'});
     assert.equal(freshPickup.status, 0);
     assert.match(freshPickup.stdout, /created at version 2/i, 'a fresh schema says so');
