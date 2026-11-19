@@ -438,11 +438,14 @@ migrations. The `npm run migrate:*` scripts load `.env` themselves via
 `--env-file-if-exists`, so `npm run migrate:pickups` works too; a real
 environment variable always takes precedence over the file.
 
-To check the recorded version without changing anything:
-
-```sh
-node --env-file=.env -e "const pg=require('pg');const p=new pg.Pool({connectionString:process.env.DATABASE_URL});p.query('SELECT version FROM kabadi_pickup.schema_version').then(r=>console.log('pickups schema version:', r.rows[0].version)).finally(()=>p.end())"
-``` No secrets or customer data should be shared in chat.
+To check the recorded version without changing anything, run
+`npm run pickups:version`. It prints the recorded version and whether a
+migration is still needed, so nobody has to infer from log wording whether a
+migration actually ran. A migration run always prints what it did — `created`,
+`upgraded from version 1 to version 2`, or `already version 2; nothing changed`
+— so a no-op can never be mistaken for an upgrade. If the printed text does not
+match this description, the built `dist` output is older than the source: run
+`npm run build:api` after pulling. No secrets or customer data should be shared in chat.
 
 Run migrations **from this `kabadiwala-connect` directory**, because `.env` is
 resolved relative to the current directory and lives here. Running from

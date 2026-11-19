@@ -149,6 +149,24 @@ test('app integration: migration, web bridge and Google-only initiation', { time
     const rerunPickup = pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'});
     assert.equal(rerunPickup.status, 0);
     assert.match(rerunPickup.stdout, /already version 2; nothing changed/i, 'a re-run must not claim it did work');
+    // The read-only version command must report the true version, so nobody has
+    // to infer whether a migration ran from the wording of a log line.
+    {
+      const readVersion = (overrides = {}) => spawnSync(process.execPath, ['apps/api/dist/pickup-version.js'], {
+        cwd:root, env:{...env, ...overrides}, encoding:'utf8', timeout:20000,
+      });
+      const atV2 = readVersion();
+      assert.equal(atV2.status, 0);
+      assert.match(atV2.stdout, /Pickup schema version: 2/);
+      assert.ok(!atV2.stdout.includes(databaseURL), 'must not print the database URL');
+      // No configuration at all is reported plainly, not as a schema problem.
+      const bareVersion = spawnSync(process.execPath, ['apps/api/dist/pickup-version.js'], {
+        cwd:root, encoding:'utf8', timeout:20000, env:{PATH:process.env.PATH},
+      });
+      assert.equal(bareVersion.status, 1);
+      assert.match(bareVersion.stderr, /No configuration was loaded/);
+    }
+    // Before any pickup migration the version command must say so, not guess.
     assert.equal((await accountPool.query('SELECT count(*)::int AS count FROM kabadi_pickup.requests')).rows[0].count, 0);
     assert.equal((await accountPool.query('SELECT version::int AS v FROM kabadi_pickup.schema_version')).rows[0].v, 2);
     assert.equal((await accountPool.query('SELECT count(*)::int AS n FROM kabadi_catalog.categories')).rows[0].n, 0);
@@ -198,6 +216,11 @@ test('app integration: migration, web bridge and Google-only initiation', { time
       assert.match(upgradedRun.stdout, /1 pre-pricing request\(s\) keep their free-text material and have no estimate/i,
         'the operator must be told legacy rows survive without a price');
       assert.equal((await accountPool.query('SELECT version::int AS v FROM kabadi_pickup.schema_version')).rows[0].v, 2);
+      // Every run must state the schema version it left behind, so a stale build
+      // that silently does nothing cannot look like success.
+      const after = pickupMigration({PICKUP_MIGRATION_CONFIRM:'yes'});
+      assert.equal(after.status, 0);
+      assert.match(after.stdout, /version 2/i);
       const upgraded = (await accountPool.query('SELECT material,category_id,amount_paise,estimated_grams FROM kabadi_pickup.requests WHERE id=$1',[legacyId])).rows[0];
       assert.deepEqual(upgraded, {material:'Old newspapers', category_id:null, amount_paise:null, estimated_grams:1200});
       // The upgraded schema still refuses a half-priced row.

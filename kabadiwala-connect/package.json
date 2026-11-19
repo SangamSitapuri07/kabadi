@@ -27,7 +27,8 @@
     "migrate:catalog": "npm run build:api && node --env-file-if-exists=.env apps/api/dist/migrate-catalog.js",
     "migrate:catalog-retries": "npm run build:api && node --env-file-if-exists=.env apps/api/dist/migrate-catalog-retries.js",
     "migrate:role-admin": "npm run build:api && node --env-file-if-exists=.env apps/api/dist/migrate-role-admin.js",
-    "roles:dev": "node apps/api/dist/role-admin-cli.js"
+    "roles:dev": "node apps/api/dist/role-admin-cli.js",
+    "pickups:version": "npm run build:api && node --env-file-if-exists=.env apps/api/dist/pickup-version.js"
   },
   "dependencies": {
     "better-auth": "1.7.24",
