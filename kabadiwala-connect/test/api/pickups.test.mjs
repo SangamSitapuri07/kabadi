@@ -20,7 +20,11 @@ test('pickup input requires a real category id and rejects any client pricing', 
     {...valid, estimatedGrams:10000001},
     {...valid, requestKey:'bad'},
     {...valid, categoryId:'bad'},
-    {...valid, categoryId:randomUUID().replace('-4','-1')}, // not a v4 UUID
+    // A well-formed UUID that is version 1, not version 4. Built explicitly:
+    // replace('-4', ...) hits the FIRST '-4' in the string, which is often in
+    // the first group, leaving a valid v4 UUID and making this case assert
+    // nothing (and fail ~6% of runs on a rejection that correctly never came).
+    {...valid, categoryId:`${randomUUID().slice(0,14)}1${randomUUID().slice(15)}`},
     {...valid, material:'Paper'},                     // legacy field must not be smuggled in
     // Client-supplied pricing must never be accepted.
     {...valid, paisePerKg:1},
@@ -320,13 +324,28 @@ test('pickup migration walks an old schema to the current version and reports th
   assert.ok(v2only.includes('ADD COLUMN collector_id'));
   assert.ok(v2only.includes('ADD COLUMN cancelled_at'));
 
-  // A v3 database — the owner's current state — takes only the cancellation step.
+  // A v3 database starts at the cancellation step and continues to current.
   statements.length = 0;
   assert.deepEqual(await migratePickups(fakePool(3)), { action: 'upgraded', schemaVersion: 8, fromVersion: 3, legacyRequests: 1 });
   const v3only = statements.join('\n');
   assert.ok(!v3only.includes('ADD COLUMN collector_id'), 'v3 columns are not re-added');
   assert.ok(v3only.includes('ADD COLUMN cancelled_at'));
   assert.ok(v3only.includes('SET version = 4'));
+
+  // A v7 database takes exactly one step: the retention marker. This is the
+  // upgrade the owner runs next, so it must not re-run anything older.
+  statements.length = 0;
+  assert.deepEqual(await migratePickups(fakePool(7)),
+    { action: 'upgraded', schemaVersion: 8, fromVersion: 7, legacyRequests: 1 });
+  const v7only = statements.join('\n');
+  assert.ok(v7only.includes('ADD COLUMN IF NOT EXISTS address_redacted_at timestamptz'));
+  assert.ok(v7only.includes('SET version = 8'));
+  // Nothing from an earlier upgrade may run again on an already-current table.
+  for (const older of ['ADD COLUMN collector_id', 'ADD COLUMN cancelled_at',
+    'CREATE TABLE IF NOT EXISTS kabadi_pickup.payouts', 'CREATE TABLE IF NOT EXISTS kabadi_pickup.notifications']) {
+    assert.ok(!v7only.includes(older), `v7 must not re-run: ${older}`);
+  }
+  assert.ok(!v7only.includes('SET version = 7'));
 
   // A recorded version that the table does not honour is refused, not reported
   // as a successful no-op. This is the "already version 3" lie.
@@ -341,7 +360,7 @@ test('pickup migration walks an old schema to the current version and reports th
   // One past the newest version this build knows how to read.
   await assert.rejects(() => migratePickups(fakePool(9)), /Unsupported schema/);
 
-  // A fresh schema is 'created' from version 0 and lands directly at 3.
+  // A fresh schema is 'created' from version 0 and lands directly at current.
   statements.length = 0;
   const fresh = await migratePickups({ connect: async () => ({
     query: async (sql, params) => {
