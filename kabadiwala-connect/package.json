@@ -29,7 +29,8 @@
     "test:unit": "node --test test/*.test.mjs test/web/*.test.mjs",
     "test:web:smoke": "node --test test/web-smoke.mjs",
     "typecheck:api": "tsc --noEmit -p apps/api/tsconfig.json",
-    "typecheck:web": "tsc --noEmit -p apps/web/tsconfig.json"
+    "typecheck:web": "tsc --noEmit -p apps/web/tsconfig.json",
+    "migrate:lots": "npm run build:api && node --env-file-if-exists=.env apps/api/dist/migrate-lots.js"
   },
   "dependencies": {
     "better-auth": "1.7.24",

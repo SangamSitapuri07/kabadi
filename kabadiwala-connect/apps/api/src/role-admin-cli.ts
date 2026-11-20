@@ -14,7 +14,7 @@ function describeEmailProblem(input: string | undefined): string | null {
   return 'The email is not a valid address. Use the bare address, e.g. "name@example.com", with quotes and no extra text.';
 }
 function describeRoleProblem(input: string | undefined): string | null {
-  if (input === undefined) return `Missing role argument. Use one of: customer, collector, admin.`;
+  if (input === undefined) return `Missing role argument. Use one of: customer, collector, shop, mandi, recycler, admin.`;
   return normalizeRole(input) ? null : `Invalid role "${input}". Use exactly: customer, collector, or admin.`;
 }
 function describeReasonProblem(input: string | undefined): string | null {

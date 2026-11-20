@@ -77,3 +77,24 @@ footer { color: #71877a; font-size: .8rem; padding: 25px 0; border-top: 1px soli
 .notification-inbox li { margin: 10px 0; overflow-wrap: anywhere; }
 .notification-inbox li.unread { font-weight: 700; }
 .notification-inbox li.unread::before { content: '● '; color: #21815b; }
+
+/* The upward chain: shop, mandi and recycler all sit on this one board. */
+.lot-board { margin-top: 20px; padding-top: 16px; border-top: 1px solid #dbe5df; color: #33493d; max-width: 560px; }
+.lot-board h2 { font-size: 1rem; margin: 0 0 4px; color: #24402f; }
+.lot-note { margin: 0 0 12px; color: #536a5e; font-size: .875rem; line-height: 1.5; }
+.lot-list { list-style: none; margin: 0; padding: 0; }
+.lot-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid #eef3f0; }
+.lot-list li > div:first-child { display: flex; flex-direction: column; gap: 2px; }
+.lot-list li span { color: #536a5e; font-size: .8rem; }
+.lot-origin { font-style: italic; }
+.lot-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.lot-sell, .lot-history { margin-top: 14px; padding: 12px; background: #f4f8f5; border-radius: 6px; font-size: .875rem; }
+.lot-sell h3, .lot-history h3 { font-size: .9rem; margin: 0 0 6px; color: #24402f; }
+.lot-sell label { display: block; margin: 8px 0; font-size: .8rem; color: #536a5e; }
+.lot-sell input { display: block; width: 100%; max-width: 200px; margin-top: 3px; padding: 6px 8px; border: 1px solid #c9d6cf; border-radius: 4px; font-size: .9rem; }
+.lot-preview { margin: 8px 0; font-weight: 700; color: #294f3d; }
+.lot-sell fieldset { border: 0; padding: 0; margin: 10px 0 0; display: flex; gap: 8px; }
+.lot-history ol { margin: 0; padding-left: 20px; }
+.lot-history li { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 4px 0; }
+.lot-history li span { color: #4a6155; font-size: .8rem; }
+.lot-history button { margin-top: 8px; }

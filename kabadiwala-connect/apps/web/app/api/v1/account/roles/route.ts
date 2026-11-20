@@ -1,11 +1,11 @@
-// Same-origin read bridge for the caller's own roles. Only three values may come
-// back, and anything else is dropped rather than trusted: which panels appear is
+// Same-origin read bridge for the caller's own roles. Only the six chain roles
+// may come back, and anything else is dropped rather than trusted: which panels appear is
 // a display hint, while every route still enforces its own grant.
 export const dynamic = 'force-dynamic';
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });
 const unavailable = () => error(503, 'ACCOUNT_UNAVAILABLE', 'Account details are unavailable.');
-const KNOWN = ['customer', 'collector', 'admin'];
+const KNOWN = ['customer', 'collector', 'shop', 'mandi', 'recycler', 'admin'];
 
 export async function GET(request: Request) {
   try {

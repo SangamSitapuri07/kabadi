@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
+import type { Role } from './account-store.js';
 
 // Development-only local operator tooling for privileged role grants.
 // There is deliberately no HTTP or browser endpoint here: a signed-in person
@@ -18,7 +19,10 @@ export const REASONS_MAX = 200;
 // Only the roles the application actually understands. 'admin' is deliberately
 // included because this tool exists to bootstrap it, but nothing in the web or
 // API surface can call this module.
-const ROLE = /^(customer|collector|admin)$/;
+// Every role the chain defines. Kept as a regex so the anonymous group is
+// exactly the set account-store exports; a role added there must be added here,
+// and the role_grants CHECK constraint is the third place that agrees.
+const ROLE = /^(customer|collector|shop|mandi|recycler|admin)$/;
 
 export function normalizeEmail(input: unknown): string | null {
   if (typeof input !== 'string') return null;
@@ -48,8 +52,8 @@ export function normalizeReason(input: unknown): string | null {
   return value;
 }
 
-export function normalizeRole(input: unknown): 'customer' | 'collector' | 'admin' | null {
-  return typeof input === 'string' && ROLE.test(input) ? input as 'customer' | 'collector' | 'admin' : null;
+export function normalizeRole(input: unknown): Role | null {
+  return typeof input === 'string' && ROLE.test(input) ? input as Role : null;
 }
 
 // A separate, explicit schema for local administration evidence. It never
@@ -80,7 +84,7 @@ export async function migrateRoleAdmin(pool: pg.Pool): Promise<void> {
         id uuid PRIMARY KEY,
         user_id text NOT NULL,
         email text NOT NULL,
-        role text NOT NULL CHECK (role IN ('customer', 'collector', 'admin')),
+        role text NOT NULL CHECK (role IN ('customer', 'collector', 'shop', 'mandi', 'recycler', 'admin')),
         action text NOT NULL CHECK (action IN ('grant', 'revoke')),
         reason text NOT NULL CHECK (char_length(reason) BETWEEN 10 AND 200),
         changed_at timestamptz NOT NULL DEFAULT now()
@@ -93,8 +97,8 @@ export async function migrateRoleAdmin(pool: pg.Pool): Promise<void> {
 }
 
 export type RoleChangeResult =
-  | { outcome: 'changed'; userId: string; role: 'customer' | 'collector' | 'admin'; action: 'grant' | 'revoke' }
-  | { outcome: 'already-granted' | 'already-absent'; userId: string; role: 'customer' | 'collector' | 'admin' }
+  | { outcome: 'changed'; userId: string; role: Role; action: 'grant' | 'revoke' }
+  | { outcome: 'already-granted' | 'already-absent'; userId: string; role: Role }
   | { outcome: 'unknown-user' | 'no-account' | 'suspended-account' };
 
 // The caller must be a local operator; identity is resolved from the
@@ -106,7 +110,7 @@ export function createRoleAdmin(pool: pg.Pool) {
     return found.rows[0] ?? null;
   }
 
-  async function change(email: string, role: 'customer' | 'collector' | 'admin', reason: string, action: 'grant' | 'revoke'): Promise<RoleChangeResult> {
+  async function change(email: string, role: Role, reason: string, action: 'grant' | 'revoke'): Promise<RoleChangeResult> {
       const c = await pool.connect();
       try {
         await c.query('BEGIN');

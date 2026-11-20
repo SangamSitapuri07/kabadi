@@ -21,6 +21,14 @@ type AuthMount = {
     raiseDispute: (userId: string, requestId: string, reason: string) => Promise<DisputeOutcome | 'forbidden'>;
   };
   accountView?: { for: (actorId: string) => Promise<{ roles: string[]; active: boolean }> };
+  // The upward supply chain: lots held, sold up a tier, and their custody
+  // history. Absent when the separate lot migration has not run.
+  lots?: {
+    openFromPickup(actorId: string, raw: unknown): Promise<unknown>;
+    held(actorId: string): Promise<unknown>;
+    sell(actorId: string, raw: unknown): Promise<unknown>;
+    history(actorId: string, lotId: string): Promise<unknown>;
+  };
   notifications?: {
     list: (actorId: string) => Promise<{ items: unknown[]; unread: number } | 'forbidden'>;
     markRead: (actorId: string, id: string) => Promise<{ read: true } | 'not-found' | 'forbidden'>;
@@ -827,6 +835,87 @@ export function createApp(auth?: AuthMount) {
   app.use(express.json({ limit: '32kb' }));
 
   // Liveness only: this does not check a database or report service readiness.
+  // ---------- upward supply chain (tiers 1-4) ----------
+  app.use('/api/v1/lots', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  const lotsUnavailable = (res: express.Response) =>
+    res.status(503).json({ error: { code: 'LOTS_UNAVAILABLE', message: 'Lot storage is unavailable. Run the lot migration.' } });
+  const lotForbidden = (res: express.Response) =>
+    res.status(403).json({ error: { code: 'FORBIDDEN', message: 'An active supply-chain account is required.' } });
+  // Same outcome vocabulary as the pickup routes: one code per real reason, so a
+  // client never has to guess why a custody move was refused.
+  const lotConflicts: Record<string, [number, string, string]> = {
+    'not-found': [404, 'LOT_NOT_FOUND', 'No such lot.'],
+    'not-holder': [403, 'NOT_HOLDER', 'This account is not holding that lot.'],
+    'already-sold': [409, 'ALREADY_SOLD', 'That lot has already been sold.'],
+    'not-collector': [403, 'NOT_COLLECTOR', 'Only a collector can take custody of a collected pickup.'],
+    'pickup-not-collected': [409, 'PICKUP_NOT_COLLECTED', 'Only a collected pickup can become a lot.'],
+    'pickup-already-lotted': [409, 'PICKUP_ALREADY_LOTTED', 'That pickup is already in custody as a lot.'],
+    'not-a-chain-account': [403, 'NOT_A_CHAIN_ACCOUNT', 'This account holds no tier in the supply chain.'],
+    'no-next-tier': [409, 'NO_NEXT_TIER', 'A recycler is the end of the chain: there is nothing to sell upward to.'],
+    'buyer-not-next-tier': [409, 'NO_BUYER', 'No active account holds the next tier up.'],
+    'buyer-same-account': [409, 'SAME_ACCOUNT', 'An account cannot buy its own lot.'],
+    'invalid-weight': [400, 'INVALID_WEIGHT', 'That weight is more than the lot holds.'],
+  };
+  const lotOutcome = (res: express.Response, result: unknown): void => {
+    if (result === 'forbidden') { lotForbidden(res); return; }
+    if (result === 'not-found') { res.status(404).json({ error: { code: 'LOT_NOT_FOUND', message: 'No such lot.' } }); return; }
+    const outcome = (result as { outcome: string }).outcome;
+    if (outcome === 'opened' || outcome === 'sold') { res.json({ data: result }); return; }
+    const mapped = lotConflicts[outcome];
+    if (!mapped) { res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'That request was refused.' } }); return; }
+    res.status(mapped[0]).json({ error: { code: mapped[1], message: mapped[2] } });
+  };
+
+  app.get('/api/v1/lots', async (req, res) => {
+    if (!auth?.resolveIdentity || !auth.lots) { lotsUnavailable(res); return; }
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      if ([...new URL(req.url, 'http://x').searchParams.keys()].length) {
+        res.status(400).json({ error: { code: 'INVALID_QUERY', message: 'The lot list takes no parameters.' } }); return;
+      }
+      const rows = await auth.lots.held(id);
+      if (rows === 'forbidden') { lotForbidden(res); return; }
+      res.json({ data: { lots: rows } });
+    } catch { lotsUnavailable(res); }
+  });
+
+  app.get('/api/v1/lots/:lotId/history', async (req, res) => {
+    if (!auth?.resolveIdentity || !auth.lots) { lotsUnavailable(res); return; }
+    try {
+      const id = await detailsAuth(req, res); if (id === null) return;
+      const result = await auth.lots.history(id, req.params.lotId);
+      if (result === 'forbidden') { lotForbidden(res); return; }
+      if (result === 'not-found') { res.status(404).json({ error: { code: 'LOT_NOT_FOUND', message: 'No such lot.' } }); return; }
+      res.json({ data: { sales: result } });
+    } catch { lotsUnavailable(res); }
+  });
+
+  // Both mutations: exact origin, bounded body, session, then the store's own
+  // grant and state checks inside its transaction.
+  for (const [path, method] of [['/api/v1/lots', 'openFromPickup'], ['/api/v1/lots/sell', 'sell']] as const) {
+    app.post(path, (req, res, next) => {
+      if (!auth?.resolveIdentity || !auth.lots) { lotsUnavailable(res); return; }
+      if (req.get('origin') !== auth!.origin) { res.status(403).json({ error: { code: 'INVALID_ORIGIN', message: 'Request origin is not allowed.' } }); return; }
+      const length = req.get('content-length');
+      if (!length || !/^\d+$/.test(length) || Number(length) > 4096 || req.get('transfer-encoding')) {
+        res.status(413).json({ error: { code: 'INVALID_BODY', message: 'Request body is invalid or too large.' } }); return;
+      }
+      next();
+    }, express.json({ limit: '4kb', strict: true }), async (req, res) => {
+      try {
+        const id = await detailsAuth(req, res); if (id === null) return;
+        const store = auth!.lots!;
+        const result = await (method === 'sell' ? store.sell(id, req.body) : store.openFromPickup(id, req.body));
+        lotOutcome(res, result);
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('Invalid')) {
+          res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'That request was not valid.' } }); return;
+        }
+        lotsUnavailable(res);
+      }
+    });
+  }
+
   app.get('/api/v1/health/live', (_request, response) => {
     response.set('Cache-Control', 'no-store');
     response.json({ data: { status: 'alive', service: 'api' } });

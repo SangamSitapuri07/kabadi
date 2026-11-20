@@ -329,6 +329,12 @@ DEV_ROLE_TOOL_CONFIRM=yes node --env-file=.env apps/api/dist/role-admin-cli.js g
 DEV_ROLE_TOOL_CONFIRM=yes node --env-file=.env apps/api/dist/role-admin-cli.js revoke person@example.test admin "remove accidental grant"
 ```
 
+The same tool grants the chain tiers — `shop`, `mandi`, `recycler` — and the
+role it accepts is exactly the six the schema defines. Grant a **tier**, not a
+person's job title: a shop is an account, and the tier is what entitles it to
+buy from collectors and sell to a mandi. A mandi cannot exist usefully with no
+shop below it, so grant down-up when setting up a test chain.
+
 On PowerShell set and later remove the variables with `Remove-Item Env:...`. The
 tool refuses `NODE_ENV=production`, refuses unknown or suspended accounts, does
 not create accounts (the person must have signed in and completed customer
@@ -336,7 +342,9 @@ setup first), requires a 10–200 character reason, and is idempotent for repeat
 grants/revokes. Arguments are validated before any database connection, so a
 mistyped email is reported as a formatting problem rather than a schema failure.
 
-Use `list` to see active administrators and recorded changes, and `users` to see
+A tier name is validated before any database connection, so a mistyped `madi` is
+a formatting error rather than a silently absent grant. Use `list` to see active
+administrators and recorded changes, and `users` to see
 who has signed in (at most 50, addresses masked by the store itself, no user
 IDs). A user shown as “no account” has signed in but not completed customer
 setup, so a grant will report that instead of changing anything. Neither command
@@ -791,6 +799,112 @@ Migration **v9** adds the table. `pickups:version` checks for it physically, so 
 version row claiming 9 without the table is reported as drift rather than
 success.
 
+### The upward supply chain: shop, mandi and recycler (development API)
+
+Customers and collectors were the whole story; material left the system when a
+collector was paid. The chain now continues upward, and custody is tracked as
+**lots** rather than being inferred.
+
+| Tier | Holds material | Sells upward to |
+| --- | --- | --- |
+| `customer` | no | — |
+| `collector` | yes, from a pickup they collected | `shop` |
+| `shop` | yes | `mandi` |
+| `mandi` | yes | `recycler` |
+| `recycler` | yes | **nothing: terminal** |
+
+`admin` is outside the chain. An admin may open a lot on a collector's behalf,
+but holding is always the collector's, and an admin with no chain grant cannot
+sell anything: there is no tier for them to sell from.
+
+#### One lot, and what it means
+
+A lot is a quantity of one material in one account's custody, with a weight and
+a cost. It is opened in exactly two ways, and the two are mutually exclusive
+(`lot_origin` CHECK):
+
+- **from a collected pickup** — weight and cost are **copied from the pickup row**,
+  never from the request. A collector who could state their own tonnage could
+  invent stock, which is the same reason the pickup store recomputes the amount.
+  `source_pickup_id` is `UNIQUE`: one pickup becomes one lot, so a double click
+  cannot duplicate the platform's stock.
+- **from a sale** — the buyer's new lot records `parent_lot_id`, so every lot has
+  a traceable provenance back to a real pickup.
+
+#### The invariants a sale must not break
+
+Nothing here is enforced by a client, and each has a database constraint behind
+the application check:
+
+- **Weight is conserved.** A partial sale closes the lot being sold and opens a
+  **remainder lot** for the seller. The sold row is never mutated into a
+  different quantity, so a sale always refers to what was actually sold.
+- **One sale per lot.** `sales.lot_id` is `UNIQUE`, and the close is a
+  conditional `UPDATE … WHERE status='held' AND holder_id=$2`. A racing second
+  sale loses in the database, not in an application check.
+- **No self-sale.** `sale_distinct_parties` CHECK, plus the buyer query excludes
+  the seller.
+- **The buyer holds exactly the next tier.** A shop sells to a mandi, never to a
+  collector. The seller's tier is their highest chain grant.
+- **The recycler is terminal.** No onward lot is opened for them; the material is
+  processed, and a sale to them records `buyer_lot_id = NULL`.
+- **The seller learns the tier, not the buyer.** `sales.buyer_tier` is frozen at
+  sale time; a history that recalculated from mutable grants would rewrite the
+  past. Account ids are not returned.
+- **Money on somebody else's trade is not disclosed.** Lot history is a public
+  provenance trail — what weight moved, when, and which lot it became — but
+  `pricePaise` is `null` for a trade the reader was not a party to. A mandi
+  buying a shop's lot has no business learning what the shop paid the collector.
+
+#### Endpoints
+
+| Method | Path | Meaning |
+| --- | --- | --- |
+| `GET` | `/api/v1/lots` | lots this account is holding |
+| `GET` | `/api/v1/lots/:lotId/history` | the custody trail of one lot |
+| `POST` | `/api/v1/lots` | open a lot from a collected pickup (`{pickupId, material}`) |
+| `POST` | `/api/v1/lots/sell` | sell upward (`{lotId, grams, pricePaise}`) |
+
+The two writes take an exact Origin, a bounded body (4 KB), and a session, then
+resolve the actor's own grants **inside** the transaction. No route accepts a
+role, a holder, or a buyer from the caller. Same-origin web bridges rebuild each
+body from primitives, so a browser cannot smuggle in a weight, a cost, or an
+account id.
+
+Refusals are one code each, not a generic 500: `LOT_NOT_FOUND` (404);
+`NOT_HOLDER`, `NOT_COLLECTOR`, `NOT_A_CHAIN_ACCOUNT` (403); `ALREADY_SOLD`,
+`PICKUP_NOT_COLLECTED`, `PICKUP_ALREADY_LOTTED`, `NO_NEXT_TIER`, `NO_BUYER`,
+`SAME_ACCOUNT` (409); `INVALID_WEIGHT` (400); `LOTS_UNAVAILABLE` (503) when the
+lot schema has not been migrated. A lot that is not yours reads as
+**not found**, so the endpoint cannot be used to probe which lot ids exist.
+
+#### Running the lot migration
+
+`kabadi_lots` is a separate schema at **v1**, behind a guarded entry point:
+
+```
+LOTS_MIGRATION_CONFIRM=yes npm run migrate:lots
+```
+
+It takes an advisory lock, creates `lots` and `sales` with their CHECKs and
+indexes, and refuses to run twice. Until it has run, the four routes above answer
+`503 LOTS_UNAVAILABLE` rather than failing obscurely; every other feature keeps
+working, because nothing outside the chain reads these tables.
+
+**Buyer selection is a placeholder.** `sell` chooses the first active account
+holding the next tier, ordered by id. That is a deliberate stand-in for real
+matching (offers, bids, proximity). The **tier check is not a placeholder** and
+must not be loosened to make a demo work: it is what stops material moving
+backwards down the chain or sideways into an account that never bought it.
+
+#### UI
+
+Shop, mandi and recycler see one **stock board** — holdings, a sell form, and a
+custody history — because they hold the same capability. The recycler sees the
+board without a sell button and a sentence saying why. The board renders only
+when the account's own roles include that tier, and that is a display hint only:
+every route still checks its own grant.
+
 ### Customer self-onboarding (development API)
 
 `POST /api/v1/account/customer` accepts only an empty JSON object, requires an
@@ -896,8 +1010,12 @@ integration. Authentication is disabled by default and prohibited when the API's
 security and production readiness have not been established. Customer setup,
 profile, test pickup capture, a read/write development catalog, a local
 admin-grant tool, collector acceptance and collection-time settlement,
-cancellation and release, customer disputes with admin correction, and an
-**admin-recorded payout ledger** and an **in-app notification inbox** exist.
+cancellation and release, customer disputes with admin correction, an
+**admin-recorded payout ledger**, an **in-app notification inbox**, and the
+start of the **upward supply chain**: lots in custody sold one tier up from
+collector to shop to mandi to recycler, with weight conservation, one sale per
+lot, and the recycler as a terminal step. Chain trades record **custody, not
+money**: selling a lot moves no money either.
 There is still no dispatch, routing, OTP, or actual money movement, and notes are
 delivered **in-app only** — no email, SMS, WhatsApp or push message is sent, so
 nothing reaches anyone who is signed out. Recording a payout is bookkeeping, and

@@ -7,6 +7,7 @@ import { CollectorQueue } from './collector-queue';
 import { DisputeAdmin } from './dispute-admin';
 import { PayoutAdmin } from './payout-admin';
 import { NotificationInbox } from './notification-inbox';
+import { LotBoard } from './lot-board';
 
 type SessionStatus = 'checking' | 'signed-out' | 'signed-in' | 'unavailable';
 type Details = { name: string; addressLine: string; city: string; state: string; postalCode: string };
@@ -79,8 +80,12 @@ export function GoogleSignIn() {
       if (!response.ok) { setRoles([]); return; }
       const json = await response.json();
       const reported = json?.data?.roles;
+      // The same six roles the API knows. An unknown value is dropped rather
+      // than trusted: this list only decides which panels mount, and every route
+      // still checks its own grant.
       setRoles(Array.isArray(reported)
-        ? reported.filter((r: unknown) => typeof r === 'string' && ['customer', 'collector', 'admin'].includes(r))
+        ? reported.filter((r: unknown) => typeof r === 'string' &&
+            ['customer', 'collector', 'shop', 'mandi', 'recycler', 'admin'].includes(r))
         : []);
     } catch { setRoles([]); }
   }
@@ -247,6 +252,10 @@ export function GoogleSignIn() {
       </div>}
       {/* A collector sees the open queue and their own claims. */}
       {busy !== 'sign-out' && roles?.includes('collector') && <CollectorQueue disabled={busy !== null} />}
+      {/* The three upper tiers share one board: they hold the same capability,
+          and the tier above each is the server's decision, not the panel's. */}
+      {busy !== 'sign-out' && (['shop', 'mandi', 'recycler'] as const).map(tier =>
+        roles?.includes(tier) && <LotBoard key={tier} tier={tier} disabled={busy !== null} />)}
       {/* Admin tools only for admins. The catalogue is read/write for admins and
           read-only for everyone else, so it stays visible to all signed-in
           accounts, as before. */}

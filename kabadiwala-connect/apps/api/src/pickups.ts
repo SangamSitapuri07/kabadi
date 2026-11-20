@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { CustomerDetails } from './customer-details.js';
 import { calculateEstimate } from './catalog.js';
 import type { NotificationEvent } from './notifications.js';
+import { isRole } from './account-store.js';
 
 // Development request capture and collection. A collector can accept a request,
 // record the measured weight, and that fixes the final amount at the rate in
@@ -1174,7 +1175,9 @@ export function createAccountViewStore(pool: pg.Pool) {
       // A signed-in person with no application account yet is neither customer
       // nor collector: they get an empty role list and still count as signed in.
       if (!row) return { roles: [], active: false };
-      const roles = row.roles.filter(r => ['customer', 'collector', 'admin'].includes(r));
+      // Every role the chain defines, not a hardcoded trio: adding a tier must
+      // not silently hide it from the account that holds it.
+      const roles = row.roles.filter(isRole);
       return { roles, active: row.status === 'active' };
     },
   };

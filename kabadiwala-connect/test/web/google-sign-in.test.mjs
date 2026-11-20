@@ -62,6 +62,12 @@ const inboxCompiled = babel.transformSync(await readFile('apps/web/app/notificat
   presets:[[require('next/dist/compiled/babel/preset-typescript'),{allExtensions:true,isTSX:true}],[require('next/dist/compiled/babel/preset-react'),{runtime:'automatic'}]],
   plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
 });
+const lotBoardCompiled = babel.transformSync(await readFile('apps/web/app/lot-board.tsx','utf8'), {
+  filename:'lot-board.tsx',babelrc:false,configFile:false,
+  presets:[[require('next/dist/compiled/babel/preset-typescript'),{allExtensions:true,isTSX:true}],[require('next/dist/compiled/babel/preset-react'),{runtime:'automatic'}]],
+  plugins:[require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
+});
+await writeFile(join(temp,'lot-board.js'),lotBoardCompiled.code);
 await writeFile(join(temp,'notification-inbox.js'),inboxCompiled.code);
 const { GoogleSignIn } = createRequire(modulePath)(modulePath);
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
@@ -896,6 +902,42 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       // Admin-only panels present; the customer and collector panels are not.
       assert.doesNotMatch(text,/Set up a customer account/);
       assert.doesNotMatch(text,/Collector queue/);
+      await unmount();
+    });
+    await t.test('each upper tier sees the stock board, and only the recycler is told it is terminal', async () => {
+      for (const tier of ['shop', 'mandi', 'recycler']) {
+        await mount(async (url) => {
+          if (url.endsWith('/account/roles')) return json({data:{roles:[tier], active:true}});
+          if (url.endsWith('get-session')) return json({authenticated:true});
+          if (url.endsWith('/api/v1/lots')) return json({data:{lots:[{ id:'7c9e6679-7425-40de-944b-e07fc1f90ae7',
+            material:'Copper wire', grams:2300, costPaise:'7464', status:'held',
+            createdAt:'2026-11-01T00:00:00.000Z', parentLotId:null, sourcePickupId:null }]}});
+          return json({authenticated:true});
+        });
+        const text = document.body.textContent;
+        assert.match(text, /Stock in your custody/, tier);
+        assert.match(text, /Copper wire/, tier);
+        // 2300 grams is 2.3 kg, not a rounded 2 and not a mangled 2.300.
+        assert.match(text, /2\.3 kg/, tier);
+        assert.match(text, /₹74\.64/, tier);
+        if (tier === 'recycler') {
+          // The recycler has nothing above it: no sell button, and a sentence
+          // that says why rather than a control that could only fail.
+          assert.match(text, /end of the chain/, tier);
+          assert.equal([...document.querySelectorAll('button')].some(b => b.textContent === 'Sell'), false, tier);
+        } else {
+          assert.equal([...document.querySelectorAll('button')].some(b => b.textContent === 'Sell'), true, tier);
+        }
+        await unmount();
+      }
+    });
+    await t.test('a collector is not shown the upper-tier stock board', async () => {
+      await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['collector'], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        return json({authenticated:true});
+      });
+      assert.doesNotMatch(document.body.textContent, /Stock in your custody/);
       await unmount();
     });
     await t.test('a customer sees the customer panel and no admin tools', async () => {
