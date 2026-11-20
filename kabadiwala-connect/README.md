@@ -296,9 +296,12 @@ These routes do not provision administrators,
 run migrations or populate data. They now require the separately migrated retry
 schema; when it is missing, writes return unavailable rather than falling back
 to unsafe behavior. Read-only listings do not require the retry schema. The
-retry records reference actors and catalog rows with restricted deletion; a
-retention, cleanup, backup/restore and audit policy is not designed. Direct SQL
-can bypass these guarantees. This is not a production security audit.
+retry records reference actors and catalog rows with restricted deletion.
+Retention is now designed (see *Retention policy*), role changes are audited in
+`kabadi_admin.role_changes`, and a written review of the whole build is kept in
+`docs/security-review.md`. Backup/restore is still undesigned, retry cleanup is
+still undefined, and direct SQL can bypass these guarantees. This is not a
+production security audit.
 
 ### Development admin grants (local operator tool, no HTTP surface)
 
