@@ -266,12 +266,17 @@ test('pickup migration walks an old schema to the current version and reports th
   // verification pass is exercised rather than bypassed.
   // Any successful upgrade ends at v3, so the default fake models that end state;
   // the damaged case below overrides it explicitly.
-  function fakePool(version, columns = version >= 1 ? V3 : []) {
+  function fakePool(version, columns = version >= 1 ? V3 : [], overrides = {}) {
     return { connect: async () => ({
       query: async (sql, params) => {
         statements.push(typeof sql === 'string' ? sql.replace(/\s+/g, ' ').trim() : sql);
         if (sql.includes('pg_namespace')) return { rows: [{ exists: true }] };
-        if (sql.includes('to_regclass')) return { rows: [{ marker: 'kabadi_pickup.schema_version' }] };
+        if (sql.includes('to_regclass')) {
+          // A version row is only a claim: the migration probes the tables it
+          // promises. Model a database where they exist unless a test says not.
+          if (sql.includes('money_audit') && overrides.missingAudit) return { rows: [{ marker: null }] };
+          return { rows: [{ marker: 'present' }] };
+        }
         // Prerequisite schemas (authz, customer, catalog) are all at version 1.
         if (/^SELECT version FROM kabadi_(authz|customer|catalog)\.schema_version$/.test(sql)) return { rows: [{ version: 1 }] };
         if (sql.startsWith('SELECT version FROM kabadi_pickup.schema_version')) return { rows: [{ version }] };
@@ -290,7 +295,7 @@ test('pickup migration walks an old schema to the current version and reports th
   }
 
   const report = await migratePickups(fakePool(1));
-  assert.deepEqual(report, { action: 'upgraded', schemaVersion: 8, fromVersion: 1, legacyRequests: 1 });
+  assert.deepEqual(report, { action: 'upgraded', schemaVersion: 9, fromVersion: 1, legacyRequests: 1 });
   const all = statements.join('\n');
   // Both upgrade steps ran, in order, and each pinned its own version.
   assert.ok(all.indexOf('SET version = 2') < all.indexOf('ADD COLUMN collector_id'), 'v2 upgrade precedes v3');
@@ -311,14 +316,14 @@ test('pickup migration walks an old schema to the current version and reports th
   // The payout ledger is created last, in its own table.
   assert.ok(all.indexOf('SET version = 5') < all.indexOf('CREATE TABLE IF NOT EXISTS kabadi_pickup.payouts'));
   assert.ok(all.includes('SET version = 6'));
-  assert.ok(all.includes('SET version = 8'));
+  assert.ok(all.includes('SET version = 9'));
   // Existing rows are never rewritten or deleted by the upgrade.
   assert.ok(!/DELETE FROM kabadi_pickup\.requests/i.test(all));
   assert.ok(!/UPDATE kabadi_pickup\.requests SET (material|status)/i.test(all));
 
   // A v2 database takes the last two steps and stays 'upgraded'.
   statements.length = 0;
-  assert.deepEqual(await migratePickups(fakePool(2)), { action: 'upgraded', schemaVersion: 8, fromVersion: 2, legacyRequests: 1 });
+  assert.deepEqual(await migratePickups(fakePool(2)), { action: 'upgraded', schemaVersion: 9, fromVersion: 2, legacyRequests: 1 });
   const v2only = statements.join('\n');
   assert.ok(!v2only.includes('SET version = 2'));
   assert.ok(v2only.includes('ADD COLUMN collector_id'));
@@ -326,7 +331,7 @@ test('pickup migration walks an old schema to the current version and reports th
 
   // A v3 database starts at the cancellation step and continues to current.
   statements.length = 0;
-  assert.deepEqual(await migratePickups(fakePool(3)), { action: 'upgraded', schemaVersion: 8, fromVersion: 3, legacyRequests: 1 });
+  assert.deepEqual(await migratePickups(fakePool(3)), { action: 'upgraded', schemaVersion: 9, fromVersion: 3, legacyRequests: 1 });
   const v3only = statements.join('\n');
   assert.ok(!v3only.includes('ADD COLUMN collector_id'), 'v3 columns are not re-added');
   assert.ok(v3only.includes('ADD COLUMN cancelled_at'));
@@ -336,7 +341,7 @@ test('pickup migration walks an old schema to the current version and reports th
   // upgrade the owner runs next, so it must not re-run anything older.
   statements.length = 0;
   assert.deepEqual(await migratePickups(fakePool(7)),
-    { action: 'upgraded', schemaVersion: 8, fromVersion: 7, legacyRequests: 1 });
+    { action: 'upgraded', schemaVersion: 9, fromVersion: 7, legacyRequests: 1 });
   const v7only = statements.join('\n');
   assert.ok(v7only.includes('ADD COLUMN IF NOT EXISTS address_redacted_at timestamptz'));
   assert.ok(v7only.includes('SET version = 8'));
@@ -347,18 +352,42 @@ test('pickup migration walks an old schema to the current version and reports th
   }
   assert.ok(!v7only.includes('SET version = 7'));
 
+  // A v8 database takes exactly one step: the money audit table. This is the
+  // upgrade the owner runs next.
+  statements.length = 0;
+  assert.deepEqual(await migratePickups(fakePool(8)),
+    { action: 'upgraded', schemaVersion: 9, fromVersion: 8, legacyRequests: 1 });
+  const v8only = statements.join('\n');
+  assert.ok(v8only.includes('CREATE TABLE IF NOT EXISTS kabadi_pickup.money_audit'));
+  assert.ok(v8only.includes('money_audit_request'));
+  assert.ok(v8only.includes('money_audit_actor'));
+  assert.ok(v8only.includes('SET version = 9'));
+  // Nothing older may re-run on an already-current table.
+  for (const older of ['ADD COLUMN collector_id', 'ADD COLUMN cancelled_at',
+    'ADD COLUMN IF NOT EXISTS address_redacted_at',
+    'CREATE TABLE IF NOT EXISTS kabadi_pickup.payouts',
+    'CREATE TABLE IF NOT EXISTS kabadi_pickup.notifications']) {
+    assert.ok(!v8only.includes(older), `v8 must not re-run: ${older}`);
+  }
+
+  // Version 9 promises a table as well as columns, so a version row claiming 9
+  // with no audit table is the same lie as a missing column.
+  statements.length = 0;
+  await assert.rejects(() => migratePickups(fakePool(9, V3, { missingAudit: true })),
+    /claims version 9 but is missing: money_audit table/);
+
   // A recorded version that the table does not honour is refused, not reported
   // as a successful no-op. This is the "already version 3" lie.
   statements.length = 0;
   await assert.rejects(() => migratePickups(fakePool(7, ['collector_id', 'actual_grams'])),
-    /claims version 8 but is missing: accepted_at/);
+    /claims version 9 but is missing: accepted_at/);
   const refused = statements.join('\n');
   assert.ok(!refused.includes('SET version = 3'), 'nothing may be written when verification fails');
 
   // A current database is reported as unchanged, and an unknown version fails.
-  assert.equal((await migratePickups(fakePool(8))).action, 'unchanged');
+  assert.equal((await migratePickups(fakePool(9))).action, 'unchanged');
   // One past the newest version this build knows how to read.
-  await assert.rejects(() => migratePickups(fakePool(9)), /Unsupported schema/);
+  await assert.rejects(() => migratePickups(fakePool(10)), /Unsupported schema/);
 
   // A fresh schema is 'created' from version 0 and lands directly at current.
   statements.length = 0;
@@ -377,10 +406,10 @@ test('pickup migration walks an old schema to the current version and reports th
       return { rows: [] };
     }, release: () => {},
   }) });
-  assert.deepEqual(fresh, { action: 'created', schemaVersion: 8, fromVersion: 0, legacyRequests: 0 });
+  assert.deepEqual(fresh, { action: 'created', schemaVersion: 9, fromVersion: 0, legacyRequests: 0 });
   const created = statements.join('\n');
-  assert.ok(created.includes('CHECK (version = 8)'));
-  assert.ok(created.includes('INSERT INTO kabadi_pickup.schema_version VALUES (8)'));
+  assert.ok(created.includes('CHECK (version = 9)'));
+  assert.ok(created.includes('INSERT INTO kabadi_pickup.schema_version VALUES (9)'));
   // A fresh schema must include the retention marker; a version bump that only
   // touches the upgrade path leaves new databases without it.
   assert.ok(created.includes('address_redacted_at timestamptz'));
@@ -648,7 +677,8 @@ test('admin resolves a dispute by re-pricing at the frozen rate, never a fresh l
       if (text.startsWith('SELECT status FROM kabadi_authz.accounts')) return { rows: [{ status: 'active' }] };
       if (text.includes("role='admin'")) return { rows: [{}], rowCount: 1 };
       if (text.includes('FOR UPDATE')) return { rows: [{ status: 'collected', dispute_status: 'open',
-        actual_grams: 2300, final_paise_per_kg: 3245, final_rate_id: randomUUID() }] };
+        actual_grams: 2300, final_paise_per_kg: 3245, final_rate_id: randomUUID(),
+        final_amount_paise: '7464' }] };
       return { rows: [], rowCount: 1 };
     }, release: () => {},
   }) };
@@ -657,6 +687,19 @@ test('admin resolves a dispute by re-pricing at the frozen rate, never a fresh l
   assert.deepEqual(result, { outcome: 'resolved', actualGrams: 2000, finalPaisePerKg: 3245, finalAmountPaise: '6490' });
   // No catalog read at all: the frozen rate is the only price input.
   assert.ok(!seen.some(q => q.text.includes('kabadi_catalog.rates')), 'resolution must not query the catalog');
+
+  // The correction must leave a trail. The row itself now holds only the new
+  // weight, so the previous figure would otherwise exist only in a backup.
+  const audit = seen.find(q => q.text.startsWith('INSERT INTO kabadi_pickup.money_audit'));
+  assert.ok(audit, 'a dispute resolution writes a money_audit row');
+  assert.equal(audit.params[1], 'dispute-resolved');
+  assert.equal(audit.params[3], '2300 g / 7464 paise', 'the before value is the pre-update figure');
+  assert.equal(audit.params[4], '2000 g / 6490 paise', 'the after value is the corrected figure');
+  assert.match(audit.params[5], /frozen 3245 paise\/kg/);
+  // It is written on the same connection transaction as the update, so a
+  // rollback of the change also rolls back the record of it.
+  assert.ok(seen.findIndex(q => q.text.startsWith('UPDATE kabadi_pickup.requests')) <
+            seen.findIndex(q => q.text.startsWith('INSERT INTO kabadi_pickup.money_audit')));
   const update = seen.find(q => q.text.startsWith('UPDATE kabadi_pickup.requests'));
   assert.match(update.text, /final_amount_paise=\$3::bigint/);
   // The per-kg rate is not in the SET list at all: it cannot drift because it is
@@ -1039,4 +1082,68 @@ test('the roles route requires sign-in and refuses to be a general account dump'
       assert.ok(denied.status >= 400, 'anonymous access must not return roles');
     } finally { await new Promise(resolve=>other.close(resolve)); }
   } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
+test('every decision that touches money leaves an append-only trail', async () => {
+  const { createDisputeStore, createPayoutStore } = await import('../../apps/api/dist/pickups.js');
+  const requestId = randomUUID();
+
+  // A pool that records statements and answers by shape.
+  const makePool = (row) => {
+    const seen = [];
+    return { seen, pool: { connect: async () => ({
+      query: async (sql, params) => {
+        const text = typeof sql === 'string' ? sql.replace(/\s+/g,' ').trim() : '';
+        seen.push({ text, params });
+        if (text.startsWith('SELECT status FROM kabadi_authz.accounts')) return { rows: [{ status: 'active' }] };
+        if (text.includes("role='admin'")) return { rows: [{}], rowCount: 1 };
+        if (text.includes('FOR UPDATE') || text.startsWith('UPDATE kabadi_pickup.requests')) return { rows: [row], rowCount: 1 };
+        if (text.startsWith('SELECT user_id FROM kabadi_pickup.requests')) return { rows: [{ user_id: 'owner' }] };
+        return { rows: [], rowCount: 1 };
+      }, release: () => {},
+    }) } };
+  };
+
+  // --- a rejected dispute: the money stands, and that fact is recorded ---
+  const rejected = makePool({ status: 'collected', dispute_status: 'open', actual_grams: 2300,
+    final_paise_per_kg: 3245, final_rate_id: randomUUID(), final_amount_paise: '7464' });
+  assert.deepEqual(await createDisputeStore(rejected.pool).rejectDispute('admin-1', requestId),
+    { outcome: 'rejected' });
+  const rejectAudit = rejected.seen.find(q => q.text.startsWith('INSERT INTO kabadi_pickup.money_audit'));
+  assert.ok(rejectAudit, 'a rejection is a money decision and is recorded');
+  assert.equal(rejectAudit.params[1], 'dispute-rejected');
+  // Before and after are deliberately equal: "reviewed, unchanged" is the fact
+  // a later question needs, and a null here would read as "nothing was decided".
+  assert.equal(rejectAudit.params[3], rejectAudit.params[4]);
+  assert.match(rejectAudit.params[3], /2300 g \/ 7464 paise/);
+
+  // --- a payout: the one thing the immutable payout row cannot express ---
+  const paid = makePool({ status: 'collected', collector_id: 'col-1', final_amount_paise: '7464',
+    dispute_status: null, paid: false });
+  const payoutStore = createPayoutStore(paid.pool);
+  const result = await payoutStore.recordPayout('admin-1', requestId, 'transfer', 'UTR-9', 'bank');
+  assert.equal(result.outcome, 'paid');
+  const payAudit = paid.seen.find(q => q.text.startsWith('INSERT INTO kabadi_pickup.money_audit'));
+  assert.ok(payAudit, 'a payout writes the same kind of row');
+  assert.equal(payAudit.params[1], 'payout-recorded');
+  assert.equal(payAudit.params[3], null, 'a payout has no before value: there was no amount before');
+  assert.equal(payAudit.params[4], '7464 paise');
+  // The reference itself is NOT copied into the audit detail: the payout row is
+  // the authority for it and duplicating a bank reference widens the blast
+  // radius of a leak for no benefit.
+  assert.ok(!payAudit.params[5].includes('UTR-9'));
+});
+
+test('the audit table can never be rewritten by the application', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../../apps/api/src/pickups.ts', import.meta.url), 'utf8');
+  // The promise in the module comment is "never updated, never deleted". Hold
+  // the code to it: only the INSERT may appear.
+  assert.match(source, /INSERT INTO kabadi_pickup\.money_audit/);
+  assert.doesNotMatch(source, /UPDATE kabadi_pickup\.money_audit/i);
+  assert.doesNotMatch(source, /DELETE FROM kabadi_pickup\.money_audit/i);
+  // Retention must not sweep it either: the ledger's history is as permanent as
+  // the ledger.
+  const retention = await readFile(new URL('../../apps/api/src/retention.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(retention, /money_audit/);
 });

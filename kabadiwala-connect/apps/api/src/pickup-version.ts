@@ -35,12 +35,12 @@ try {
        WHERE table_schema='kabadi_pickup' AND table_name='requests' AND column_name = ANY($1::text[])`, [expected]);
     const present = new Set(columns.rows.map(r => r.column_name));
     const missing = expected.filter(name => !present.has(name));
-    console.log(`Pickup schema version: ${version ?? 'unrecognized'} (expected 8).`);
-    if (version !== 8) {
+    console.log(`Pickup schema version: ${version ?? 'unrecognized'} (expected 9).`);
+    if (version !== 9) {
       console.log('Run the pickup migration to upgrade it.');
     } else if (missing.length) {
       // The recorded version and the real table disagree; never report success.
-      console.log(`The recorded version is 8 but the table is missing: ${missing.join(', ')}.`);
+      console.log(`The recorded version is 9 but the table is missing: ${missing.join(', ')}.`);
       console.log('The version row does not match the table. Inspect and restore before relying on this database.');
       process.exitCode = 1;
     } else {
@@ -50,11 +50,21 @@ try {
       const table = await pool.query<{ marker: string | null }>(
         "SELECT to_regclass('kabadi_pickup.notifications')::text AS marker");
       if (!table.rows[0]?.marker) {
-        console.log('The recorded version is 8 but the notifications table is missing.');
+        console.log('The recorded version is 9 but the notifications table is missing.');
         console.log('The version row does not match the database. Inspect and restore before relying on this database.');
         process.exitCode = 1;
       } else {
-        console.log('Collector columns, the in-app notifications table and the retention marker are all present.');
+        // The audit table is the other thing version 9 promises, so its absence
+        // is drift in the same way a missing column is.
+        const audit = await pool.query<{ marker: string | null }>(
+          "SELECT to_regclass('kabadi_pickup.money_audit')::text AS marker");
+        if (!audit.rows[0]?.marker) {
+          console.log('The recorded version is 9 but the money audit table is missing.');
+          console.log('The version row does not match the database. Inspect and restore before relying on this database.');
+          process.exitCode = 1;
+        } else {
+          console.log('Collector columns, the in-app notifications table, the retention marker and the money audit table are all present.');
+        }
       }
     }
   }

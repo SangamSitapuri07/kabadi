@@ -140,11 +140,41 @@ const NOTIFICATION_DDL = `CREATE TABLE IF NOT EXISTS kabadi_pickup.notifications
   read_at timestamptz
 )`;
 
+// Append-only record of the decisions that changed money. The row it describes
+// holds only the CURRENT value, so without this the previous weight of a
+// corrected dispute exists only in a backup. One row per decision, written in
+// the same transaction as the change, and nothing in this module ever updates
+// or deletes from it.
+//
+// The foreign key is RESTRICT like every other money reference: an audit row
+// must not vanish because its subject did. Retention redacts addresses on the
+// request, never touches these.
+const MONEY_AUDIT_DDL = `CREATE TABLE IF NOT EXISTS kabadi_pickup.money_audit (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_id uuid NOT NULL REFERENCES kabadi_pickup.requests(id) ON DELETE RESTRICT,
+  action text NOT NULL CHECK (action IN ('dispute-resolved','dispute-rejected','payout-recorded')),
+  actor_id text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
+  -- The values before and after, as text so a paise amount and a gram count can
+  -- share a column without pretending to be the same type.
+  before_value text,
+  after_value text,
+  detail text CHECK (detail IS NULL OR char_length(detail) BETWEEN 1 AND 200),
+  recorded_at timestamptz NOT NULL DEFAULT now()
+)`;
+
+// Worst case this table gets one row per dispute decision and per payout, so it
+// grows with real activity rather than with page views. Indexed for the only
+// question anyone asks of it: what happened to this request, in order.
+const MONEY_AUDIT_INDEXES = [
+  'CREATE INDEX IF NOT EXISTS money_audit_request ON kabadi_pickup.money_audit (request_id, recorded_at DESC, id DESC)',
+  'CREATE INDEX IF NOT EXISTS money_audit_actor ON kabadi_pickup.money_audit (actor_id, recorded_at DESC)',
+];
+
 // Version 2 adds the pricing snapshot. Version 1 databases are upgraded in
 // place, keeping existing free-text requests valid. Never run at startup.
 export type PickupMigrationReport = {
   action: 'created' | 'upgraded' | 'unchanged';
-  schemaVersion: 8;
+  schemaVersion: 9;
   fromVersion: number;
   // Requests created before pricing existed. They survive untouched but carry
   // no estimate, so the operator must know how many there are.
@@ -169,7 +199,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       const marker = await c.query<{ marker: string | null }>("SELECT to_regclass('kabadi_pickup.schema_version')::text AS marker");
       if (!marker.rows[0]?.marker) throw Error('Unrecognized pickup schema');
       const versions = await c.query<{ version: number }>('SELECT version FROM kabadi_pickup.schema_version');
-      if (versions.rows.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
+      if (versions.rows.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
       currentVersion = versions.rows[0]!.version;
     }
     // Remember where we started so the report can describe the real change
@@ -177,7 +207,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
     const startingVersion = currentVersion;
     if (currentVersion === 0) {
       await c.query('CREATE SCHEMA kabadi_pickup');
-      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 8))');
+      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 9))');
       await c.query(`CREATE TABLE kabadi_pickup.requests (
         id uuid PRIMARY KEY, user_id text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
         request_key uuid NOT NULL, material text CHECK (material IS NULL OR char_length(material) BETWEEN 1 AND 100),
@@ -243,12 +273,14 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       )`);
       await c.query('CREATE INDEX payout_collector ON kabadi_pickup.payouts (collector_id, paid_at DESC)');
       await c.query(NOTIFICATION_DDL);
+      await c.query(MONEY_AUDIT_DDL);
+      for (const index of MONEY_AUDIT_INDEXES) await c.query(index);
       await c.query('CREATE INDEX notification_recipient ON kabadi_pickup.notifications (recipient_id, created_at DESC, id DESC)');
       await c.query('CREATE INDEX notification_unread ON kabadi_pickup.notifications (recipient_id) WHERE read_at IS NULL');
       await c.query('CREATE INDEX ON kabadi_pickup.requests (user_id, created_at DESC, id DESC)');
       await c.query("CREATE INDEX pickup_open ON kabadi_pickup.requests (created_at) WHERE status='requested' AND category_id IS NOT NULL");
       await c.query("CREATE INDEX pickup_collector ON kabadi_pickup.requests (collector_id, status)");
-      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (8)');
+      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (9)');
     }
     if (currentVersion === 1) {
       // Upgrade in place: existing rows keep material and gain no estimate.
@@ -380,6 +412,17 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 8)');
       currentVersion = 8;
     }
+    if (currentVersion === 8) {
+      // Money decisions become reconstructable. Until now a corrected dispute
+      // weight overwrote the previous value in place, so the figure a collector
+      // was originally credited with survived only in a backup.
+      await c.query(MONEY_AUDIT_DDL);
+      for (const index of MONEY_AUDIT_INDEXES) await c.query(index);
+      await c.query('ALTER TABLE kabadi_pickup.schema_version DROP CONSTRAINT IF EXISTS schema_version_version_check');
+      await c.query('UPDATE kabadi_pickup.schema_version SET version = 9');
+      await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 9)');
+      currentVersion = 9;
+    }
     // The version row is a claim; verify the columns it promises. Without this a
     // half-applied upgrade looks identical to a finished one and the migration
     // would cheerfully report "nothing changed" over a broken table.
@@ -401,6 +444,13 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
        WHERE table_schema='kabadi_pickup' AND table_name='payouts' AND column_name = ANY($1::text[])`, [payoutColumns]);
     const payoutPresent = new Set(payoutFound.rows.map(r => r.column_name));
     const absentPayout = payoutColumns.filter(name => !payoutPresent.has(name));
+    // Version 9 is a separate table, so a version row claiming 9 with no
+    // money_audit is the same class of lie as a missing column.
+    const audit = await c.query<{ marker: string | null }>(
+      "SELECT to_regclass('kabadi_pickup.money_audit')::text AS marker");
+    if (!audit.rows[0]?.marker) {
+      throw Error(`Pickup schema claims version ${currentVersion} but is missing: money_audit table`);
+    }
     if (absent.length || absentPayout.length) {
       throw Error(`Pickup schema claims version ${currentVersion} but is missing: ${
         [...absent, ...absentPayout.map(n => `payouts.${n}`)].join(', ')}`);
@@ -412,8 +462,8 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
        FROM kabadi_pickup.requests`);
     await c.query('COMMIT');
     return {
-      action: startingVersion === 0 ? 'created' : startingVersion < 8 ? 'upgraded' : 'unchanged',
-      schemaVersion: 8,
+      action: startingVersion === 0 ? 'created' : startingVersion < 9 ? 'upgraded' : 'unchanged',
+      schemaVersion: 9,
       fromVersion: startingVersion,
       legacyRequests: Number(counts.rows[0]?.legacy ?? 0),
     };
@@ -771,8 +821,9 @@ export function createDisputeStore(pool: pg.Pool) {
           correctedGrams < 1 || correctedGrams > MAX_GRAMS) throw Error('Invalid weight');
       return asAdmin(actorId, async c => {
         const locked = await c.query<{ status: string; dispute_status: string | null; actual_grams: number;
-          final_paise_per_kg: number; final_rate_id: string }>(
-          `SELECT status, dispute_status, actual_grams, final_paise_per_kg, final_rate_id
+          final_paise_per_kg: number; final_rate_id: string; final_amount_paise: string | null }>(
+          `SELECT status, dispute_status, actual_grams, final_paise_per_kg, final_rate_id,
+                  final_amount_paise::text AS final_amount_paise
            FROM kabadi_pickup.requests WHERE id=$1 FOR UPDATE`, [requestId]);
         const found = locked.rows[0];
         if (!found) return { outcome: 'not-found' as const };
@@ -793,6 +844,19 @@ export function createDisputeStore(pool: pg.Pool) {
         {
           const owner = await c.query<{ user_id: string }>(
             'SELECT user_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
+          // The row now holds only the corrected figure. Without this the weight
+          // the collector was originally credited with would survive only in a
+          // backup, and a rejected-then-re-raised dispute can correct the same
+          // request more than once.
+          // The locked row was read BEFORE the update, so it is the real "before".
+          // Re-reading here would have returned the corrected figure and made the
+          // trail claim nothing changed.
+          await auditMoney(c, {
+            requestId, action: 'dispute-resolved', actorId,
+            beforeValue: `${found.actual_grams} g / ${found.final_amount_paise} paise`,
+            afterValue: `${correctedGrams} g / ${estimate.amountPaise} paise`,
+            detail: `re-priced at the frozen ${found.final_paise_per_kg} paise/kg`,
+          });
           if (owner.rows[0]) await notify(c, { recipientId: owner.rows[0].user_id, event: 'dispute-resolved',
             requestId, actorId, detail: short(`${correctedGrams} g at ${found.final_paise_per_kg} paise/kg = ${estimate.amountPaise} paise`) });
         }
@@ -807,8 +871,20 @@ export function createDisputeStore(pool: pg.Pool) {
         const updated = await c.query(
           `UPDATE kabadi_pickup.requests
              SET dispute_status='rejected', dispute_resolved_at=now()
-           WHERE id=$1 AND status='collected' AND dispute_status='open' RETURNING id`, [requestId]);
+           WHERE id=$1 AND status='collected' AND dispute_status='open'
+           RETURNING id, actual_grams, final_amount_paise::text AS final_amount_paise`, [requestId]);
         if (updated.rowCount === 1) {
+          // Rejecting a dispute is a decision that the money stays as it is, so
+          // it belongs in the same trail as a correction. Before and after are
+          // equal on purpose: the record says "reviewed, unchanged", which is
+          // exactly the fact a later question would need.
+          const unchanged = updated.rows[0] as unknown as { actual_grams: number; final_amount_paise: string };
+          await auditMoney(c, {
+            requestId, action: 'dispute-rejected', actorId,
+            beforeValue: `${unchanged.actual_grams} g / ${unchanged.final_amount_paise} paise`,
+            afterValue: `${unchanged.actual_grams} g / ${unchanged.final_amount_paise} paise`,
+            detail: 'dispute rejected; the recorded weight and amount stand',
+          });
           const owner = await c.query<{ user_id: string }>(
             'SELECT user_id FROM kabadi_pickup.requests WHERE id=$1', [requestId]);
           if (owner.rows[0]) await notify(c, { recipientId: owner.rows[0].user_id, event: 'dispute-rejected',
@@ -842,6 +918,20 @@ async function notify(c: pg.PoolClient, input: {
     `INSERT INTO kabadi_pickup.notifications (recipient_id, event, request_id, actor_id, detail)
      VALUES ($1,$2,$3,$4,$5)`,
     [input.recipientId, input.event, input.requestId, input.actorId, input.detail]);
+}
+
+// One money decision, recorded on the transaction that made it. Callers pass the
+// value before and after so the trail explains a change rather than just
+// announcing that one happened. Never updated, never deleted.
+async function auditMoney(c: pg.PoolClient, input: {
+  requestId: string; action: 'dispute-resolved' | 'dispute-rejected' | 'payout-recorded';
+  actorId: string; beforeValue: string | null; afterValue: string | null; detail?: string | null;
+}): Promise<void> {
+  await c.query(
+    `INSERT INTO kabadi_pickup.money_audit (request_id, action, actor_id, before_value, after_value, detail)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [input.requestId, input.action, input.actorId, input.beforeValue, input.afterValue,
+     input.detail === undefined ? null : input.detail === null ? null : short(input.detail)]);
 }
 
 const short = (value: string) => value.length > 200 ? `${value.slice(0, 197)}...` : value;
@@ -903,6 +993,14 @@ export function createPayoutStore(pool: pg.Pool) {
            ON CONFLICT (request_id) DO NOTHING RETURNING request_id`,
           [requestId, found.collector_id, found.final_amount_paise, method, reference, actorId, note]);
         if (inserted.rowCount !== 1) return { outcome: 'already-paid' as const };
+        // A payout row is already immutable and carries recorded_by, so this adds
+        // the one thing it lacks: the decision in the same format as a dispute
+        // decision, so the whole money history of a request reads in one place.
+        await auditMoney(c, {
+          requestId, action: 'payout-recorded', actorId,
+          beforeValue: null, afterValue: `${found.final_amount_paise} paise`,
+          detail: `method ${method}${typeof reference === 'string' && reference ? `, reference recorded` : ''}`,
+        });
         await notify(c, { recipientId: found.collector_id, event: 'payout-recorded',
           requestId, actorId, detail: short(`${found.final_amount_paise} paise by ${method}`) });
         return { outcome: 'paid' as const, amountPaise: found.final_amount_paise, method };

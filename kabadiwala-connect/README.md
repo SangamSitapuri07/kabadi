@@ -759,6 +759,38 @@ text. The web parsers treat a null address on a redacted row as valid and render
 "Address removed after the retention period; the amount is unchanged" — dropping
 such a row would hide a real completed pickup from the history it belongs to.
 
+### Money audit trail (development API)
+
+A payout row is immutable and names who recorded it, so a payment is defensible
+on its own. A **dispute correction is not**: the request row holds only the
+current weight and amount, and a rejected dispute can be re-raised, so the same
+request can be corrected more than once. Until v9 the earlier figures survived
+only in a backup.
+
+`kabadi_pickup.money_audit` fixes that. One row per decision, written **in the
+same transaction as the change it describes** — a rolled-back resolution leaves
+no audit row, so the trail can never claim something that did not happen.
+
+| Action | Recorded when | Before → after |
+| --- | --- | --- |
+| `dispute-resolved` | an admin corrects the weight | `2300 g / 7464 paise` → `2000 g / 6490 paise` |
+| `dispute-rejected` | an admin upholds the original | equal, e.g. `2300 g / 7464 paise` → the same |
+| `payout-recorded` | a payout is recorded | `null` → `7464 paise` |
+
+A rejection deliberately records **equal** before and after values. It is a
+decision that the money stands, and "reviewed, unchanged" is the fact a later
+question needs; a null there would read as "nothing was decided". A payout has a
+null *before* for the same honesty reason: there was no amount before it.
+
+The application only ever `INSERT`s here. There is no `UPDATE`, no `DELETE`, and
+retention does not touch the table — a test reads the source and fails if either
+appears. Like `kabadi_admin.role_changes`, treat this as **append-only intent,
+not tamper-proof logging**: a privileged database connection can rewrite it.
+
+Migration **v9** adds the table. `pickups:version` checks for it physically, so a
+version row claiming 9 without the table is reported as drift rather than
+success.
+
 ### Customer self-onboarding (development API)
 
 `POST /api/v1/account/customer` accepts only an empty JSON object, requires an

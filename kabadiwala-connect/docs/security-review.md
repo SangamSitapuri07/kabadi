@@ -91,7 +91,7 @@ to everyone else — including the owner. Sign-in is unlimited too.
 memory dies with the process; a shared store adds a dependency). Doing it badly
 is worse than not doing it. **Needs an owner decision on deployment topology.**
 
-### S-2 — The audit trail covers role changes only (Medium; blocking for production)
+### S-2 — The audit trail now covers money decisions (Resolved at v9)
 
 Correction to my first draft, which claimed there was no audit log at all. There
 is one, and it is well built: `kabadi_admin.role_changes` is append-only by
@@ -109,6 +109,15 @@ be followed.
 Note also the honest limitation the schema states about itself: "append-only
 intent" is not enforced by the database, so it is evidence, not tamper-proof
 logging. That is the correct framing and should stay.
+
+**Closed in schema v9.** `kabadi_pickup.money_audit` records every dispute
+resolution, dispute rejection and payout with the before and after values, the
+actor and a timestamp, written on the same transaction as the change. A test
+asserts the application never issues an UPDATE or DELETE against it and that
+retention does not sweep it. The gap this closes was concrete: a corrected
+weight overwrote the previous value in place, and a rejected dispute can be
+re-raised, so one request could be corrected repeatedly with only the latest
+figure surviving.
 
 ### S-3 — Nothing has been exercised with a real browser identity (Medium)
 
@@ -148,8 +157,7 @@ process risk rather than a code one.
 In order; only the third is genuinely cheap:
 
 1. **Rate-limit the API and sign-in** (needs the S-1 decision).
-2. **Extend the existing audit pattern** (`kabadi_admin.role_changes`)
-   to dispute resolutions and payouts.
+2. ~~Extend the audit pattern to dispute resolutions and payouts.~~ **Done in v9.**
 3. **Exercise one real end-to-end session in a real browser** (S-3), including a
    deliberate cross-origin POST to confirm the 403.
 4. **Run once behind real HTTPS** to exercise the secure-cookie path (S-4).
