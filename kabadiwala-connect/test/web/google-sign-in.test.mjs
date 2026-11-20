@@ -931,13 +931,84 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         await unmount();
       }
     });
-    await t.test('a collector is not shown the upper-tier stock board', async () => {
-      await mount(async (url) => {
+    await t.test('a collector takes custody of a collected pickup, and cannot restate its weight or cost', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174200', rateId='123e4567-e89b-42d3-a456-426614174201';
+      const address={name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'};
+      const collected={ id:requestId, status:'collected', createdAt:'2026-11-18T17:00:00.000Z', address,
+        estimatedGrams:2500, categoryId:'123e4567-e89b-42d3-a456-426614174202', categoryName:'Synthetic paper',
+        rateId, paisePerKg:3245, amountPaise:'8113', actualGrams:2300, finalRateId:rateId,
+        finalPaisePerKg:3300, finalAmountPaise:'7590', collectedAt:'2026-11-20T10:00:00.000Z' };
+      let lotPickups = [];
+      const posts = [];
+      await mount(async (url, init) => {
         if (url.endsWith('/account/roles')) return json({data:{roles:['collector'], active:true}});
         if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.includes('/collector/pickups?view=')) return json({data:{pickups:[collected]}});
+        if (url.endsWith('/api/v1/lots') && (!init || !init.method || init.method === 'GET')) {
+          return json({data:{lots: lotPickups.map(id => ({ id:'123e4567-e89b-42d3-a456-426614174203',
+            material:'Copper wire', grams:2300, costPaise:'7590', status:'held',
+            createdAt:'2026-11-20T10:05:00.000Z', parentLotId:null, sourcePickupId:id }))}});
+        }
+        if (url.endsWith('/api/v1/lots') && init?.method === 'POST') {
+          posts.push(JSON.parse(init.body));
+          lotPickups = [requestId];
+          // The bridge's shape, not the API's: it answers whether a lot was opened.
+          return json({data:{opened:true, lot:{ id:'123e4567-e89b-42d3-a456-426614174203',
+            material:'Copper wire', grams:2300, costPaise:'7590', status:'held',
+            createdAt:'2026-11-20T10:05:00.000Z', parentLotId:null, sourcePickupId:requestId }}});
+        }
         return json({authenticated:true});
       });
-      assert.doesNotMatch(document.body.textContent, /Stock in your custody/);
+      const queue=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector queue'));
+      await clickButton('My accepted and collected');
+      await settle();
+      assert.match(queue.textContent,/Take custody as a lot/);
+      // The recorded weight and cost are stated as facts; they are not inputs.
+      assert.match(queue.textContent,/The recorded 2300 g and ₹75\.90 cost are copied from this pickup/, 
+        'the cost is restated from the pickup, not re-entered');
+      const materialInput=[...queue.querySelectorAll('input')].find(i => i.placeholder === 'e.g. Copper wire');
+      assert.ok(materialInput, 'a material name is asked for');
+      const setter=Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set;
+      // An empty material is refused locally: the server would reject it anyway,
+      // but there is no reason to spend a round trip finding out.
+      await act(async()=>{[...queue.querySelectorAll('button')].find(b=>b.textContent==='Take custody as a lot').click();});
+      assert.equal(posts.length, 0);
+      assert.match(queue.textContent,/Name the material/);
+      await act(async()=>{setter.call(materialInput,'Copper wire'); materialInput.dispatchEvent(new dom.window.Event('input',{bubbles:true}));});
+      await act(async()=>{[...queue.querySelectorAll('button')].find(b=>b.textContent==='Take custody as a lot').click();});
+      await settle();
+      // Only the pickup id and the material are sent: never a weight or a cost.
+      assert.deepEqual(posts, [{pickupId:requestId, material:'Copper wire'}]);
+      assert.match(queue.textContent,/In custody as a lot/);
+      assert.match(queue.textContent,/Took custody of Copper wire/);
+      // The stock board now shows it, because a collector holds tier one.
+      assert.match(document.body.textContent,/Stock in your custody/);
+      await unmount();
+    });
+    await t.test('an already-lotted pickup is not offered for custody again', async () => {
+      const requestId='123e4567-e89b-42d3-a456-426614174204', rateId='123e4567-e89b-42d3-a456-426614174205';
+      const collected={ id:requestId, status:'collected', createdAt:'2026-11-18T17:00:00.000Z',
+        address:{name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'},
+        estimatedGrams:2500, categoryId:'123e4567-e89b-42d3-a456-426614174206', categoryName:'Synthetic paper',
+        rateId, paisePerKg:3245, amountPaise:'8113', actualGrams:2300, finalRateId:rateId,
+        finalPaisePerKg:3300, finalAmountPaise:'7590', collectedAt:'2026-11-20T10:00:00.000Z' };
+      await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['collector'], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.includes('/collector/pickups?view=')) return json({data:{pickups:[collected]}});
+        if (url.endsWith('/api/v1/lots') && (!init?.method || init.method === 'GET')) {
+          return json({data:{lots:[{ id:'123e4567-e89b-42d3-a456-426614174207', material:'Copper wire',
+            grams:2300, costPaise:'7590', status:'held', createdAt:'2026-11-20T10:05:00.000Z',
+            parentLotId:null, sourcePickupId:requestId }]}});
+        }
+        return json({authenticated:true});
+      });
+      const queue=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector queue'));
+      await clickButton('My accepted and collected');
+      await settle();
+      assert.match(queue.textContent,/In custody as a lot/);
+      // One pickup is one lot: offering the action again could only fail.
+      assert.equal([...queue.querySelectorAll('button')].some(b=>b.textContent==='Take custody as a lot'), false);
       await unmount();
     });
     await t.test('a customer sees the customer panel and no admin tools', async () => {

@@ -252,9 +252,10 @@ export function GoogleSignIn() {
       </div>}
       {/* A collector sees the open queue and their own claims. */}
       {busy !== 'sign-out' && roles?.includes('collector') && <CollectorQueue disabled={busy !== null} />}
-      {/* The three upper tiers share one board: they hold the same capability,
-          and the tier above each is the server's decision, not the panel's. */}
-      {busy !== 'sign-out' && (['shop', 'mandi', 'recycler'] as const).map(tier =>
+      {/* Every tier that holds material shares one board: they hold the same
+          capability, and the tier above each is the server's decision, not the
+          panel's. A collector is in the chain too -- they sell to a shop. */}
+      {busy !== 'sign-out' && (['collector', 'shop', 'mandi', 'recycler'] as const).map(tier =>
         roles?.includes(tier) && <LotBoard key={tier} tier={tier} disabled={busy !== null} />)}
       {/* Admin tools only for admins. The catalogue is read/write for admins and
           read-only for everyone else, so it stays visible to all signed-in

@@ -348,3 +348,36 @@ test('the custody trail is shared, but a trade\'s price is only shown to its two
   assert.deepEqual(sellerHistory.map(s => [s.party, s.pricePaise]),
     [['buyer', '60000'], ['seller', '80000']]);
 });
+
+test('a collector holds tier one and sells to a shop: the whole chain is reachable', async () => {
+  const lotId = randomUUID();
+  // The collector is the origin of every lot, so if they cannot sell, nothing
+  // above them can ever receive material and the chain is decorative.
+  const pool = chainPool({ roles: ['customer', 'collector'], lot: heldLot({ id: lotId, holder_id: 'col-1' }), buyer: 'shop-1' });
+  const result = await createLotStore(pool).sell('col-1', { lotId, grams: 1000, pricePaise: '120000' });
+  assert.equal(result.outcome, 'sold');
+  assert.equal(result.sale.buyerTier, 'shop');
+
+  // And the buyer query must ask for a shop, not for "anyone not me".
+  const buyerQuery = pool.seen.find(q => q.text.startsWith('SELECT a.user_id FROM kabadi_authz.accounts'));
+  assert.equal(buyerQuery.params[0], 'shop');
+  assert.equal(buyerQuery.params[1], 'col-1');
+});
+
+test('every holding tier in the chain has exactly one tier above it, except the recycler', async () => {
+  // A table, not five near-identical tests: this is the property that makes the
+  // chain a chain, and it must hold for every tier at once.
+  const pairs = [['collector', 'shop'], ['shop', 'mandi'], ['mandi', 'recycler']];
+  for (const [seller, expectedBuyer] of pairs) {
+    const pool = chainPool({ roles: [seller], lot: heldLot({ holder_id: `${seller}-1` }) });
+    const result = await createLotStore(pool).sell(`${seller}-1`,
+      { lotId: randomUUID(), grams: 100, pricePaise: '1000' });
+    assert.equal(result.outcome, 'sold', seller);
+    const buyerQuery = pool.seen.find(q => q.text.startsWith('SELECT a.user_id FROM kabadi_authz.accounts'));
+    assert.equal(buyerQuery.params[0], expectedBuyer, `${seller} sells to ${expectedBuyer}`);
+  }
+  // The recycler is not in that table because there is nothing above it.
+  const recycler = chainPool({ roles: ['recycler'], lot: heldLot({ holder_id: 'rec-1' }) });
+  assert.deepEqual(await createLotStore(recycler).sell('rec-1', { lotId: randomUUID(), grams: 100, pricePaise: '1000' }),
+    { outcome: 'no-next-tier' });
+});

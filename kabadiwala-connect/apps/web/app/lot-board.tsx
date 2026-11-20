@@ -2,9 +2,9 @@
 import { useCallback, useEffect, useState } from 'react';
 
 // What this account is holding, and the one thing it can do with it: sell part
-// or all of a lot one tier up. Shop, mandi and recycler all use this same board
-// because they hold the same capability; which tier sits above them is the
-// server's decision, not this component's.
+// or all of a lot one tier up. Every holding tier -- collector, shop, mandi and
+// recycler -- uses this same board because they hold the same capability; which
+// tier sits above them is the server's decision, not this component's.
 type Lot = {
   id: string; material: string; grams: number; costPaise: string; status: 'held';
   createdAt: string; parentLotId: string | null; sourcePickupId: string | null;
@@ -85,7 +85,7 @@ export function LotBoard({ tier, disabled }: { tier: string; disabled: boolean }
       const json: unknown = await response.json();
       const sold = (json as { data?: { sold?: boolean; grams?: number; buyerTier?: string } })?.data;
       if (response.ok && sold?.sold === true && Number.isInteger(sold.grams)) {
-        setMessage(`Sold ${kilograms(sold.grams!)} to the ${sold.buyerTier} tier${tier === 'mandi' ? '' : ''}.`);
+        setMessage(`Sold ${kilograms(sold.grams!)} to the ${sold.buyerTier} tier.`);
         setSelling(null); setGrams(''); setPrice('');
         await load();
       } else {

@@ -74,6 +74,10 @@ export function CollectorQueue({ disabled }: { disabled: boolean }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [grams, setGrams] = useState<Record<string,string>>({});
+  // Material that has been collected but not yet taken into custody. The lot
+  // list is the authority: a pickup that is already a lot is not offered again.
+  const [lotPickups, setLotPickups] = useState<Set<string> | null>(null);
+  const [material, setMaterial] = useState<Record<string,string>>({});
 
   // `after` carries a confirmation through the reload so accepting a request is
   // not silently followed by an empty status line.
@@ -91,7 +95,54 @@ export function CollectorQueue({ disabled }: { disabled: boolean }) {
       if (parsed.some((p: CollectorPickup | null) => p === null)) throw Error('invalid');
       setItems(parsed as CollectorPickup[]);
       if (after) setMessage(after);
+      // Which collected pickups are already in custody. A failure here only
+      // hides the custody button; it never blocks the queue itself.
+      void loadLots();
     } catch { setItems(null); setMessage('The collector queue could not be loaded. Please try again.'); }
+    finally { setBusy(false); }
+  }
+
+  // Custody is a separate resource from the queue: the lot route owns it, and
+  // this panel only needs to know which pickups have become lots already.
+  async function loadLots() {
+    try {
+      const response = await fetch('/api/v1/lots', { cache:'no-store', signal:AbortSignal.timeout(10000) });
+      if (!response.ok) { setLotPickups(new Set()); return; }
+      const json = await response.json();
+      const lots = json?.data?.lots;
+      if (!Array.isArray(lots)) { setLotPickups(new Set()); return; }
+      setLotPickups(new Set(lots.map((lot: {sourcePickupId?: unknown}) =>
+        typeof lot.sourcePickupId === 'string' ? lot.sourcePickupId : '').filter(Boolean)));
+    } catch { setLotPickups(new Set()); }
+  }
+
+  // Taking custody: the weight and cost come from the pickup the API already
+  // measured. The collector names the material and nothing else.
+  async function takeCustody(id: string) {
+    const name = (material[id] ?? '').trim();
+    if (!name) { setMessage('Name the material before taking custody of it.'); return; }
+    setBusy(true); setMessage('');
+    try {
+      const response = await fetch('/api/v1/lots', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({ pickupId:id, material:name }), signal:AbortSignal.timeout(10000),
+      });
+      const json = await response.json();
+      const code = json?.error?.code;
+      if (response.ok && json?.data?.opened === true) {
+        setMaterial(m => ({ ...m, [id]: '' }));
+        await load('mine', `Took custody of ${name}. It is now stock you can sell upward.`);
+        return;
+      }
+      if (code === 'PICKUP_ALREADY_LOTTED') { await load('mine', 'That pickup is already in custody as a lot.'); return; }
+      if (code === 'PICKUP_NOT_COLLECTED') { setMessage('Only a collected pickup can become a lot. Record the collection first.'); return; }
+      if (code === 'NOT_HOLDER') { setMessage('Another collector recorded that collection, so the lot is theirs.'); return; }
+      if (code === 'NOT_COLLECTOR') { setMessage('This account does not have collector access.'); return; }
+      if (code === 'LOTS_UNAVAILABLE') { setMessage('Lot storage is not migrated yet. Run the lot migration, then reload.'); return; }
+      if (response.status === 400) { setMessage('That request was not valid. Name the material in a few words.'); return; }
+      if (response.status === 403) { setMessage('This account cannot take custody of material.'); return; }
+      throw Error('unavailable');
+    } catch { setMessage('Custody could not be confirmed. Reload before trying again.'); }
     finally { setBusy(false); }
   }
 
@@ -179,6 +230,22 @@ export function CollectorQueue({ disabled }: { disabled: boolean }) {
             Final: {item.actualGrams} g at {rupees(String(item.finalPaisePerKg))}/kg = {rupees(item.finalAmountPaise)}
             {item.collectedAt ? ` · collected ${new Date(item.collectedAt).toLocaleString()}` : ''}
           </span>}
+          {/* Collected material is measured and paid for, but it is not stock
+              until custody is taken. Without this step nothing can ever be sold
+              upward, so the chain would stop at the collector forever. */}
+          {item.status === 'collected' && (lotPickups !== null && lotPickups.has(item.id)
+            ? <span className="collector-custody">In custody as a lot. Sell it upward from your stock board.</span>
+            : <div className="collector-custody">
+                <label>Material
+                  <input placeholder="e.g. Copper wire" maxLength={100} autoComplete="off"
+                    value={material[item.id] ?? ''}
+                    onChange={e => setMaterial(m => ({ ...m, [item.id]: e.target.value }))} />
+                </label>
+                <button type="button" onClick={() => takeCustody(item.id)} disabled={disabled || busy}>
+                  Take custody as a lot
+                </button>
+                <span>The recorded {item.actualGrams ?? ''} g and {item.finalAmountPaise !== null ? rupees(item.finalAmountPaise) : ''} cost are copied from this pickup; you cannot restate them.</span>
+              </div>)}
         </li>;
       })}</ul>}
     </div>}

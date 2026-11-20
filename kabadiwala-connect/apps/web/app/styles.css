@@ -98,3 +98,8 @@ footer { color: #71877a; font-size: .8rem; padding: 25px 0; border-top: 1px soli
 .lot-history li { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 4px 0; }
 .lot-history li span { color: #4a6155; font-size: .8rem; }
 .lot-history button { margin-top: 8px; }
+/* Collected material becomes stock only when custody is taken. */
+.collector-custody { display: block; margin-top: 8px; font-size: .8rem; color: #536a5e; }
+.collector-custody label { display: block; margin-bottom: 6px; }
+.collector-custody input { display: block; width: 100%; max-width: 220px; margin-top: 3px; padding: 6px 8px; border: 1px solid #c9d6cf; border-radius: 4px; font-size: .9rem; }
+.collector-custody > span { display: block; margin-top: 4px; font-style: italic; }
