@@ -961,6 +961,34 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.match(text,/Set up a customer account/);
       await unmount();
     });
+    await t.test('a redacted old request still shows its amount instead of vanishing', async () => {
+      const rateId='44444444-4444-4444-8444-444444444444';
+      // What the API sends once retention has erased the address: no address
+      // object, a marker timestamp, and every accounting field intact.
+      const redacted={ id:rateId, status:'collected', createdAt:'2024-01-01T00:00:00.000Z',
+        address:null, addressRedactedAt:'2026-11-14T00:00:00.000Z',
+        estimatedGrams:2300, material:null, categoryId:rateId, categoryName:'Synthetic paper',
+        rateId, paisePerKg:3300, amountPaise:'7590', actualGrams:2300,
+        finalRateId:rateId, finalPaisePerKg:3300, finalAmountPaise:'7590',
+        collectedAt:'2024-01-01T00:00:00.000Z' };
+      await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['collector'], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.includes('/collector/pickups?view=')) return json({data:{pickups:[redacted]}});
+        return json({authenticated:true});
+      });
+      const section=[...document.querySelectorAll('section')].find(el=>el.textContent.includes('Collector queue'));
+      assert.ok(section, 'the queue rendered');
+      await clickButton('My accepted and collected');
+      // The row is shown, not silently dropped as malformed.
+      assert.match(section.textContent,/Synthetic paper/);
+      // The amount survives; the address is reported as removed rather than
+      // rendered as marker text or a blank line.
+      assert.match(section.textContent,/Address removed after the retention period/);
+      assert.doesNotMatch(section.textContent,/removed by retention policy/);
+      assert.doesNotMatch(section.textContent,/undefined/);
+      await unmount();
+    });
     await t.test('the payout screen states the real delivery fact without needing a click', async () => {
       // Regression: this panel used to say "Recording a payout notifies nobody"
       // until Load was pressed, which was false once in-app notifications

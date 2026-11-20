@@ -6,7 +6,9 @@ import { useEffect, useState } from 'react';
 type Due = {
   id:string; categoryName:string; estimatedGrams:number; actualGrams:number;
   finalPaisePerKg:number; amountPaise:string; collectedAt:string;
-  address:{name:string;addressLine:string;city:string;state:string;postalCode:string};
+  // Null once retention has erased it; the money and timestamps stay.
+  address:{name:string;addressLine:string;city:string;state:string;postalCode:string} | null;
+  addressRedactedAt: string | null;
 };
 // The server owns this list; the fallback only keeps the control usable if an
 // older API answers without it. Sending an unknown value is refused upstream.
@@ -157,7 +159,9 @@ export function PayoutAdmin({ disabled }: { disabled: boolean }) {
     <p role="status" aria-live="polite">{message}</p>
     {items !== null && <div>
       {items.length === 0 ? <p>No unpaid dues.</p> : <ul>{items.map(item => {
-        const where = `${item.address.name}, ${item.address.addressLine}, ${item.address.city}, ${item.address.state}, ${item.address.postalCode}`;
+        const where = item.address
+          ? `${item.address.name}, ${item.address.addressLine}, ${item.address.city}, ${item.address.state}, ${item.address.postalCode}`
+          : 'Address removed after the retention period; the amount is unchanged.';
         return <li key={item.id}>
           <span>{item.categoryName} — {item.actualGrams} g at {rupees(String(item.finalPaisePerKg))}/kg</span>
           <br /><span>Amount due: {rupees(item.amountPaise)}</span>

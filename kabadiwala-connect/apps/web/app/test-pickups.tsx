@@ -3,7 +3,9 @@ import { useEffect, useState } from 'react';
 
 type Pickup = {
   id:string; status:'requested'|'accepted'|'collected'|'cancelled'; createdAt:string; estimatedGrams:number;
-  address:{name:string;addressLine:string;city:string;state:string;postalCode:string};
+  // Null once retention has erased it; the money and timestamps stay.
+  address:{name:string;addressLine:string;city:string;state:string;postalCode:string} | null;
+  addressRedactedAt: string | null;
   material:string|null; categoryId:string|null; categoryName:string|null;
   rateId:string|null; paisePerKg:number|null; amountPaise:string|null;
   actualGrams:number|null; finalRateId:string|null; finalPaisePerKg:number|null;
@@ -187,7 +189,9 @@ export function TestPickups() {
         ? `${item.categoryName} — ${item.estimatedGrams} g — estimated ${rupees(item.amountPaise!)} at ${rupees(String(item.paisePerKg))}/kg`
         : `${item.material} — ${item.estimatedGrams} g — no estimate (older request)`;
       const saved = `${item.status} · saved ${new Date(item.createdAt).toLocaleString()}`;
-      const where = `${item.address.name}, ${item.address.addressLine}, ${item.address.city}, ${item.address.state}, ${item.address.postalCode}`;
+      const where = item.address
+        ? `${item.address.name}, ${item.address.addressLine}, ${item.address.city}, ${item.address.state}, ${item.address.postalCode}`
+        : 'Address removed after the retention period; the amount is unchanged.';
       // Once collected, the measured weight and the rate in force at collection
       // are the final amount. Until then the only figure on screen is an estimate.
       const final = item.status === 'collected' && item.finalAmountPaise !== null &&

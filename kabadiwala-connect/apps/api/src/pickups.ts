@@ -50,7 +50,11 @@ export type Pickup = {
   id: string;
   status: 'requested' | 'accepted' | 'collected' | 'cancelled';
   createdAt: string;
-  address: CustomerDetails;
+  // Null after the retention window has passed: the address was erased on
+  // purpose. Distinguishing "erased" from "never captured" is why the API sends
+  // null plus a timestamp instead of a fake address or an empty object.
+  address: CustomerDetails | null;
+  addressRedactedAt: string | null;
   estimatedGrams: number;
   material: string | null;
   categoryId: string | null;
@@ -140,7 +144,7 @@ const NOTIFICATION_DDL = `CREATE TABLE IF NOT EXISTS kabadi_pickup.notifications
 // place, keeping existing free-text requests valid. Never run at startup.
 export type PickupMigrationReport = {
   action: 'created' | 'upgraded' | 'unchanged';
-  schemaVersion: 7;
+  schemaVersion: 8;
   fromVersion: number;
   // Requests created before pricing existed. They survive untouched but carry
   // no estimate, so the operator must know how many there are.
@@ -165,7 +169,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       const marker = await c.query<{ marker: string | null }>("SELECT to_regclass('kabadi_pickup.schema_version')::text AS marker");
       if (!marker.rows[0]?.marker) throw Error('Unrecognized pickup schema');
       const versions = await c.query<{ version: number }>('SELECT version FROM kabadi_pickup.schema_version');
-      if (versions.rows.length !== 1 || ![1, 2, 3, 4, 5, 6, 7].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
+      if (versions.rows.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8].includes(versions.rows[0]?.version as number)) throw Error('Unsupported schema');
       currentVersion = versions.rows[0]!.version;
     }
     // Remember where we started so the report can describe the real change
@@ -173,7 +177,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
     const startingVersion = currentVersion;
     if (currentVersion === 0) {
       await c.query('CREATE SCHEMA kabadi_pickup');
-      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 7))');
+      await c.query('CREATE TABLE kabadi_pickup.schema_version (version integer PRIMARY KEY CHECK (version = 8))');
       await c.query(`CREATE TABLE kabadi_pickup.requests (
         id uuid PRIMARY KEY, user_id text NOT NULL REFERENCES kabadi_authz.accounts(user_id) ON DELETE RESTRICT,
         request_key uuid NOT NULL, material text CHECK (material IS NULL OR char_length(material) BETWEEN 1 AND 100),
@@ -198,6 +202,10 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
         dispute_raised_at timestamptz,
         dispute_resolved_at timestamptz,
         name text NOT NULL, address_line text NOT NULL, city text NOT NULL, state text NOT NULL, postal_code text NOT NULL,
+        -- Set when the retention policy has erased the address. NULL means the
+        -- address is still real; a non-NULL value is the only proof it was
+        -- deliberately removed rather than never captured.
+        address_redacted_at timestamptz,
         created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (user_id, request_key),
         -- Lifecycle and settlement must agree: an accepted request has a
         -- collector, a collected one has a measured weight and a final price.
@@ -240,7 +248,7 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       await c.query('CREATE INDEX ON kabadi_pickup.requests (user_id, created_at DESC, id DESC)');
       await c.query("CREATE INDEX pickup_open ON kabadi_pickup.requests (created_at) WHERE status='requested' AND category_id IS NOT NULL");
       await c.query("CREATE INDEX pickup_collector ON kabadi_pickup.requests (collector_id, status)");
-      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (7)');
+      await c.query('INSERT INTO kabadi_pickup.schema_version VALUES (8)');
     }
     if (currentVersion === 1) {
       // Upgrade in place: existing rows keep material and gain no estimate.
@@ -361,13 +369,25 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 7)');
       currentVersion = 7;
     }
+    if (currentVersion === 7) {
+      // Retention needs to tell "this address was deliberately erased" apart
+      // from "this address was never captured". Without the marker column both
+      // look like the same row, and a support question about an old pickup
+      // could not be answered honestly.
+      await c.query('ALTER TABLE kabadi_pickup.requests ADD COLUMN IF NOT EXISTS address_redacted_at timestamptz');
+      await c.query('ALTER TABLE kabadi_pickup.schema_version DROP CONSTRAINT IF EXISTS schema_version_version_check');
+      await c.query('UPDATE kabadi_pickup.schema_version SET version = 8');
+      await c.query('ALTER TABLE kabadi_pickup.schema_version ADD CONSTRAINT schema_version_version_check CHECK (version = 8)');
+      currentVersion = 8;
+    }
     // The version row is a claim; verify the columns it promises. Without this a
     // half-applied upgrade looks identical to a finished one and the migration
     // would cheerfully report "nothing changed" over a broken table.
     const V3_COLUMNS = ['collector_id', 'accepted_at', 'collected_at', 'actual_grams',
       'final_rate_id', 'final_paise_per_kg', 'final_amount_paise',
       'cancelled_at', 'cancellation_reason', 'released_at',
-      'dispute_status', 'dispute_reason', 'dispute_raised_at', 'dispute_resolved_at'];
+      'dispute_status', 'dispute_reason', 'dispute_raised_at', 'dispute_resolved_at',
+      'address_redacted_at'];
     const found = await c.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema='kabadi_pickup' AND table_name='requests' AND column_name = ANY($1::text[])`, [V3_COLUMNS]);
@@ -392,8 +412,8 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
        FROM kabadi_pickup.requests`);
     await c.query('COMMIT');
     return {
-      action: startingVersion === 0 ? 'created' : startingVersion < 7 ? 'upgraded' : 'unchanged',
-      schemaVersion: 7,
+      action: startingVersion === 0 ? 'created' : startingVersion < 8 ? 'upgraded' : 'unchanged',
+      schemaVersion: 8,
       fromVersion: startingVersion,
       legacyRequests: Number(counts.rows[0]?.legacy ?? 0),
     };
@@ -412,11 +432,18 @@ export type StoredRequest = StoredPickup & {
   dispute_reason: string | null; dispute_raised_at: Date | null; dispute_resolved_at: Date | null;
   payout_amount_paise: string | null; payout_method: string | null;
   payout_paid_at: Date | null;
+  address_redacted_at: Date | null;
 };
 
 export const toPickup = (r: StoredRequest): Pickup => ({
   id: r.id, status: r.status, createdAt: r.created_at.toISOString(),
-  address: { name: r.name, addressLine: r.address_line, city: r.city, state: r.state, postalCode: r.postal_code },
+  // A redacted row still carries the marker text in its address columns. Sending
+  // it would make every screen print "[removed by retention policy]" as though
+  // it were a street. The marker column is the honest way to say what happened.
+  address: r.address_redacted_at
+    ? null
+    : { name: r.name, addressLine: r.address_line, city: r.city, state: r.state, postalCode: r.postal_code },
+  addressRedactedAt: r.address_redacted_at ? r.address_redacted_at.toISOString() : null,
   estimatedGrams: r.estimated_grams, material: r.material,
   categoryId: r.category_id, categoryName: r.category_name, rateId: r.rate_id,
   paisePerKg: r.paise_per_kg, amountPaise: r.amount_paise,
@@ -453,6 +480,7 @@ const PICKUP_COLUMNS = `r.id,r.status,r.created_at,r.name,r.address_line,r.city,
   r.amount_paise::text AS amount_paise,r.actual_grams,r.final_rate_id,r.final_paise_per_kg,
   r.final_amount_paise::text AS final_amount_paise,r.collected_at,r.cancelled_at,r.cancellation_reason,
   r.released_at,r.dispute_status,r.dispute_reason,r.dispute_raised_at,r.dispute_resolved_at,
+  r.address_redacted_at,
   p.amount_paise::text AS payout_amount_paise,p.method AS payout_method,p.paid_at AS payout_paid_at`;
 const PICKUP_FROM = `kabadi_pickup.requests r
   LEFT JOIN kabadi_pickup.payouts p ON p.request_id = r.id`;

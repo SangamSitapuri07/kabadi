@@ -204,7 +204,7 @@ inputs and checks active customer membership under database locks for each
 operation. The storage adapter itself cannot authenticate its caller: any
 future caller **must** supply an ID from a validated server-side session. All
 future grant/revocation writers must coordinate on the same account-row lock.
-The test-pickup prototype snapshots the address; multiple addresses, retention
+The test-pickup prototype snapshots the address; multiple addresses
 and production privacy/security are not implemented.
 
 A separate opt-in migration exists but is **not run at startup**. It requires the
@@ -502,9 +502,9 @@ database is reported as a migration that has not run. Run
 The customer's own list now carries the lifecycle (`requested`, `accepted`,
 `collected`) plus, once collected, the measured weight, the collection-time rate
 and the final amount. The UI labels the request-time figure as an estimate and
-the collected figure as the final amount. No cancellation, reassignment,
-dispute handling, notification, payout or retention policy exists yet, and
-collection requires the `collector` role to be granted with the development role
+the collected figure as the final amount. Cancellation, disputes, notifications,
+the payout ledger and a retention policy exist; scheduling and reassignment do
+not. Collection requires the `collector` role to be granted with the development role
 tool — no self-service collector signup exists.
 
 ### Cancellation and releasing a claim (development API)
@@ -537,9 +537,10 @@ gets `OWN_REQUEST` (409) and the UI explains it. This matters because a collecto
 records the weight — self-acceptance would let one person set the quantity and
 receive the money.
 
-Neither action notifies anybody: no messaging exists (see *Notifications: not
-implemented*), and there is no dispute process or retention policy yet. Cancelling after a collector has accepted leaves that
-collector with no signal beyond the row disappearing from their queue.
+The customer's cancellation notifies the collector who held the claim (see
+*In-app notifications*). There is still no external messaging. Cancelling after a
+collector has accepted leaves that collector with no signal beyond the row
+disappearing from their queue and the in-app notice.
 
 ### Disputes (development API)
 
@@ -701,6 +702,59 @@ never told anything. This is stated in three places rather than assumed:
 Nothing reads the latter two. When an external channel is chosen, a sender plugs
 in beside the in-app write; the notice changes from "in-app only" to the real
 state rather than being deleted.
+
+### Retention policy (development API)
+
+Retention is written as a **decision** first and a deletion second, because the
+dangerous part is deciding what may go. The rule that shapes it: **a payout is a
+record that money moved.** An accounting trail that can be quietly shortened is
+not an accounting trail, so no code path in this project deletes a payout, and
+none deletes the request a payout settles.
+
+What retention actually does is **redact**. After a request has been closed for
+long enough that nobody needs to visit the address again, the five personal
+fields on it (`name`, `address_line`, `city`, `state`, `postal_code`) are
+overwritten with `[removed by retention policy]` and `address_redacted_at` is
+set. The weight, the rates, the final amount, the collector, the timestamps and
+any payout row are untouched. **The record keeps its accounting value and loses
+its personal value**, which is the trade a retention policy is supposed to make.
+
+| Data | Kept | Rule |
+| --- | --- | --- |
+| `kabadi_pickup.payouts` | forever | Evidence money moved. Never deleted. |
+| `requests` that carry a payout | forever | The only place the settled amount can be reconstructed from. Never deleted. |
+| `requests` closed with no payout | address removed after **730 days** | Only when `collected` or `cancelled`, with no open dispute. |
+| Live requests (`requested`, `accepted`) | forever | Somebody's pending business. An abandoned request is a support conversation, not garbage. |
+| Notifications, already read | deleted after **180 days** | Delivery was the point; a read message has served it. |
+| Notifications, never read | deleted after **730 days** | "Nobody looked yet" is not "nobody needs it". |
+
+Age is measured from when a request **closed**, never from when it was created,
+so an old account with a pickup collected yesterday keeps that address. A request
+with an open or unresolved dispute is never redacted: the dispute may still need
+the address to resolve.
+
+```sh
+# Dry run: prints exactly what would change. Changes nothing.
+npm run retention:pickups
+
+# Apply it. Both are required; one flag alone cannot delete anything.
+RETENTION_APPLY_CONFIRM=yes npm run retention:pickups -- --apply
+```
+
+A sweep is bounded to 500 rows per call by default (`--limit=N`, maximum 5000)
+and runs as one transaction: either every planned action lands or none does. The
+`UPDATE` and `DELETE` statements repeat the plan's own conditions rather than
+trusting ids alone, so a dispute raised between planning and applying makes that
+row **skip** instead of being erased; the CLI prints the skipped count. There is
+no scheduler and no automatic sweep, deliberately: an irreversible operation
+should not run on a timer nobody is watching.
+
+Migration **v8** adds `address_redacted_at`. It is the only proof that an address
+was removed on purpose rather than never captured, which is why the API sends
+`address: null` plus `addressRedactedAt` instead of an empty object or the marker
+text. The web parsers treat a null address on a redacted row as valid and render
+"Address removed after the retention period; the amount is unchanged" — dropping
+such a row would hide a real completed pickup from the history it belongs to.
 
 ### Customer self-onboarding (development API)
 

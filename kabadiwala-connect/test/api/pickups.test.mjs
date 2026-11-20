@@ -250,13 +250,13 @@ test('collector list fails closed on a malformed or unsettled row', async () => 
 // ---- Schema migration ----------------------------------------------------
 // A recording fake client asserts the SQL the migration emits, so the v1 -> v3
 // chain is checked without a live database.
-test('pickup migration walks v1 to v7 in one run and reports the real starting version', async () => {
+test('pickup migration walks an old schema to the current version and reports the real starting version', async () => {
   const { migratePickups } = await import('../../apps/api/dist/pickups.js');
   const statements = [];
   const V3 = ['collector_id', 'accepted_at', 'collected_at', 'actual_grams',
     'final_rate_id', 'final_paise_per_kg', 'final_amount_paise',
     'cancelled_at', 'cancellation_reason', 'released_at',
-    'dispute_status', 'dispute_reason', 'dispute_raised_at', 'dispute_resolved_at'];
+    'dispute_status', 'dispute_reason', 'dispute_raised_at', 'dispute_resolved_at', 'address_redacted_at'];
   const PAYOUT = ['request_id', 'collector_id', 'amount_paise', 'method', 'paid_at', 'recorded_by'];
   // `columns` defaults to a table that really is at the claimed version, so the
   // verification pass is exercised rather than bypassed.
@@ -286,7 +286,7 @@ test('pickup migration walks v1 to v7 in one run and reports the real starting v
   }
 
   const report = await migratePickups(fakePool(1));
-  assert.deepEqual(report, { action: 'upgraded', schemaVersion: 7, fromVersion: 1, legacyRequests: 1 });
+  assert.deepEqual(report, { action: 'upgraded', schemaVersion: 8, fromVersion: 1, legacyRequests: 1 });
   const all = statements.join('\n');
   // Both upgrade steps ran, in order, and each pinned its own version.
   assert.ok(all.indexOf('SET version = 2') < all.indexOf('ADD COLUMN collector_id'), 'v2 upgrade precedes v3');
@@ -307,14 +307,14 @@ test('pickup migration walks v1 to v7 in one run and reports the real starting v
   // The payout ledger is created last, in its own table.
   assert.ok(all.indexOf('SET version = 5') < all.indexOf('CREATE TABLE IF NOT EXISTS kabadi_pickup.payouts'));
   assert.ok(all.includes('SET version = 6'));
-  assert.ok(all.includes('SET version = 7'));
+  assert.ok(all.includes('SET version = 8'));
   // Existing rows are never rewritten or deleted by the upgrade.
   assert.ok(!/DELETE FROM kabadi_pickup\.requests/i.test(all));
   assert.ok(!/UPDATE kabadi_pickup\.requests SET (material|status)/i.test(all));
 
   // A v2 database takes the last two steps and stays 'upgraded'.
   statements.length = 0;
-  assert.deepEqual(await migratePickups(fakePool(2)), { action: 'upgraded', schemaVersion: 7, fromVersion: 2, legacyRequests: 1 });
+  assert.deepEqual(await migratePickups(fakePool(2)), { action: 'upgraded', schemaVersion: 8, fromVersion: 2, legacyRequests: 1 });
   const v2only = statements.join('\n');
   assert.ok(!v2only.includes('SET version = 2'));
   assert.ok(v2only.includes('ADD COLUMN collector_id'));
@@ -322,7 +322,7 @@ test('pickup migration walks v1 to v7 in one run and reports the real starting v
 
   // A v3 database — the owner's current state — takes only the cancellation step.
   statements.length = 0;
-  assert.deepEqual(await migratePickups(fakePool(3)), { action: 'upgraded', schemaVersion: 7, fromVersion: 3, legacyRequests: 1 });
+  assert.deepEqual(await migratePickups(fakePool(3)), { action: 'upgraded', schemaVersion: 8, fromVersion: 3, legacyRequests: 1 });
   const v3only = statements.join('\n');
   assert.ok(!v3only.includes('ADD COLUMN collector_id'), 'v3 columns are not re-added');
   assert.ok(v3only.includes('ADD COLUMN cancelled_at'));
@@ -332,13 +332,14 @@ test('pickup migration walks v1 to v7 in one run and reports the real starting v
   // as a successful no-op. This is the "already version 3" lie.
   statements.length = 0;
   await assert.rejects(() => migratePickups(fakePool(7, ['collector_id', 'actual_grams'])),
-    /claims version 7 but is missing: accepted_at/);
+    /claims version 8 but is missing: accepted_at/);
   const refused = statements.join('\n');
   assert.ok(!refused.includes('SET version = 3'), 'nothing may be written when verification fails');
 
   // A current database is reported as unchanged, and an unknown version fails.
-  assert.equal((await migratePickups(fakePool(7))).action, 'unchanged');
-  await assert.rejects(() => migratePickups(fakePool(8)), /Unsupported schema/);
+  assert.equal((await migratePickups(fakePool(8))).action, 'unchanged');
+  // One past the newest version this build knows how to read.
+  await assert.rejects(() => migratePickups(fakePool(9)), /Unsupported schema/);
 
   // A fresh schema is 'created' from version 0 and lands directly at 3.
   statements.length = 0;
@@ -357,10 +358,13 @@ test('pickup migration walks v1 to v7 in one run and reports the real starting v
       return { rows: [] };
     }, release: () => {},
   }) });
-  assert.deepEqual(fresh, { action: 'created', schemaVersion: 7, fromVersion: 0, legacyRequests: 0 });
+  assert.deepEqual(fresh, { action: 'created', schemaVersion: 8, fromVersion: 0, legacyRequests: 0 });
   const created = statements.join('\n');
-  assert.ok(created.includes('CHECK (version = 7)'));
-  assert.ok(created.includes('INSERT INTO kabadi_pickup.schema_version VALUES (7)'));
+  assert.ok(created.includes('CHECK (version = 8)'));
+  assert.ok(created.includes('INSERT INTO kabadi_pickup.schema_version VALUES (8)'));
+  // A fresh schema must include the retention marker; a version bump that only
+  // touches the upgrade path leaves new databases without it.
+  assert.ok(created.includes('address_redacted_at timestamptz'));
   // A fresh table defines the cancellation columns directly, not via ALTER.
   assert.ok(created.includes('cancelled_at timestamptz'));
   assert.ok(created.includes('released_at timestamptz'));

@@ -5,7 +5,10 @@ import { useState } from 'react';
 // floating-point rupee conversion happens in the browser.
 type CollectorPickup = {
   id:string; status:'requested'|'accepted'|'collected'|'cancelled'; createdAt:string; estimatedGrams:number;
-  address:{name:string;addressLine:string;city:string;state:string;postalCode:string};
+  // Null once retention has erased it. A missing address is a real, expected
+  // state for an old request, not a malformed row.
+  address:{name:string;addressLine:string;city:string;state:string;postalCode:string} | null;
+  addressRedactedAt: string | null;
   categoryId:string; categoryName:string; rateId:string; paisePerKg:number; amountPaise:string;
   actualGrams:number|null; finalRateId:string|null; finalPaisePerKg:number|null;
   finalAmountPaise:string|null; collectedAt:string|null;
@@ -26,11 +29,21 @@ function parse(value: unknown): CollectorPickup | null {
       typeof v.createdAt !== 'string' || !Number.isInteger(v.estimatedGrams) ||
       !uuid.test(String(v.categoryId ?? '')) || !uuid.test(String(v.rateId ?? '')) ||
       typeof v.categoryName !== 'string' || !Number.isInteger(v.paisePerKg) ||
-      typeof v.amountPaise !== 'string' || !/^\d{1,16}$/.test(v.amountPaise) ||
-      !v.address || typeof v.address !== 'object') return null;
-  const address = v.address as Record<string, unknown>;
-  const fields = ['name','addressLine','city','state','postalCode'] as const;
-  if (fields.some(f => typeof address[f] !== 'string' || !(address[f] as string).trim())) return null;
+      typeof v.amountPaise !== 'string' || !/^\d{1,16}$/.test(v.amountPaise)) return null;
+  // A redacted request has no address, and that is not a parse failure: dropping
+  // the row would hide a real completed pickup from the history it belongs to.
+  const redacted = typeof v.addressRedactedAt === 'string';
+  let address: { name: string; addressLine: string; city: string; state: string; postalCode: string } | null = null;
+  if (v.address === null || v.address === undefined) {
+    if (!redacted) return null;
+  } else {
+    if (typeof v.address !== 'object' || redacted) return null;
+    const raw = v.address as Record<string, unknown>;
+    const fields = ['name','addressLine','city','state','postalCode'] as const;
+    if (fields.some(f => typeof raw[f] !== 'string' || !(raw[f] as string).trim())) return null;
+    address = { name: raw.name as string, addressLine: raw.addressLine as string, city: raw.city as string,
+      state: raw.state as string, postalCode: raw.postalCode as string };
+  }
   if (v.status === 'collected') {
     if (!Number.isInteger(v.actualGrams) || !uuid.test(String(v.finalRateId ?? '')) ||
         !Number.isInteger(v.finalPaisePerKg) || typeof v.finalAmountPaise !== 'string' ||
@@ -39,8 +52,8 @@ function parse(value: unknown): CollectorPickup | null {
   return {
     id: v.id as string, status: v.status as CollectorPickup['status'], createdAt: v.createdAt,
     estimatedGrams: v.estimatedGrams as number,
-    address: { name: address.name as string, addressLine: address.addressLine as string, city: address.city as string,
-      state: address.state as string, postalCode: address.postalCode as string },
+    address,
+    addressRedactedAt: (v.addressRedactedAt as string | null) ?? null,
     categoryId: v.categoryId as string, categoryName: v.categoryName as string, rateId: v.rateId as string,
     paisePerKg: v.paisePerKg as number, amountPaise: v.amountPaise as string,
     actualGrams: (v.actualGrams as number | null) ?? null, finalRateId: (v.finalRateId as string | null) ?? null,
@@ -144,7 +157,9 @@ export function CollectorQueue({ disabled }: { disabled: boolean }) {
     {shown !== null && <div>
       <p>{view === 'open' ? 'Unclaimed requests, oldest first:' : 'Your most recent 50 requests:'}</p>
       {shown.length === 0 ? <p>{view === 'open' ? 'No open requests right now.' : 'No accepted or collected requests yet.'}</p> : <ul className="collector-list">{shown.map(item => {
-        const where = `${item.address.name}, ${item.address.addressLine}, ${item.address.city}, ${item.address.state}, ${item.address.postalCode}`;
+        const where = item.address
+          ? `${item.address.name}, ${item.address.addressLine}, ${item.address.city}, ${item.address.state}, ${item.address.postalCode}`
+          : 'Address removed after the retention period; the amount is unchanged.';
         return <li key={item.id}>
           <span>{item.categoryName} — {item.estimatedGrams} g — estimate {rupees(item.amountPaise)} at {rupees(String(item.paisePerKg))}/kg</span>
           <br /><span>{where}</span>

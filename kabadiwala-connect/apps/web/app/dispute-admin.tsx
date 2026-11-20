@@ -6,7 +6,10 @@ import { useState } from 'react';
 type Dispute = {
   id:string; categoryName:string; estimatedGrams:number; actualGrams:number;
   finalPaisePerKg:number; finalAmountPaise:string;
-  address:{name:string;addressLine:string;city:string;state:string;postalCode:string};
+  // Null once retention has erased it, which can only happen after a dispute is
+  // closed; an open dispute keeps its address.
+  address:{name:string;addressLine:string;city:string;state:string;postalCode:string} | null;
+  addressRedactedAt: string | null;
   dispute:{ reason:string; raisedAt:string };
 };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -92,7 +95,9 @@ export function DisputeAdmin({ disabled }: { disabled: boolean }) {
     <p role="status" aria-live="polite">{message}</p>
     {items !== null && <div>
       {items.length === 0 ? <p>No open disputes.</p> : <ul>{items.map(item => {
-        const where = `${item.address.name}, ${item.address.addressLine}, ${item.address.city}, ${item.address.state}, ${item.address.postalCode}`;
+        const where = item.address
+          ? `${item.address.name}, ${item.address.addressLine}, ${item.address.city}, ${item.address.state}, ${item.address.postalCode}`
+          : 'Address removed after the retention period; the amount is unchanged.';
         return <li key={item.id}>
           <span>{item.categoryName} — recorded {item.actualGrams} g at {rupees(String(item.finalPaisePerKg))}/kg = {rupees(item.finalAmountPaise)}</span>
           <br /><span>Customer estimate was {item.estimatedGrams} g</span>
