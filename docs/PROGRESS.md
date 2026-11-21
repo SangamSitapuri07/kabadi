@@ -162,6 +162,10 @@ instead of rendering panels that would all 403.
   calls answers for that role. A customer then posts a listing, the collector sees it, and the
   private pickup address is **not** in the collector's payload. Cross-role: a customer reading
   `/admin/metrics` and `/admin/audit-events` gets 403.
+- `apps/web` 5/5 component tests (`npm run test:web`), jsdom with payloads captured from the
+  live API: the admin counts render (the `data.metrics` bug fails two of these when restored,
+  so the tests have teeth), the recycler shows its yard total and has no sell button, and a
+  failed load settles into a readable state instead of a spinner.
 - `tsc --noEmit` clean (api and web); `next build` clean, 12 routes, ~100 kB first load.
 - 3 defects were found by running this against the live API rather than by reading the code:
   the admin metrics panel read `data` instead of `data.metrics` and never rendered; the customer
@@ -169,12 +173,12 @@ instead of rendering panels that would all 403.
   successful post; and a shop with no storefront showed a spinner forever.
 
 **Still open under G1:**
-- **Client-side hydration is not verified.** Playwright's browser CDN is unreachable from this
-  build sandbox (`npx playwright install chromium` → ECONNRESET), so no real browser has
-  rendered these pages. The journey test proves routing, the session round-trip, the proxy and
-  the data behind each panel — it cannot prove React renders them without errors. The brief
-  requires a Playwright mobile-viewport journey; that still has to be written and run on a
-  machine that can download Chromium.
+- **No real browser has rendered these pages.** Playwright's browser CDN is unreachable from
+  this sandbox (`npx playwright install chromium` → ECONNRESET). jsdom now proves the panels
+  render without throwing, and the journey test proves routing, the session round-trip, the
+  proxy and the data behind each panel — but neither is a browser: no CSS layout, no
+  mobile viewport, no hydration of the server HTML. The brief's Playwright mobile-viewport
+  journey still has to be written and run on a machine that can download Chromium.
 - Mandi and shop are one component with two headings. They differ in tier, copy and the tier
   named above them, but the *panels* are the same. The brief asks a recycler to see area-wise
   mandis below it, which needs geo (G2) before it can be anything but decoration.
