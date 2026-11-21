@@ -799,6 +799,42 @@ Migration **v9** adds the table. `pickups:version` checks for it physically, so 
 version row claiming 9 without the table is reported as drift rather than
 success.
 
+### Development sign-in for test identities (development only)
+
+Walking the supply chain needs three distinct accounts. Google is the only
+provider, so that would otherwise mean three Google accounts. With this flag the
+app can create disposable identities at `@example.test` addresses instead.
+
+```sh
+DEV_SIGNIN_ENABLED=yes npm run start:api
+```
+
+With it set, the signed-out screen grows a **Create a test account** form. Sign
+in as `shop@example.test`, create another, and grant the tiers with the role tool
+as usual.
+
+**Every guard, and why it exists.** This is the one place in the system that
+invents an identity, so the constraints are deliberately tight:
+
+| Guard | Why |
+| --- | --- |
+| Off unless `DEV_SIGNIN_ENABLED=yes` | One spelling, so a typo cannot half-enable it |
+| Refused when `NODE_ENV=production` | A startup failure, never a quietly ignored extra |
+| Refused on any non-local origin | A password account with a known password on a public host is production auth with development guarantees |
+| Only `@example.test` addresses | A reserved testing domain; it cannot be a real person's mailbox |
+| Creates only — never signs in | Signing into an existing address would be a password bypass on an account you do not own |
+| Better Auth's own sign-up endpoint is 404'd | That endpoint accepts *any* address; the guarded route is the only path |
+| Password 12–200 characters | Length only: complexity rules push people to predictable substitutions |
+
+The account it creates has an ordinary account row. It is **not** a customer, has
+no roles, and sees no panels until the role tool grants something — the same
+spending of trust as any other account.
+
+**What this flag is not.** It is not authentication. There is no email
+verification, no password reset, no rate limiting, no lockout, and nothing stops
+a person who can reach the dev server from making accounts. It exists so tests
+have identities, and it must never be on outside a development machine.
+
 ### The upward supply chain: shop, mandi and recycler (development API)
 
 Customers and collectors were the whole story; material left the system when a

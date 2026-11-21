@@ -23,6 +23,7 @@ type AuthMount = {
   accountView?: { for: (actorId: string) => Promise<{ roles: string[]; active: boolean }> };
   // The upward supply chain: lots held, sold up a tier, and their custody
   // history. Absent when the separate lot migration has not run.
+  devSignIn?: (input: unknown) => Promise<{ outcome: string; cookies?: string[] }>;
   lots?: {
     openFromPickup(actorId: string, raw: unknown): Promise<unknown>;
     held(actorId: string): Promise<unknown>;
@@ -865,6 +866,48 @@ export function createApp(auth?: AuthMount) {
     if (!mapped) { res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'That request was refused.' } }); return; }
     res.status(mapped[0]).json({ error: { code: mapped[1], message: mapped[2] } });
   };
+
+  // Development-only sign-in. Three test identities would otherwise need three
+  // Google accounts, so this creates an @example.test account with a password.
+  // It is absent unless DEV_SIGNIN_ENABLED=yes made the config allow it, and the
+  // config refuses production and any non-local origin, so the 503 below is the
+  // entire surface in every deployment that matters.
+  app.post('/api/v1/dev/sign-in', (req, res, next) => {
+    if (!auth?.devSignIn) {
+      res.status(503).json({ error: { code: 'DEV_SIGNIN_UNAVAILABLE', message: 'Development sign-in is not enabled.' } });
+      return;
+    }
+    if (req.get('origin') !== auth.origin) {
+      res.status(403).json({ error: { code: 'INVALID_ORIGIN', message: 'Request origin is not allowed.' } });
+      return;
+    }
+    const length = req.get('content-length');
+    if (!length || !/^\d+$/.test(length) || Number(length) > 4096 || req.get('transfer-encoding')) {
+      res.status(413).json({ error: { code: 'INVALID_BODY', message: 'Request body is invalid or too large.' } });
+      return;
+    }
+    next();
+  }, express.json({ limit: '4kb', strict: true }), async (req, res) => {
+    try {
+      const result = await auth!.devSignIn!(req.body);
+      if (result.outcome === 'created') {
+        for (const cookie of result.cookies ?? []) res.append('Set-Cookie', cookie);
+        res.status(201).json({ data: { created: true } });
+        return;
+      }
+      if (result.outcome === 'exists') {
+        res.status(409).json({ error: { code: 'ACCOUNT_EXISTS', message: 'That test account already exists. Sign in through the normal screen.' } });
+        return;
+      }
+      if (result.outcome === 'invalid') {
+        res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'Use an @example.test address and a password of at least 12 characters.' } });
+        return;
+      }
+      res.status(503).json({ error: { code: 'DEV_SIGNIN_UNAVAILABLE', message: 'Development sign-in is not enabled.' } });
+    } catch {
+      res.status(503).json({ error: { code: 'DEV_SIGNIN_UNAVAILABLE', message: 'Development sign-in is not available.' } });
+    }
+  });
 
   app.get('/api/v1/lots', async (req, res) => {
     if (!auth?.resolveIdentity || !auth.lots) { lotsUnavailable(res); return; }

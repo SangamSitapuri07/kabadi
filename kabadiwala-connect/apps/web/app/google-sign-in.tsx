@@ -35,7 +35,7 @@ async function getSession(signal?: AbortSignal): Promise<boolean> {
 
 export function GoogleSignIn() {
   const [status, setStatus] = useState<SessionStatus>('checking');
-  const [busy, setBusy] = useState<'sign-in' | 'sign-out' | 'customer-setup' | 'profile-load' | 'profile-save' | null>(null);
+  const [busy, setBusy] = useState<'sign-in' | 'sign-out' | 'customer-setup' | 'profile-load' | 'profile-save' | 'dev-signin' | null>(null);
   const [error, setError] = useState('');
   // This is the outcome of an action, not a durable authorization status.
   const [customerSetup, setCustomerSetup] = useState<'none' | 'completed'>('none');
@@ -48,6 +48,14 @@ export function GoogleSignIn() {
   // showing admin tools to whoever happens to be signed in. Nothing here is an
   // authorization decision -- every route still checks its own grant.
   const [roles, setRoles] = useState<string[] | null>(null);
+  // Development sign-in: creates a disposable @example.test identity so three
+  // tiers can be tested without three Google accounts. The API decides whether
+  // it exists at all; this form only appears once the server has said so.
+  const [devOpen, setDevOpen] = useState(false);
+  const [devEmail, setDevEmail] = useState('');
+  const [devPassword, setDevPassword] = useState('');
+  const [devMessage, setDevMessage] = useState('');
+  const [devAvailable, setDevAvailable] = useState<boolean | null>(null);
   function clearProfile() { setProfileOpen(false); setDetails(blankDetails()); setProfileMessage(''); }
 
   // Another tab may change the session. Discard a previous result and ignore
@@ -73,6 +81,46 @@ export function GoogleSignIn() {
     });
     return () => controller.abort();
   }, []);
+
+  // Creating a test identity. The API refuses unless DEV_SIGNIN_ENABLED=yes made
+  // it available, so a failure here is reported, never worked around.
+  async function devSignIn(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy('dev-signin'); setDevMessage('');
+    try {
+      const response = await fetch('/api/v1/dev/sign-in', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: devEmail, password: devPassword }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const json: unknown = await response.json();
+      if (response.status === 503) { setDevAvailable(false); setBusy(null); return; }
+      if (response.status === 409) {
+        setDevMessage('That test account already exists. Use a different address, or sign in with Google.');
+        setBusy(null); return;
+      }
+      if (response.status !== 201) {
+        const message = (json as { error?: { message?: string } })?.error?.message;
+        setDevMessage(message ?? 'That test account could not be created.');
+        setBusy(null); return;
+      }
+      // Signed in as the new identity. Clear the password and reload the panel
+      // list from the server rather than assuming what it holds.
+      setDevPassword(''); setDevOpen(false);
+      await refreshSession();
+    } catch { setDevMessage('That test account could not be created.'); setBusy(null); }
+  }
+
+  // The session and the roles are both re-read from the server after sign-in:
+  // this component never decides for itself that an identity now exists.
+  async function refreshSession() {
+    try {
+      const signedIn = await getSession();
+      setStatus(signedIn ? 'signed-in' : 'signed-out');
+      if (signedIn) await loadRoles(); else setRoles(null);
+    } catch { setStatus('unavailable'); setRoles(null); }
+    finally { setBusy(null); }
+  }
 
   async function loadRoles() {
     try {
@@ -227,6 +275,35 @@ export function GoogleSignIn() {
       {status === 'unavailable' && <p className="auth-status">Sign-in status is unavailable.</p>}
     </div>
     {status === 'signed-out' && <button type="button" onClick={signIn} disabled={busy !== null}>{busy === 'sign-in' ? 'Opening Google…' : 'Continue with Google'}</button>}
+    {/* Development sign-in. It creates an @example.test identity with a password,
+        which is only possible when the API was started with DEV_SIGNIN_ENABLED=yes
+        on a local origin. The form is not a fallback: if the API refuses, it says
+        so and stays shut. */}
+    {status === 'signed-out' && <div className="dev-signin">
+      {!devOpen && <button type="button" onClick={() => setDevOpen(true)} disabled={busy !== null}>
+        Create a test account (development only)
+      </button>}
+      {devOpen && <form onSubmit={devSignIn}>
+        <h2>Test account</h2>
+        <p>Development only. These accounts are disposable and use a reserved address domain. Never use them for real data.</p>
+        <fieldset disabled={busy !== null}>
+          <label>Email
+            <input type="email" required autoComplete="off" placeholder="shop@example.test"
+              value={devEmail} maxLength={80}
+              onChange={event => { setDevEmail(event.target.value); setDevMessage(''); }} />
+          </label>
+          <label>Password
+            <input type="password" required autoComplete="new-password" minLength={12} maxLength={200}
+              value={devPassword}
+              onChange={event => { setDevPassword(event.target.value); setDevMessage(''); }} />
+          </label>
+          <button type="submit">{busy === 'dev-signin' ? 'Creating…' : 'Create and sign in'}</button>
+          <button type="button" onClick={() => { setDevOpen(false); setDevMessage(''); }}>Cancel</button>
+        </fieldset>
+        <p role="status" aria-live="polite">{devMessage}</p>
+        {devAvailable === false && <p>Development sign-in is not enabled on this server.</p>}
+      </form>}
+    </div>}
     {status === 'signed-in' && <>
       <button type="button" onClick={signOut} disabled={busy !== null}>{busy === 'sign-out' ? 'Signing out…' : 'Sign out'}</button>
       {roles === null && <p className="auth-status">Loading your account…</p>}
