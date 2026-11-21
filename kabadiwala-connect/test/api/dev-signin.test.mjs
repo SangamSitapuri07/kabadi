@@ -200,3 +200,34 @@ test('the mount passes through the stores the app actually asks for', async () =
     assert.ok(mountLine.includes(`${key}:`), `${key} is passed into the mount`);
   }
 });
+
+test('the dev allowlist still permits every endpoint the app itself calls', async () => {
+  // Turning dev sign-in on must not break ordinary Google sign-in. The first
+  // version of the allowlist omitted callback/google and sign-in/social, so
+  // enabling the flag made sign-in fail and the screen said "unavailable".
+  const { readFile } = await import('node:fs/promises');
+  const [authSrc, bridge] = await Promise.all([
+    readFile(new URL('../../apps/api/src/auth.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../../apps/web/app/api/auth/[...path]/route.ts', import.meta.url), 'utf8'),
+  ]);
+  // Every path the web bridge is willing to forward must survive the allowlist.
+  // The bridge lists them on two lines, so read the whole allow expression.
+  const bridgeBlock = bridge.slice(bridge.indexOf('const allowed ='), bridge.indexOf('if (!allowed)'));
+  const forwarded = [...bridgeBlock.matchAll(/'(\/api\/auth\/[a-z/-]+)'/g)].map(m => m[1]);
+  assert.ok(forwarded.length >= 3, `found the forwarded paths (${forwarded.join(', ')})`);
+  const allowBlock = authSrc.slice(authSrc.indexOf('const allowed = (request.method'), authSrc.indexOf('if (!allowed)'));
+  for (const path of new Set(forwarded)) {
+    assert.ok(allowBlock.includes(`'${path}'`), `${path} must remain allowed when dev sign-in is on`);
+  }
+});
+
+test('the dev allowlist still refuses Better Auth\'s own sign-up and sign-in endpoints', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const authSrc = await readFile(new URL('../../apps/api/src/auth.ts', import.meta.url), 'utf8');
+  const allowBlock = authSrc.slice(authSrc.indexOf('const allowed = (request.method'), authSrc.indexOf('if (!allowed)'));
+  // These accept arbitrary addresses or turn a password into a session without
+  // the @example.test check, so they must never be reachable.
+  for (const path of ['/api/auth/sign-up/email', '/api/auth/sign-in/email']) {
+    assert.equal(allowBlock.includes(`'${path}'`), false, `${path} must not be allowed`);
+  }
+});

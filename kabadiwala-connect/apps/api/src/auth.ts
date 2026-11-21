@@ -187,12 +187,13 @@ export function createAuthRuntime(config: AuthConfig) {
       // could register any address on a local dev server.
       if (config.devSignIn) {
         const path = request.url?.split('?')[0] ?? '';
-        const allowed = (request.method === 'GET' && path === '/api/auth/get-session') ||
-          (request.method === 'POST' && path === '/api/auth/sign-out') ||
-          // Accepted and ignored rather than proxied: the API's own /api/v1 route
-          // is what signs a test account in, and a browser that reaches this path
-          // is doing something the app never asks it to do.
-          (request.method === 'POST' && path === '/api/auth/sign-in/email');
+        // Exactly the endpoints the app itself calls. Everything else is refused,
+        // which is the point: Better Auth's own sign-up endpoint accepts any
+        // address, and the guarded route is the only path allowed to create one.
+        const allowed = (request.method === 'GET' &&
+            ['/api/auth/get-session', '/api/auth/callback/google'].includes(path)) ||
+          (request.method === 'POST' &&
+            ['/api/auth/sign-out', '/api/auth/sign-in/social'].includes(path));
         if (!allowed) {
           response.statusCode = 404;
           response.setHeader('content-type', 'application/json');
