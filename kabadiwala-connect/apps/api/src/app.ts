@@ -8,6 +8,7 @@ import { NOTIFICATION_PROVIDER, isNotificationEvent } from './notifications.js';
 import type { CancelOutcome, CollectorOutcome, CreatePickupResult, DisputeOutcome, PayoutOutcome, Pickup } from './pickups.js';
 import { categoryName, rateValue, utcTimestamp } from './catalog.js';
 import type { CategoryPage, RatePage } from './catalog.js';
+import { isRole } from './account-store.js';
 
 type AuthMount = {
   origin: string;
@@ -474,7 +475,13 @@ export function createApp(auth?: AuthMount) {
     try {
       const id = await detailsAuth(req, res); if (id === null) return;
       const view = await auth.accountView.for(id);
-      const roles = view.roles.filter(r => ['customer', 'collector', 'admin'].includes(r));
+      // Every role the account holds, filtered only to ones this build knows.
+      // This used to be a hardcoded ['customer','collector','admin'], which
+      // silently dropped shop, mandi and recycler: an account created as a shop
+      // was told it had no roles and saw the customer "nothing here" screen. Any
+      // role in the list is still a display hint -- every route checks its own
+      // grant -- but dropping a real one makes a working account look broken.
+      const roles = view.roles.filter(isRole);
       res.json({ data: { roles, active: view.active === true } });
     } catch { res.status(503).json({ error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account details are unavailable.' } }); }
   });
@@ -869,8 +876,11 @@ export function createApp(auth?: AuthMount) {
     res.status(mapped[0]).json({ error: { code: mapped[1], message: mapped[2] } });
   };
 
-  // Development-only sign-in. Three test identities would otherwise need three
-  // Google accounts, so this creates an @example.test account with a password.
+  // Development-only test identities. Three test identities would otherwise need
+  // three Google accounts, so this creates an @example.test account with a
+  // password -- and can sign back in to one it created, because walking material
+  // up the chain means switching between them and a form that only creates is a
+  // one-way door.
   // It is absent unless DEV_SIGNIN_ENABLED=yes made the config allow it, and the
   // config refuses production and any non-local origin, so the 503 below is the
   // entire surface in every deployment that matters.
@@ -892,13 +902,27 @@ export function createApp(auth?: AuthMount) {
   }, express.json({ limit: '4kb', strict: true }), async (req, res) => {
     try {
       const result = await auth!.devSignIn!(req.body);
-      if (result.outcome === 'created') {
+      if (result.outcome === 'created' || result.outcome === 'signed-in') {
         for (const cookie of result.cookies ?? []) res.append('Set-Cookie', cookie);
-        res.status(201).json({ data: { created: true, role: (result as { role?: string }).role ?? null } });
+        // 201 for a new identity, 200 for an existing one: a caller can tell
+        // whether it created an account without guessing from a role field.
+        const signedIn = result.outcome === 'signed-in';
+        res.status(signedIn ? 200 : 201).json({ data: signedIn
+          ? { signedIn: true }
+          : { created: true, role: (result as { role?: string }).role ?? null } });
         return;
       }
       if (result.outcome === 'exists') {
         res.status(409).json({ error: { code: 'ACCOUNT_EXISTS', message: 'That test account already exists. Sign in with its password instead.' } });
+        return;
+      }
+      if (result.outcome === 'credentials') {
+        // One message for a wrong address and a wrong password alike.
+        res.status(401).json({ error: { code: 'INVALID_CREDENTIALS', message: 'That email and password do not match a test account.' } });
+        return;
+      }
+      if (result.outcome === 'unprovisioned') {
+        res.status(409).json({ error: { code: 'ACCOUNT_UNPROVISIONED', message: 'That account exists but was never given a role. Create a new one under a different address.' } });
         return;
       }
       if (result.outcome === 'invalid') {

@@ -983,7 +983,71 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       const pwInput = document.querySelector('.dev-signin input[type="password"]');
       await act(async () => { inputSetter.call(pwInput, 'a-long-enough-password'); pwInput.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
       await act(async () => { [...document.querySelectorAll('.dev-signin button')].find(b => b.textContent === 'Create and sign in').click(); });
-      assert.deepEqual(posts, [{ email: 'mandi1@example.test', password: 'a-long-enough-password', role: 'mandi' }]);
+      // The action is sent explicitly, so the server never has to infer which of
+      // two things this form meant.
+      assert.deepEqual(posts, [{ action: 'create', email: 'mandi1@example.test', password: 'a-long-enough-password', role: 'mandi' }]);
+      await unmount();
+    });
+    await t.test('an existing test identity can be signed back in to, and sends no role', async () => {
+      // Walking material up the chain means switching between identities. The
+      // form used to create only, so the account you had just made could never be
+      // returned to: a one-way door in the middle of the walkthrough.
+      const posts = [];
+      let signedIn = false;
+      await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles: signedIn ? ['shop'] : [], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated: signedIn});
+        if (url.endsWith('/api/v1/dev/sign-in') && init?.method === 'POST') {
+          posts.push(JSON.parse(init.body));
+          signedIn = true;
+          return json({ data: { signedIn: true } }, 200);
+        }
+        return json({authenticated: signedIn});
+      });
+      await clickButton('Sign in as a test account (development only)');
+      // No role dropdown while signing in: this account already has its tier,
+      // and the form must not look like it can change it.
+      assert.equal(document.querySelector('.dev-signin select'), null, 'signing in does not ask for a role');
+
+      const inputSetter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+      const emailInput = document.querySelector('.dev-signin input[type="email"]');
+      await act(async () => { inputSetter.call(emailInput, 'shop1@example.test'); emailInput.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+      const pwInput = document.querySelector('.dev-signin input[type="password"]');
+      await act(async () => { inputSetter.call(pwInput, 'a-long-enough-password'); pwInput.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+      await act(async () => { [...document.querySelectorAll('.dev-signin button')].find(b => b.textContent === 'Sign in').click(); });
+
+      assert.deepEqual(posts, [{ action: 'sign-in', email: 'shop1@example.test', password: 'a-long-enough-password' }]);
+      // And the status line says it is a test identity rather than claiming Google.
+      assert.match(document.body.textContent, /Signed in as a test account/);
+      assert.doesNotMatch(document.body.textContent, /Signed in with Google/);
+      await unmount();
+    });
+    await t.test('a taken address switches the form to signing in instead of dead-ending', async () => {
+      // 409 on create means the account is there. The form keeps the address and
+      // offers the password field, rather than making the operator start again.
+      let posted;
+      await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:[], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:false});
+        if (url.endsWith('/api/v1/dev/sign-in') && init?.method === 'POST') {
+          posted = JSON.parse(init.body);
+          return json({ error: { code: 'ACCOUNT_EXISTS', message: 'That test account already exists. Sign in instead.' } }, 409);
+        }
+        return json({authenticated:false});
+      });
+      await clickButton('Create a test account (development only)');
+      const inputSetter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+      const emailInput = document.querySelector('.dev-signin input[type="email"]');
+      await act(async () => { inputSetter.call(emailInput, 'shop1@example.test'); emailInput.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+      const pwInput = document.querySelector('.dev-signin input[type="password"]');
+      await act(async () => { inputSetter.call(pwInput, 'a-long-enough-password'); pwInput.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+      await act(async () => { [...document.querySelectorAll('.dev-signin button')].find(b => b.textContent === 'Create and sign in').click(); });
+      assert.equal(posted.action, 'create');
+      const form = document.querySelector('.dev-signin form');
+      assert.match(form.textContent, /already exists/);
+      assert.equal(form.querySelector('select'), null, 'it is now the sign-in form');
+      // The address survives, so only the password has to be retyped.
+      assert.equal(form.querySelector('input[type="email"]').value, 'shop1@example.test');
       await unmount();
     });
     await t.test('an account holding two tiers gets ONE stock board, at its highest tier', async () => {

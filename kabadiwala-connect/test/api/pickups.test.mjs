@@ -1055,6 +1055,34 @@ test('the roles endpoint reports the caller\'s own grants and nothing else', asy
   assert.deepEqual((await createAccountViewStore(odd).for('user-4')).roles, ['admin']);
 });
 
+test('the roles route reports every upper tier, not just the original three', async () => {
+  // This route used to filter to ['customer','collector','admin'], which silently
+  // dropped shop, mandi and recycler. An account created as a shop was then told
+  // it had no roles, saw the "nothing here yet" screen, and its stock board never
+  // mounted -- even though every API route would have accepted it.
+  for (const role of ['shop', 'mandi', 'recycler']) {
+    const auth = { origin:'http://localhost:3000', handler:async()=>{},
+      resolveIdentity:async()=>({userId:'user-1',cookies:[]}),
+      accountView:{ for:async()=>({ roles:[role], active:true }) } };
+    const server = createApp(auth).listen(0,'127.0.0.1'); await once(server,'listening');
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/account/roles`,
+        { headers: { origin:'http://localhost:3000' } });
+      assert.deepEqual((await response.json()).data, { roles:[role], active:true }, role);
+    } finally { await new Promise(resolve=>server.close(resolve)); }
+  }
+  // A role this build does not know is still dropped rather than forwarded.
+  const odd = { origin:'http://localhost:3000', handler:async()=>{},
+    resolveIdentity:async()=>({userId:'user-1',cookies:[]}),
+    accountView:{ for:async()=>({ roles:['shop','superuser'], active:true }) } };
+  const server = createApp(odd).listen(0,'127.0.0.1'); await once(server,'listening');
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/account/roles`,
+      { headers: { origin:'http://localhost:3000' } });
+    assert.deepEqual((await response.json()).data.roles, ['shop']);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
 test('the roles route requires sign-in and refuses to be a general account dump', async () => {
   let called = 0;
   const auth = { origin:'http://localhost:3000', handler:async()=>{},

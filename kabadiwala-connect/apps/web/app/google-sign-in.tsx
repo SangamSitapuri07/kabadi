@@ -80,9 +80,17 @@ export function GoogleSignIn() {
   // authorization decision -- every route still checks its own grant.
   const [roles, setRoles] = useState<string[] | null>(null);
   // Development sign-in: creates a disposable @example.test identity so three
-  // tiers can be tested without three Google accounts. The API decides whether
-  // it exists at all; this form only appears once the server has said so.
+  // tiers can be tested without three Google accounts -- and signs back in to one
+  // already created, because walking material up the chain means switching
+  // identities and a form that only creates is a one-way door.
   const [devOpen, setDevOpen] = useState(false);
+  // Which of the two things the form is for. Creating names a role; signing in
+  // does not, because the account already has one and this form must never look
+  // like it can change it.
+  const [devMode, setDevMode] = useState<'create' | 'sign-in'>('create');
+  // Whether this session came from the test-account form rather than Google, so
+  // the status line can say which. Display only: the server decides identity.
+  const [devSignedIn, setDevSignedIn] = useState(false);
   const [devEmail, setDevEmail] = useState('');
   // What this test identity IS. The role is chosen before the account exists, so
   // the account is created with its tier rather than being created empty and then
@@ -123,33 +131,46 @@ export function GoogleSignIn() {
     return () => controller.abort();
   }, []);
 
-  // Creating a test identity. The API refuses unless DEV_SIGNIN_ENABLED=yes made
-  // it available, so a failure here is reported, never worked around.
+  // Creating a test identity, or signing back in to one. The API refuses unless
+  // DEV_SIGNIN_ENABLED=yes made it available, so a failure here is reported,
+  // never worked around.
   async function devSignIn(event: React.FormEvent) {
     event.preventDefault();
     setBusy('dev-signin'); setDevMessage('');
+    const creating = devMode === 'create';
     try {
       const response = await fetch('/api/v1/dev/sign-in', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: devEmail, password: devPassword, role: devRole }),
+        // The role is sent only when creating. Sending it while signing in would
+        // imply this form could set a tier on an account that already has one.
+        body: JSON.stringify(creating
+          ? { action: 'create', email: devEmail, password: devPassword, role: devRole }
+          : { action: 'sign-in', email: devEmail, password: devPassword }),
         signal: AbortSignal.timeout(15000),
       });
       const json: unknown = await response.json();
       if (response.status === 503) { setDevAvailable(false); setBusy(null); return; }
-      if (response.status === 409) {
-        setDevMessage('That test account already exists. Sign in with its password below, or use a different address.');
+      // Either success means a session was set, so the panels are re-read from
+      // the server rather than assumed.
+      if (response.status === 201 || response.status === 200) {
+        setDevPassword(''); setDevOpen(false); setDevSignedIn(true);
+        await refreshSession();
+        return;
+      }
+      const message = (json as { error?: { message?: string } })?.error?.message;
+      // A taken address while creating is a nudge, not a failure: the account is
+      // there, so switch the form to signing in and keep the email typed.
+      if (creating && response.status === 409 && message?.includes('already exists')) {
+        setDevMode('sign-in');
+        setDevMessage('That test account already exists. Enter its password to sign in.');
         setBusy(null); return;
       }
-      if (response.status !== 201) {
-        const message = (json as { error?: { message?: string } })?.error?.message;
-        setDevMessage(message ?? 'That test account could not be created.');
-        setBusy(null); return;
-      }
-      // Signed in as the new identity. Clear the password and reload the panel
-      // list from the server rather than assuming what it holds.
-      setDevPassword(''); setDevOpen(false);
-      await refreshSession();
-    } catch { setDevMessage('That test account could not be created.'); setBusy(null); }
+      setDevMessage(message ?? (creating ? 'That test account could not be created.' : 'That account could not be signed in to.'));
+      setBusy(null);
+    } catch {
+      setDevMessage(creating ? 'That test account could not be created.' : 'That account could not be signed in to.');
+      setBusy(null);
+    }
   }
 
   // The session and the roles are both re-read from the server after sign-in:
@@ -182,7 +203,7 @@ export function GoogleSignIn() {
   // outlive the session it described.
   useEffect(() => {
     if (status === 'signed-in') void loadRoles();
-    else if (status === 'signed-out') setRoles(null);
+    else if (status === 'signed-out') { setRoles(null); setDevSignedIn(false); }
   }, [status]);
 
   async function retrySession() {
@@ -313,7 +334,12 @@ export function GoogleSignIn() {
   return <div className="auth-action">
     <div aria-live="polite" role="status">
       {status === 'checking' && <p className="auth-status">Checking sign-in status…</p>}
-      {status === 'signed-in' && <p className="auth-status">Signed in with Google</p>}
+      {/* After a test sign-in the session belongs to an @example.test identity,
+          so claiming Google would be a small lie on the one screen where the
+          owner is checking that switching identities actually worked. */}
+      {status === 'signed-in' && <p className="auth-status" data-test-identity={devSignedIn || undefined}>
+        {devSignedIn ? 'Signed in as a test account' : 'Signed in with Google'}
+      </p>}
       {status === 'unavailable' && <p className="auth-status">Sign-in status is unavailable.</p>}
     </div>
     {status === 'signed-out' && <button type="button" onClick={signIn} disabled={busy !== null}>{busy === 'sign-in' ? 'Opening Google…' : 'Continue with Google'}</button>}
@@ -322,16 +348,24 @@ export function GoogleSignIn() {
         on a local origin. The form is not a fallback: if the API refuses, it says
         so and stays shut. */}
     {status === 'signed-out' && <div className="dev-signin">
-      {!devOpen && <button type="button" onClick={() => setDevOpen(true)} disabled={busy !== null}>
-        Create a test account (development only)
-      </button>}
+      {!devOpen && <>
+        <button type="button" onClick={() => { setDevOpen(true); setDevMode('create'); }} disabled={busy !== null}>
+          Create a test account (development only)
+        </button>
+        {/* Walking material up the chain means switching identities, so signing
+            back in is a first-class action, not something to be discovered. */}
+        <button type="button" onClick={() => { setDevOpen(true); setDevMode('sign-in'); }} disabled={busy !== null}>
+          Sign in as a test account (development only)
+        </button>
+      </>}
       {devOpen && <form onSubmit={devSignIn}>
-        <h2>Test account</h2>
+        <h2>{devMode === 'create' ? 'Create a test account' : 'Sign in as a test account'}</h2>
         <p>Development only. These accounts are disposable and use a reserved address domain. Never use them for real data.</p>
         <fieldset disabled={busy !== null}>
-          <label>I am a
+          {devMode === 'create' && <label>I am a
             {/* The five chain roles. Choosing one creates the account with that
-                tier, so the screen the account lands on matches what was picked. */}
+                tier, so the screen the account lands on matches what was picked.
+                Absent when signing in: that account already has its tier. */}
             <select value={devRole} onChange={event => { setDevRole(event.target.value); setDevMessage(''); }}>
               <option value="customer">Customer — I have scrap to sell</option>
               <option value="collector">Collector — I collect from customers</option>
@@ -339,18 +373,28 @@ export function GoogleSignIn() {
               <option value="mandi">Mandi — I buy from shops</option>
               <option value="recycler">Recycler — I buy from mandis</option>
             </select>
-          </label>
+          </label>}
           <label>Email
-            <input type="email" required autoComplete="off" placeholder={devRole === 'customer' ? 'customer1@example.test' : `${devRole}1@example.test`}
+            <input type="email" required autoComplete="off"
+              placeholder={devMode === 'sign-in' ? 'shop1@example.test'
+                : devRole === 'customer' ? 'customer1@example.test' : `${devRole}1@example.test`}
               value={devEmail} maxLength={80}
               onChange={event => { setDevEmail(event.target.value); setDevMessage(''); }} />
           </label>
           <label>Password
-            <input type="password" required autoComplete="new-password" minLength={12} maxLength={200}
+            <input type="password" required autoComplete={devMode === 'create' ? 'new-password' : 'current-password'}
+              minLength={12} maxLength={200}
               value={devPassword}
               onChange={event => { setDevPassword(event.target.value); setDevMessage(''); }} />
           </label>
-          <button type="submit">{busy === 'dev-signin' ? 'Creating…' : 'Create and sign in'}</button>
+          <button type="submit">{busy === 'dev-signin'
+            ? devMode === 'create' ? 'Creating…' : 'Signing in…'
+            : devMode === 'create' ? 'Create and sign in' : 'Sign in'}</button>
+          <button type="button" onClick={() => {
+            // Switch action without losing the typed address, and clear the
+            // message: the previous one described the other action.
+            setDevMode(devMode === 'create' ? 'sign-in' : 'create'); setDevMessage('');
+          }}>{devMode === 'create' ? 'I already have one' : 'Create a new one'}</button>
           <button type="button" onClick={() => { setDevOpen(false); setDevMessage(''); }}>Cancel</button>
         </fieldset>
         <p role="status" aria-live="polite">{devMessage}</p>

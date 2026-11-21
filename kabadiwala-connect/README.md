@@ -809,10 +809,13 @@ app can create disposable identities at `@example.test` addresses instead.
 DEV_SIGNIN_ENABLED=yes npm run start:api
 ```
 
-With it set, the signed-out screen grows a **Create a test account** form. Pick
-what the identity **is** — customer, collector, shop, mandi or recycler — and the
-account is created with that tier already granted. You land straight in that
-role's view: a shop sees the stock board, a customer sees the pickup panel.
+With it set, the signed-out screen grows two forms: **Create a test account** and
+**Sign in as a test account**.
+
+Creating: pick what the identity **is** — customer, collector, shop, mandi or
+recycler — and the account is created with that tier already granted. You land
+straight in that role's view: a shop sees the stock board, a customer sees the
+pickup panel.
 
 Creating the account and granting its tier are **one step, not two**. The two rows
 written are the application account and its role grant, in one transaction, for
@@ -820,6 +823,28 @@ the auth user Better Auth just made. Before this, the form created only the auth
 user, so the role tool refused the address with "no application account yet" and
 the identity was unusable until someone ran a manual grant — which is not a step
 a person testing the product should have to know about.
+
+Signing back in is **not optional**, and its absence blocked the walkthrough:
+moving material one tier at a time means being the collector, then the shop, then
+the mandi, so the same three identities have to be entered repeatedly. Create-only
+makes each account a one-way door. The sign-in form asks only for an address and a
+password — never a role — because the account already has its tier and the form
+must not look like it could change it. The password is checked against the hash
+Better Auth stored at creation; a wrong one is a 401 with one message for both a
+bad address and a bad password.
+
+Two things it will tell you rather than pretend:
+
+| Response | Meaning |
+| --- | --- |
+| `409 ACCOUNT_EXISTS` | The address is taken. The form switches itself to sign-in and keeps the address typed. |
+| `409 ACCOUNT_UNPROVISIONED` | The auth user exists but was never given a role — an identity made by an older build. It refuses to hand back a session that could see nothing; create a new address. |
+| `401 INVALID_CREDENTIALS` | Address or password is wrong. The same answer either way. |
+
+It is verified end to end against real Postgres and a real Better Auth instance,
+not only with stubs: create, wrong password refused, correct password signed in,
+the resulting cookie resolving to that user, its grant unchanged, and a re-create
+refused without adding a second role.
 
 `admin` is deliberately **not** in the dropdown. It sits outside the supply chain
 and is granted by the local role tool with a recorded reason, never by a form
@@ -834,18 +859,25 @@ invents an identity, so the constraints are deliberately tight:
 | Refused when `NODE_ENV=production` | A startup failure, never a quietly ignored extra |
 | Refused on any non-local origin | A password account with a known password on a public host is production auth with development guarantees |
 | Only `@example.test` addresses | A reserved testing domain; it cannot be a real person's mailbox |
-| Creates only — never signs in | Signing into an existing address would be a password bypass on an account you do not own |
-| Better Auth's own sign-up endpoint is 404'd | That endpoint accepts *any* address; the guarded route is the only path |
+| The action is explicit | `create` and `sign-in` are separate, so a mistyped role cannot quietly become a login |
+| Creating never signs in | A taken address is reported, not entered: otherwise creating would be a password reset on an account you do not own |
+| Signing in requires the stored password | It is an ordinary login checked against Better Auth's hash, not a bypass |
+| Never signs in to an unprovisioned account | A session with no roles can do nothing, which reads as a bug rather than the dead account it is |
+| Better Auth's own sign-up and sign-in are 404'd | Those endpoints accept *any* address; the guarded route is the only path |
 | Password 12–200 characters | Length only: complexity rules push people to predictable substitutions |
 
-The account it creates has an ordinary account row. It is **not** a customer, has
-no roles, and sees no panels until the role tool grants something — the same
-spending of trust as any other account.
+The account it creates has an ordinary account row carrying the role that was
+chosen. It is not privileged beyond that tier: a shop is a shop and nothing more,
+and `admin` can never be among them.
 
 **What this flag is not.** It is not authentication. There is no email
-verification, no password reset, no rate limiting, no lockout, and nothing stops
-a person who can reach the dev server from making accounts. It exists so tests
-have identities, and it must never be on outside a development machine.
+verification, no password reset, no lockout, and nothing stops a person who can
+reach the dev server from making accounts. Better Auth's own rate limiter is on by
+default only in production and this flag is refused there, so on the one machine
+where password sign-in is reachable there is no brute-force limit; that is
+acceptable for a loopback-only test identity and would not be for anything else.
+It exists so tests have identities, and it must never be on outside a development
+machine.
 
 ### The upward supply chain: shop, mandi and recycler (development API)
 

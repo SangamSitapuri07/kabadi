@@ -65,9 +65,9 @@ export function readAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
     googleClientId: GOOGLE_CLIENT_ID, googleClientSecret: GOOGLE_CLIENT_SECRET, devSignIn: devSignInRequested };
 }
 
-// Development-only sign-in. Creates an account with a password so three test
-// identities can exist without three Google accounts, then signs it in and
-// returns the session cookies.
+// Development-only test identities: create one, or sign back in to one that
+// already exists. Google is the only real provider; this exists so the supply
+// chain can be walked without several Google accounts.
 //
 // Every guard here exists because this function is, by construction, the one
 // place in the system that will make up an identity:
@@ -75,15 +75,26 @@ export function readAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
 //     any non-local origin;
 //   * only for an @example.test address, which is a reserved testing domain and
 //     cannot be a real person's mailbox;
-//   * only to CREATE an account. An existing address is rejected, not signed
-//     into, so this cannot be used as a password on somebody else's account;
-//   * Better Auth's own sign-up is disabled, so this route is the only path.
+//   * creating never signs an existing address in -- it reports that the address
+//     is taken, so a mistyped role cannot quietly become a login;
+//   * signing in requires the password Better Auth stored at creation, so it is
+//     an ordinary login for an account on this machine, not a bypass;
+//   * Better Auth's own sign-up and sign-in endpoints are both refused, so this
+//     route is the only path.
 const DEV_EMAIL = /^[a-z0-9][a-z0-9._-]{0,63}@example\.test$/;
 const DEV_PASSWORD_MIN = 12;
 const DEV_PASSWORD_MAX = 200;
 
 export type DevSignInResult =
   | { outcome: 'created'; cookies: string[]; role: Role }
+  | { outcome: 'signed-in'; cookies: string[] }
+  // The auth user exists but holds no role, so every authorized route would
+  // refuse it. Reported rather than signed in: a session that can see nothing
+  // is a puzzle, not a result.
+  | { outcome: 'unprovisioned' }
+  // Wrong email or password. Deliberately one outcome for both: which half was
+  // wrong is not information this route gives away.
+  | { outcome: 'credentials' }
   | { outcome: 'unavailable' }
   | { outcome: 'invalid' }
   | { outcome: 'exists' };
@@ -93,27 +104,69 @@ export type DevSignInResult =
 // the local role tool with a recorded reason, never by a public form.
 const DEV_ROLES: readonly Role[] = ['customer', 'collector', 'shop', 'mandi', 'recycler'];
 
-export function createDevSignIn(
-  config: AuthConfig,
-  signUpEmail: (input: { email: string; password: string; name: string }) => Promise<Response>,
-  provision: (userId: string, role: Role) => Promise<'ready' | 'forbidden' | 'taken'>,
-) {
+type DevDeps = {
+  signUpEmail: (input: { email: string; password: string; name: string }) => Promise<Response>;
+  signInEmail: (input: { email: string; password: string }) => Promise<Response>;
+  provision: (userId: string, role: Role) => Promise<'ready' | 'forbidden' | 'taken'>;
+  // The roles the account holds, read after sign-in. An empty list means the
+  // auth user exists but was never given an application account.
+  rolesOf: (userId: string) => Promise<string[]>;
+};
+
+// The user id of a sign-up/sign-in response, which Better Auth returns as
+// `{ token, user: { id } }`. Read here and never accepted from the caller, so the
+// account being acted on is always the one Better Auth just authenticated.
+async function responseUserId(response: Response): Promise<string | null> {
+  try {
+    const body: unknown = await response.clone().json();
+    const user = body && typeof body === 'object' ? (body as { user?: { id?: unknown } }).user : undefined;
+    return user && typeof user.id === 'string' && user.id.trim() ? user.id : null;
+  } catch { return null; }
+}
+
+export function createDevSignIn(config: AuthConfig, deps: DevDeps) {
+  const { signUpEmail, signInEmail, provision, rolesOf } = deps;
   return async function devSignIn(input: unknown): Promise<DevSignInResult> {
     if (!config.devSignIn) return { outcome: 'unavailable' };
     if (!input || typeof input !== 'object' || Array.isArray(input)) return { outcome: 'invalid' };
     const raw = input as Record<string, unknown>;
-    // Exactly three fields: nothing a caller can add is silently ignored, so a
-    // smuggled `admin` cannot ride along unnoticed.
-    if (Object.keys(raw).length !== 3) return { outcome: 'invalid' };
+    // An explicit action, not an inferred one. If the form simply forgot to
+    // choose, that must be a rejected request rather than a silent attempt to
+    // sign in to an account nobody asked to sign in to.
+    const action = raw.action;
+    if (action !== 'create' && action !== 'sign-in') return { outcome: 'invalid' };
+    // Exact keys: nothing a caller adds is silently ignored, so a smuggled
+    // `admin` cannot ride along unnoticed.
+    const expected = action === 'create' ? ['action', 'email', 'password', 'role'] : ['action', 'email', 'password'];
+    const keys = Object.keys(raw);
+    if (keys.length !== expected.length || keys.some(key => !expected.includes(key))) return { outcome: 'invalid' };
     const email = typeof raw.email === 'string' ? raw.email.trim().toLowerCase() : '';
     const password = typeof raw.password === 'string' ? raw.password : '';
-    const role = raw.role;
     if (!DEV_EMAIL.test(email)) return { outcome: 'invalid' };
-    if (typeof role !== 'string' || !(DEV_ROLES as readonly string[]).includes(role)) return { outcome: 'invalid' };
     // Length only. Complexity rules push people towards predictable
     // substitutions and are not a meaningful defence on a local test account.
     if (password.length < DEV_PASSWORD_MIN || password.length > DEV_PASSWORD_MAX) return { outcome: 'invalid' };
     if (/[\uD800-\uDFFF\u0000-\u001f\u007f-\u009f]/u.test(password)) return { outcome: 'invalid' };
+
+    if (action === 'sign-in') {
+      try {
+        // Better Auth verifies the stored hash. A wrong password is a 401 here,
+        // and it never falls back to creating anything.
+        const result = await signInEmail({ email, password });
+        const cookies = result.headers.getSetCookie();
+        if (!result.ok) return result.status === 401 ? { outcome: 'credentials' } : { outcome: 'unavailable' };
+        const userId = await responseUserId(result);
+        if (!userId) return { outcome: 'unavailable' };
+        // Signing in to an identity with no role would land on a page that can
+        // do nothing, which reads as a bug. Say what is actually wrong instead.
+        const roles = await rolesOf(userId);
+        if (!Array.isArray(roles) || roles.length === 0) return { outcome: 'unprovisioned' };
+        return { outcome: 'signed-in', cookies };
+      } catch { return { outcome: 'unavailable' }; }
+    }
+
+    const role = raw.role;
+    if (typeof role !== 'string' || !(DEV_ROLES as readonly string[]).includes(role)) return { outcome: 'invalid' };
     try {
       // A fixed display name: this is a test identity, not a person, and a name
       // field would be another value to validate for no benefit.
@@ -126,15 +179,8 @@ export function createDevSignIn(
         const status = result.status;
         return status === 422 || status === 400 ? { outcome: 'exists' } : { outcome: 'unavailable' };
       }
-      // The new user's id comes from the sign-up response body, which Better Auth
-      // returns as { token, user }. It is read here rather than accepted from the
-      // caller, so the account provisioned is always the one just created.
-      let userId: string | null = null;
-      try {
-        const body: unknown = await result.clone().json();
-        const user = body && typeof body === 'object' ? (body as { user?: { id?: unknown } }).user : undefined;
-        if (user && typeof user.id === 'string' && user.id.trim()) userId = user.id;
-      } catch { /* treated as a failed creation below */ }
+      // The new user's id is read from the response, never taken from the body.
+      const userId = await responseUserId(result);
       if (!userId) return { outcome: 'unavailable' };
       // The user now exists but has no account row, so every autorized route
       // would refuse it and the role tool would reject it. Provisioning is part
@@ -194,12 +240,18 @@ export function createAuthRuntime(config: AuthConfig) {
     }
     return { userId: data.user.id, cookies: result.headers.getSetCookie() };
   }
-  // The route calls Better Auth's own sign-up through the server SDK, not
-  // through HTTP, so the request never leaves the process.
-  const devSignIn = createDevSignIn(config, async ({ email, password, name }) => {
-    const result = await auth.api.signUpEmail({ body: { email, password, name }, asResponse: true });
-    return result;
-  }, createDevProvisioner(pool));
+  // The route calls Better Auth through the server SDK, not through HTTP, so the
+  // request never leaves the process. Password sign-in is the same code path a
+  // real email/password login would use: the stored hash decides, not the route.
+  const accountView = createAccountViewStore(pool);
+  const devSignIn = createDevSignIn(config, {
+    signUpEmail: async ({ email, password, name }) =>
+      await auth.api.signUpEmail({ body: { email, password, name }, asResponse: true }),
+    signInEmail: async ({ email, password }) =>
+      await auth.api.signInEmail({ body: { email, password }, asResponse: true }),
+    provision: createDevProvisioner(pool),
+    rolesOf: async userId => (await accountView.for(userId)).roles,
+  });
   return {
     resolveIdentity,
     devSignIn,
@@ -210,7 +262,7 @@ export function createAuthRuntime(config: AuthConfig) {
     disputes: createDisputeStore(pool),
     payouts: createPayoutStore(pool),
     notifications: createNotificationStore(pool),
-    accountView: createAccountViewStore(pool),
+    accountView,
     lots: createLotStore(pool),
     catalog: createCatalogStore(pool),
     async handler(request: IncomingMessage, response: ServerResponse) {

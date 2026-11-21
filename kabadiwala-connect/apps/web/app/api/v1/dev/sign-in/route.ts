@@ -1,6 +1,7 @@
-// Same-origin bridge for development sign-in. It rebuilds the body from two
-// primitives so a browser cannot smuggle a name, a role or an account id, and
-// it never forwards an arbitrary path upstream.
+// Same-origin bridge for development sign-in. It rebuilds the body from named
+// primitives so a browser cannot smuggle a name or an account id, and it never
+// forwards an arbitrary path upstream. The action is forwarded as a value from a
+// fixed set, not as an arbitrary string.
 import { loadWorkspaceEnv } from '../../../../env';
 export const dynamic = 'force-dynamic';
 loadWorkspaceEnv();
@@ -39,9 +40,19 @@ export async function POST(request: Request) {
     catch { return error(400, 'INVALID_BODY', 'Request is invalid.'); }
     if (!input || typeof input !== 'object' || Array.isArray(input)) return error(400, 'INVALID_BODY', 'Request is invalid.');
     const v = input as Record<string, unknown>;
+    // Two shapes, one per action: create names a role, sign-in does not. A body
+    // carrying a role while signing in is refused rather than ignored, so the
+    // form can never imply it changed an account's tier by signing in to it.
+    const action = v.action;
+    if (action !== 'create' && action !== 'sign-in') {
+      return error(400, 'INVALID_BODY', 'Say whether this creates a test account or signs in to one.');
+    }
+    const required = action === 'create' ? ['action', 'email', 'password', 'role'] : ['action', 'email', 'password'];
     const keys = Object.keys(v);
-    if (keys.length !== 3 || keys.some(key => !['email', 'password', 'role'].includes(key))) {
-      return error(400, 'INVALID_BODY', 'Exactly an email, a password and a role are required.');
+    if (keys.length !== required.length || keys.some(key => !required.includes(key))) {
+      return error(400, 'INVALID_BODY', action === 'create'
+        ? 'Exactly an email, a password and a role are required.'
+        : 'Exactly an email and a password are required.');
     }
     const email = typeof v.email === 'string' ? v.email.trim().toLowerCase() : '';
     const password = typeof v.password === 'string' ? v.password : '';
@@ -49,7 +60,7 @@ export async function POST(request: Request) {
     // The same five roles the API accepts. admin is not among them: it is granted
     // by the local role tool with a recorded reason, never by a public form.
     if (!/^[a-z0-9][a-z0-9._-]{0,63}@example\.test$/.test(email) || password.length < 12 || password.length > 200 ||
-      typeof role !== 'string' || !['customer', 'collector', 'shop', 'mandi', 'recycler'].includes(role)) {
+      (action === 'create' && (typeof role !== 'string' || !['customer', 'collector', 'shop', 'mandi', 'recycler'].includes(role)))) {
       return error(400, 'INVALID_BODY', 'Use an @example.test address, a password of at least 12 characters, and one of the five chain roles.');
     }
     const internal = new URL(process.env.API_INTERNAL_ORIGIN ?? 'http://127.0.0.1:4000');
@@ -58,7 +69,7 @@ export async function POST(request: Request) {
     const upstream = await fetch(new URL('/api/v1/dev/sign-in', internal), {
       method: 'POST',
       headers: new Headers({ 'content-type': 'application/json', origin: expected.origin }),
-      body: JSON.stringify({ email, password, role }),
+      body: JSON.stringify(action === 'create' ? { action, email, password, role } : { action, email, password }),
       redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(5000),
     });
     const data: unknown = await upstream.json();
@@ -67,12 +78,17 @@ export async function POST(request: Request) {
     if (upstream.status === 201 && data && typeof data === 'object' && 'data' in data && data.data &&
       typeof data.data === 'object' && (data.data as Record<string, unknown>).created === true) {
       payload = { data: { created: true, role: (data.data as Record<string, unknown>).role ?? null } };
+    } else if (upstream.status === 200 && data && typeof data === 'object' && 'data' in data && data.data &&
+      typeof data.data === 'object' && (data.data as Record<string, unknown>).signedIn === true) {
+      payload = { data: { signedIn: true } };
     } else if (data && typeof data === 'object' && 'error' in data && data.error && typeof data.error === 'object' &&
       'code' in data.error && typeof data.error.code === 'string') {
       const messages: Record<string, [number, string]> = {
         DEV_SIGNIN_UNAVAILABLE: [503, 'Development sign-in is not enabled.'],
         INVALID_REQUEST: [400, 'Use an @example.test address, a password of at least 12 characters, and one of the five chain roles.'],
-        ACCOUNT_EXISTS: [409, 'That test account already exists. Sign in through the normal screen.'],
+        ACCOUNT_EXISTS: [409, 'That test account already exists. Sign in instead.'],
+        ACCOUNT_UNPROVISIONED: [409, 'That account exists but has no role. Create a new one under a different address.'],
+        INVALID_CREDENTIALS: [401, 'That email and password do not match a test account.'],
         INVALID_ORIGIN: [403, 'Request origin is not allowed.'],
       };
       const entry = messages[data.error.code];
