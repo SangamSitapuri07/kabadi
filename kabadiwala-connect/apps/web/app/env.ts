@@ -35,19 +35,29 @@ export function loadWorkspaceEnv(): void {
   const root = workspaceRoot(process.cwd());
   if (!root) return;
   try {
-    for (const line of readFileSync(join(root, '.env'), 'utf8').split('\n')) {
-      const match = /^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    // Split on CRLF as well as LF, and do not let a trailing \r reach a value.
+    // A Notepad-saved .env is CRLF, and `.` does not match \r in JavaScript, so
+    // a /(.*)$/ pattern matches nothing at all on every line of such a file --
+    // silently, leaving the whole environment empty. That is how this failed on
+    // the owner's Windows machine and worked everywhere else.
+    const text = readFileSync(join(root, '.env'), 'utf8').replace(/^\uFEFF/, '');
+    for (const line of text.split(/\r?\n/)) {
+      const match = /^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
       if (!match) continue;
       const key = match[1]!;
       // Never override a value the real environment already set: an exported
       // variable, or a .env Next loaded itself, is more specific than this file.
       if (process.env[key] !== undefined) continue;
-      let value = match[2]!.trim();
-      if (value.length >= 2 && (value[0] === '"' || value[0] === "'") && value.at(-1) === value[0]) {
-        value = value.slice(1, -1);
+      // Quoted values are taken literally -- dots in a URL must survive -- and
+      // anything after an unquoted '#' is a comment, so `KEY= # blank` is an
+      // empty value rather than the text of the comment.
+      const raw = match[2]!;
+      let value: string;
+      if (raw.length >= 2 && (raw[0] === '"' || raw[0] === "'") && raw.at(-1) === raw[0]) {
+        value = raw.slice(1, -1);
       } else {
-        const hash = value.indexOf(' #');
-        if (hash !== -1) value = value.slice(0, hash).trimEnd();
+        const hash = raw.indexOf('#');
+        value = (hash === -1 ? raw : raw.slice(0, hash)).trim();
       }
       process.env[key] = value;
     }
