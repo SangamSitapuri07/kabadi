@@ -6,7 +6,7 @@
     "db:generate": "PRISMA_SCHEMA_ENGINE_BINARY=/bin/true prisma generate",
     "db:push": "tsx scripts/bootstrap-db.ts",
     "db:seed": "tsx prisma/seed.ts",
-    "dev": "tsx watch src/server.ts",
+    "dev": "tsx watch --include ../../.env src/server.ts",
     "start": "node dist/src/server.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",

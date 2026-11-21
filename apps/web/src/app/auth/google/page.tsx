@@ -264,13 +264,17 @@ export default function GoogleChooser() {
               <input
                 inputMode="tel"
                 value={phone}
-                onChange={(event) => setPhone(event.target.value.replace(/[^0-9+]/g, ""))}
+                onChange={(event) => {
+                  // Keep a leading + and digits only; drop the spaces people type.
+                  const digits = event.target.value.replace(/[^0-9+]/g, "");
+                  setPhone(digits.startsWith("+") ? `+${digits.slice(1).replace(/\+/g, "")}` : digits.replace(/\+/g, ""));
+                }}
                 placeholder="9876543210"
                 className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
               />
               <span className="mt-1 block text-xs text-slate-500">
                 Required: this is the number a collector or shop will ring. It is also how you
-                sign in without Google.
+                sign in without Google. With or without +91.
               </span>
             </label>
 

@@ -34,29 +34,58 @@ OAuth routes. Everything else — password and OTP login, every dashboard — wo
 
 ---
 
-## 2. Configure the API
+## 2. Put the credentials in `.env`
 
-Add to `.env` (never commit this file):
-
-```bash
-GOOGLE_CLIENT_ID=1234-abcd.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=GOCSPX-xxxxxxxxxxxxxxxx
-GOOGLE_REDIRECT_URI=http://localhost:4000/api/v1/auth/google/callback
-WEB_APP_ORIGIN=http://localhost:3000
-```
-
-Restart the API (`tsx watch` only watches `.ts`, not `.env`):
+Open `/home/user/kabadi/.env` and add these four lines at the end — replace the two
+values with yours. **Do not commit this file** (it is already in `.gitignore`).
 
 ```bash
-touch apps/api/src/config/env.ts     # or just restart the process
+GOOGLE_CLIENT_ID="1234-abcd.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET="GOCSPX-xxxxxxxxxxxxxxxx"
+GOOGLE_REDIRECT_URI="http://localhost:4000/api/v1/auth/google/callback"
+WEB_APP_ORIGIN="http://localhost:3000"
 ```
 
-Check it took:
+Or from a terminal, which also sets the file to mode 600:
 
 ```bash
-curl -s http://127.0.0.1:4000/api/v1/auth/providers
-# {"success":true,"data":{"password":true,"otp":true,"google":true,"googleMisconfigured":false}}
+node /tmp/set-google.mjs 'YOUR_CLIENT_ID' 'YOUR_CLIENT_SECRET'
 ```
+
+Then lock the file down:
+
+```bash
+chmod 600 .env
+```
+
+**No restart is needed.** `npm run dev:api` now runs
+`tsx watch --include ../../.env`, so saving `.env` restarts the API by itself. (That
+`--include` exists because it did *not* restart before, and a saved credential that
+changes nothing is a confusing half hour.)
+
+### Check it in one command
+
+```bash
+npm run google:check
+```
+
+It reads your `.env`, calls the running API, and reports every requirement — without
+printing the secret. A healthy run ends with:
+
+```
+  ok    GOOGLE_CLIENT_ID is set  (72 chars, ends correctly)
+  ok    GOOGLE_CLIENT_SECRET is set  (35 chars, value never printed)
+  ok    GOOGLE_REDIRECT_URI is the local default  http://localhost:4000/api/v1/auth/google/callback
+  ok    API reports google: true  the sign-in page will show the button
+  ok    Google redirect begins  host accounts.google.com
+  ok    PKCE is sent
+
+  Everything checks out.
+```
+
+If it says `API reports google: true, but .env has no GOOGLE_CLIENT_ID`, the running
+process is using credentials you have since removed — restart it so that what it uses
+matches the file.
 
 The web app needs **no** Google configuration. It asks `/auth/providers` and draws
 the button only when `google` is true.

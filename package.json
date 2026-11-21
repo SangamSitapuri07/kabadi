@@ -22,7 +22,8 @@
     "test": "npm --workspace @kabadi/api run test",
     "typecheck": "npm --workspace @kabadi/shared run typecheck && npm --workspace @kabadi/api run typecheck && npm --workspace @kabadi/web run typecheck && npm --workspace @kabadi/mobile run typecheck",
     "build": "npm run build:shared && npm --workspace @kabadi/api run build && npm --workspace @kabadi/web run build",
-    "test:web": "npm --workspace @kabadi/web run test"
+    "test:web": "npm --workspace @kabadi/web run test",
+    "google:check": "node apps/api/scripts/check-google-setup.mjs"
   },
   "engines": {
     "node": ">=20.0.0"
