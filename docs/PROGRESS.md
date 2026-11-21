@@ -122,15 +122,62 @@ Legend: **✅ exists and verified** · **🟡 exists, incomplete** · **❌ miss
 
 These are not features; they are the reasons features are hard to add. Ordered by how much they block.
 
-### G1 — One page, every role (the complaint, confirmed)
+### G1 — One page, every role (the complaint, confirmed) — **CLOSED 2026-11-14**
 
-`apps/web/src/app/page.tsx` is 2405 lines, `"use client"`, with six tabs
-(`marketplace`, `bidding`, `dashboard`, `xray`, `operations`, `security` — `page.tsx:264`,
-rendered at `:1132`, `:1292`, `:1484`, `:1924`, `:1946`, `:1961`). Every signed-in user sees the
-same six. There is no `/customer`, `/collector`, `/shop` or `/recycler` route — the only other
-pages are public (`trace/`, `verify/`).
+**Was:** `apps/web/src/app/page.tsx` was 2405 lines, `"use client"`, with six tabs
+(`marketplace`, `bidding`, `dashboard`, `xray`, `operations`, `security`) shown to every
+signed-in user. There was no `/customer`, `/collector`, `/shop` or `/recycler` route.
 
-**This single fact is why three logins look identical.**
+**And a worse cause underneath it:** that page signed itself in as a hardcoded
+`collector@kabadiwala.local` on mount and kept the token in React state only. Three "different
+logins" were three views of the same account, and a reload lost the session entirely. Removing
+that was the actual fix; the routes are the visible part of it.
+
+**What exists now** (`08b9fe5`):
+
+| Route | Who may open it | What it does |
+|---|---|---|
+| `/` | anyone | real sign-in, six seeded dev accounts, redirects a signed-in visitor to their own dashboard |
+| `/sign-up` | anyone | `POST /auth/register`; ADMIN is not offered (API refuses it too) |
+| `/dashboard/customer` | CUSTOMER | post scrap for pickup, own orders with weighing/settlement |
+| `/dashboard/collector` | COLLECTOR | open pickups in the area, own orders |
+| `/dashboard/shop` | SCRAP_BUSINESS @ TIER_2 | rate card + publish a rate, orders |
+| `/dashboard/mandi` | SCRAP_BUSINESS @ TIER_3 | same account type, different tier and copy |
+| `/dashboard/recycler` | AUTHORISED_RECYCLER | yard inventory, received orders — no sell button, because a recycler is terminal |
+| `/dashboard/admin` | ADMIN | metrics, verification queue, audit trail |
+| `/dashboard` | any signed-in | redirects to the role's own dashboard |
+
+`GET /api/v1/auth/me` was added because there was no way to ask the API who the cookie belongs
+to: the access token is httpOnly, and `POST /auth/refresh` returns tokens only. It answers with
+the login projection plus the role's capabilities, and fails closed (401/403) rather than
+serving a stale claim. `DashboardShell` sends a wrong-role visit to the account's own dashboard
+instead of rendering panels that would all 403.
+
+**Evidence:**
+- `apps/api` 30/30 tests — the 24 existing plus 6 new in `tests/session-dashboard.test.ts`
+  (no session → 401; httpOnly + SameSite; no credential in the body in any casing; four roles
+  return four different capability sets; suspended account refused).
+- `apps/web/tests/dashboard-journey.ts` — all six roles sign in **through the web server's own
+  `/api/v1` proxy**, land on their own route (200, not 404), and every endpoint their dashboard
+  calls answers for that role. A customer then posts a listing, the collector sees it, and the
+  private pickup address is **not** in the collector's payload. Cross-role: a customer reading
+  `/admin/metrics` and `/admin/audit-events` gets 403.
+- `tsc --noEmit` clean (api and web); `next build` clean, 12 routes, ~100 kB first load.
+- 3 defects were found by running this against the live API rather than by reading the code:
+  the admin metrics panel read `data` instead of `data.metrics` and never rendered; the customer
+  page read `data.order` where `POST /listings` answers `data.listing`, crashing on the first
+  successful post; and a shop with no storefront showed a spinner forever.
+
+**Still open under G1:**
+- **Client-side hydration is not verified.** Playwright's browser CDN is unreachable from this
+  build sandbox (`npx playwright install chromium` → ECONNRESET), so no real browser has
+  rendered these pages. The journey test proves routing, the session round-trip, the proxy and
+  the data behind each panel — it cannot prove React renders them without errors. The brief
+  requires a Playwright mobile-viewport journey; that still has to be written and run on a
+  machine that can download Chromium.
+- Mandi and shop are one component with two headings. They differ in tier, copy and the tier
+  named above them, but the *panels* are the same. The brief asks a recycler to see area-wise
+  mandis below it, which needs geo (G2) before it can be anything but decoration.
 
 ### G2 — No location data, so there is no discovery
 
@@ -184,9 +231,10 @@ it → the shop sends an offer → the customer accepts → the transaction appe
 | Nearby discovery | **Blocked by G2** — no coordinates |
 | Shop sends offer | The offer route exists, but it is listing-side (`POST /listings/:id/offers`), i.e. seller-posted; a **buyer-initiated** offer is a different direction and needs confirming |
 | Customer accepts | Exists and is atomic — `POST /offers/:offerId/accept` |
-| Appears in both dashboards | **Blocked by G1** — there are no per-role dashboards |
+| Appears in both dashboards | Partly unblocked — per-role dashboards now exist and both list orders (G1). The offer panels they need are the next step. |
 
-So Slice 1 is roughly: G2 (geo) → buyer-side offer direction → per-role dashboards (G1).
+So Slice 1 is roughly: buyer-side offer direction → offers visible in the two dashboards → G2 (geo) for "nearby".
+G1 (the dashboards themselves) landed on 2026-11-14.
 
 ---
 
@@ -195,16 +243,20 @@ So Slice 1 is roughly: G2 (geo) → buyer-side offer direction → per-role dash
 The brief says thin complete slices over wide incomplete ones. Given the above:
 
 1. **Phase 1 — foundations, minimal and non-negotiable**
-   - **G1 role routes** (`/customer`, `/collector`, `/shop`, `/mandi`→ shop tier 3, `/recycler`,
-     `/admin`) with a real shell, server-checked. This is both the fastest visible win and the
-     thing the owner has been asking for since before this report.
+   - ~~**G1 role routes**~~ — **done** (`08b9fe5`): six dashboards, real session restore,
+     `/sign-up`, all six roles verified through the web proxy. Remaining under G1: a Playwright
+     mobile-viewport run (browser download blocked in the build sandbox).
+   - **Offer flow, per the owner's order** — the dashboards are in place, so offers are next:
+     buyer-side offer creation, offer acceptance by the customer, and the same transaction
+     showing in both parties' dashboards. This is also open question 1 below.
    - **G4 policy layer** + the "no route without a policy check" test.
    - **G3 authorization-matrix test**, started with the routes that exist.
 
 2. **Phase 2 — Slice 1 end to end**
    - **G2 geo**: PostGIS migration, coordinates on storefronts and listings, distance-ranked
      discovery with `EXPLAIN` evidence.
-   - Listing → offer → accept → both dashboards, on the new routes.
+   - Then the full listing → offer → accept → both dashboards path with "nearby" meaning
+     something.
 
 3. **Phase 3 — the rest of the marketplace slices** (pickup PIN, walk-in, receipts, collector
    batching, recycler requirements), **i18n + PWA (G5)**, mobile integration.
