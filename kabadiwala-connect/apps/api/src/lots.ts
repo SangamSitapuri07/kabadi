@@ -310,11 +310,18 @@ export function createLotStore(pool: pg.Pool) {
             [buyerId, found.material, input.grams, input.pricePaise, found.id]);
           buyerLotId = opened.rows[0]!.id;
         }
+        // The remainder keeps the REMAINDER OF THE COST, not the whole cost. Copying
+        // the lot's full basis onto a fraction of its weight would inflate the
+        // seller's inventory the moment they sold part of it -- a 1000 g lot that
+        // cost 100000 and sold 400 g would leave 600 g still "worth" 100000.
+        // Pro-rata, rounded down, so the two halves can never add up to more than
+        // the original basis. The arithmetic is done in bigint in the database:
+        // cost is money, and money never passes through binary floating point.
         if (remainder > 0) {
           await c.query(
             `INSERT INTO kabadi_lots.lots (holder_id, material, grams, cost_paise, parent_lot_id)
-             VALUES ($1,$2,$3,$4::bigint,$5)`,
-            [userId, found.material, remainder, found.cost_paise, found.id]);
+             VALUES ($1,$2,$3,($4::bigint * $3::bigint) / $5::bigint,$6)`,
+            [userId, found.material, remainder, found.cost_paise, found.grams, found.id]);
         }
 
         const sale = await c.query<StoredSale>(

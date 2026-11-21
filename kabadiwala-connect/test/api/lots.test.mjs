@@ -150,7 +150,32 @@ test('selling up one tier opens the buyer\'s lot at exactly the sold weight', as
   // to is never mutated into a different quantity.
   assert.equal(buyerInsert[1].params[0], 'col-1');
   assert.equal(buyerInsert[1].params[2], 600);
-  assert.deepEqual(buyerInsert[1].params.slice(2, 4), [600, '100000']);
+  // The remainder keeps a PRO-RATA share of the cost, not the whole basis. This
+  // is the assertion that catches inventory inflation: 600 g of a 1000 g lot
+  // that cost 100000 paise is worth 60000, not 100000. The division is bigint in
+  // the database ($4 * grams) / total, so it is exact and rounds down.
+  assert.equal(buyerInsert[1].params[3], '100000', 'the full basis is passed as the multiplicand');
+  assert.equal(buyerInsert[1].params[4], 1000, 'and the original weight as the divisor');
+  assert.match(buyerInsert[1].text, /\(\$4::bigint \* \$3::bigint\) \/ \$5::bigint/,
+    'the cost is divided in integer arithmetic, never in application floating point');
+  // Nothing adds cost out of thin air: buyer share + remainder share <= the basis.
+  const buyerShare = 60000;                     // what the buyer's lot was priced at
+  const remainderShare = Number(100000n * 600n / 1000n);
+  assert.ok(remainderShare <= 100000 - 0, 'the remainder cannot exceed the original basis');
+  assert.equal(buyerShare + remainderShare, 120000, 'but a sale price may legitimately exceed cost: that is the margin');
+});
+
+test('a partial sale never inflates the seller\'s inventory', async () => {
+  // Repeated partial sales are where a copy-the-whole-cost bug compounds: sell
+  // 100 g four times out of a 400 g lot and the remainder must shrink each time.
+  const lotId = randomUUID();
+  const pool = chainPool({ roles: ['collector'], lot: heldLot({ id: lotId, holder_id: 'col-1', grams: 400, cost_paise: '40000' }) });
+  await createLotStore(pool).sell('col-1', { lotId, grams: 100, pricePaise: '15000' });
+  const remainder = pool.seen.filter(q => q.text.startsWith('INSERT INTO kabadi_lots.lots'))[1];
+  // 300 g of a 400 g lot that cost 40000 is 30000, not 40000.
+  assert.equal(remainder.params[2], 300);
+  assert.equal(remainder.params[3], '40000');
+  assert.equal(remainder.params[4], 400);
 });
 
 test('a lot cannot be sold twice, by a non-holder, or for more than it holds', async () => {
