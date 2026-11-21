@@ -23,12 +23,26 @@ function isDetails(value: unknown): value is Details {
   });
 }
 
+// Why a session check failed, kept apart because the three cases have different
+// causes and the user cannot act on "unavailable":
+//   unreachable  the request never completed (web server down or hung)
+//   status       the bridge answered an unexpected HTTP status
+//   malformed    a 200 whose body is not the shape the bridge promises
+class SessionError extends Error {
+  constructor(readonly kind: 'unreachable' | 'status' | 'malformed', readonly status?: number) {
+    super(kind);
+  }
+}
+
 async function getSession(signal?: AbortSignal): Promise<boolean> {
-  const response = await fetch('/api/auth/get-session', { cache: 'no-store', signal });
-  if (!response.ok) throw new Error('Session unavailable');
-  const result: unknown = await response.json();
+  let response: Response;
+  try { response = await fetch('/api/auth/get-session', { cache: 'no-store', signal }); }
+  catch { throw new SessionError('unreachable'); }
+  if (!response.ok) throw new SessionError('status', response.status);
+  let result: unknown;
+  try { result = await response.json(); } catch { throw new SessionError('malformed', response.status); }
   if (!result || typeof result !== 'object' || !('authenticated' in result) || typeof result.authenticated !== 'boolean') {
-    throw new Error('Invalid session response');
+    throw new SessionError('malformed', response.status);
   }
   return result.authenticated;
 }
@@ -37,6 +51,8 @@ export function GoogleSignIn() {
   const [status, setStatus] = useState<SessionStatus>('checking');
   const [busy, setBusy] = useState<'sign-in' | 'sign-out' | 'customer-setup' | 'profile-load' | 'profile-save' | 'dev-signin' | null>(null);
   const [error, setError] = useState('');
+  // The measured reason the session could not be read. Null when it was read.
+  const [sessionProblem, setSessionProblem] = useState<{ kind: string; status?: number } | null>(null);
   // This is the outcome of an action, not a durable authorization status.
   const [customerSetup, setCustomerSetup] = useState<'none' | 'completed'>('none');
   const setupGeneration = useRef(0);
@@ -75,9 +91,15 @@ export function GoogleSignIn() {
   useEffect(() => {
     const controller = new AbortController();
     getSession(controller.signal).then(signedIn => {
-      if (!controller.signal.aborted) setStatus(signedIn ? 'signed-in' : 'signed-out');
-    }).catch(() => {
-      if (!controller.signal.aborted) setStatus('unavailable');
+      if (controller.signal.aborted) return;
+      setSessionProblem(null);
+      setStatus(signedIn ? 'signed-in' : 'signed-out');
+    }).catch((failure: unknown) => {
+      if (controller.signal.aborted) return;
+      setSessionProblem(failure instanceof SessionError
+        ? { kind: failure.kind, status: failure.status }
+        : { kind: 'malformed' });
+      setStatus('unavailable');
     });
     return () => controller.abort();
   }, []);
@@ -147,6 +169,7 @@ export function GoogleSignIn() {
   async function retrySession() {
     setStatus('checking');
     setError('');
+    setSessionProblem(null);
     setupGeneration.current++;
     setCustomerSetup('none');
     clearProfile();
@@ -343,7 +366,22 @@ export function GoogleSignIn() {
       {/* Everyone has an inbox; it is the only panel that is universal. */}
       {busy !== 'sign-out' && roles !== null && <NotificationInbox disabled={busy !== null} />}
     </>}
-    {status === 'unavailable' && <button type="button" onClick={retrySession}>Try again</button>}
+    {status === 'unavailable' && <div className="auth-unavailable">
+      <button type="button" onClick={retrySession}>Try again</button>
+      {/* Three different failures used to show one sentence, which told nobody
+          anything. Each cause now says what it is and what to do. */}
+      {sessionProblem?.kind === 'status' && sessionProblem.status === 404 &&
+        <p role="status">The API does not recognise the session endpoint (404). The API process is probably running an older build: rebuild it and restart.</p>}
+      {sessionProblem?.kind === 'status' && sessionProblem.status === 503 &&
+        <p role="status">The API says sign-in is not configured (503). Start the API with <code>AUTH_ENABLED=true</code> and complete its configuration.</p>}
+      {sessionProblem?.kind === 'status' && sessionProblem.status !== 404 && sessionProblem.status !== 503 &&
+        <p role="status">The session endpoint answered HTTP {sessionProblem.status}.</p>}
+      {sessionProblem?.kind === 'unreachable' &&
+        <p role="status">The web app could not reach its API. Check that the API is running on port 4000 and that <code>API_INTERNAL_ORIGIN</code> points at it.</p>}
+      {sessionProblem?.kind === 'malformed' &&
+        <p role="status">The session endpoint answered with something unreadable. Check the API process output for an error.</p>}
+      {sessionProblem === null && <p role="status">The session could not be read.</p>}
+    </div>}
     <p className="auth-note">Development only. Sign-in and security are not ready for production.</p>
     {error && <p role="alert" className="auth-error">{error}</p>}
   </div>;

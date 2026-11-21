@@ -113,6 +113,31 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
       assert.deepEqual(JSON.parse(requests[1][1].body), { provider: 'google', callbackURL: '/' });
       await unmount();
     });
+    await t.test('an unavailable session names the cause instead of one opaque line', async () => {
+      // 404 means the API is running a build without the session endpoint, which
+      // is the exact failure a stale dist caused on a real machine. 503 means
+      // sign-in is not configured. Saying "unavailable" for both wasted a
+      // debugging round trip.
+      await mount(async () => json({ error: { code: 'NOT_FOUND' } }, 404));
+      assert.match(document.body.textContent, /older build/i);
+      assert.match(document.body.textContent, /404/);
+      await unmount();
+
+      await mount(async () => json({ error: { code: 'AUTH_UNAVAILABLE' } }, 503));
+      assert.match(document.body.textContent, /not configured/i);
+      assert.match(document.body.textContent, /503/);
+      await unmount();
+
+      // A network failure is a third, different sentence.
+      await mount(async () => { throw new TypeError('Failed to fetch'); });
+      assert.match(document.body.textContent, /could not reach its API/i);
+      await unmount();
+
+      // A 200 with an unreadable body is a fourth.
+      await mount(async () => json({ nope: true }));
+      assert.match(document.body.textContent, /unreadable/i);
+      await unmount();
+    });
     await t.test('signed-in state and confirmed sign-out', async () => {
       let session = true;
       await mount(async (url, init) => {
