@@ -1,5 +1,4 @@
 'use client';
-
 // Collector: claim open pickups, then sell what you collected up the chain.
 //
 // A collector is both a worker and a seller, so this page carries two panels --

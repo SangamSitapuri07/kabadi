@@ -1,5 +1,4 @@
 'use client';
-
 // Recycler: the top of the chain. Buys from mandis and processes.
 //
 // There is no tier above a recycler, so there is no Sell panel -- the lot board

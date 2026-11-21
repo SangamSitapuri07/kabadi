@@ -1,5 +1,4 @@
 'use client';
-
 // Area shop: buy from collectors, sell up to a wholesale mandi.
 //
 // A shop is a chain position, not an admin. It prices its own material and

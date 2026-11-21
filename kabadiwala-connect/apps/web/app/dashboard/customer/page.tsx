@@ -1,5 +1,4 @@
 'use client';
-
 // Customer: post scrap, watch its pickup status.
 //
 // Deliberately narrow. A customer does not price material, does not see other

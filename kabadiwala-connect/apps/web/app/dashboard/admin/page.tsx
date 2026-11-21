@@ -1,5 +1,4 @@
 'use client';
-
 // Administrator: the only dashboard with cross-account authority.
 //
 // Disputes and payouts are decisions about *other* people's money and material,

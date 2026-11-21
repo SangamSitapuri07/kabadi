@@ -1,5 +1,4 @@
 'use client';
-
 // Wholesale mandi: buy from shops, aggregate, sell up to a recycler.
 //
 // The same lot board as a shop, one tier higher. That difference lives in the
