@@ -40,6 +40,23 @@ const EnvSchema = z.object({
   CORS_ALLOWED_ORIGINS: z
     .string()
     .default("http://localhost:3000,http://127.0.0.1:3000"),
+  // --- Google Sign-In (optional) -------------------------------------------
+  //
+  // Deliberately optional and not `min(1)`: the whole product has to run, and be
+  // testable, without any Google project. When either id or secret is missing the
+  // API answers "not configured" on the OAuth routes and the sign-in page simply
+  // does not render the Google button. A half-configured pair is a startup error
+  // rather than a silent downgrade, because a button that always fails is worse
+  // than a button that is not there.
+  GOOGLE_CLIENT_ID: z.string().trim().max(200).optional(),
+  GOOGLE_CLIENT_SECRET: z.string().trim().max(200).optional(),
+  // Where Google sends the browser back. Must be registered byte-for-byte in the
+  // Google Cloud console, so it is configuration, not a value computed from the
+  // request: computing it from the Host header would let an attacker choose it.
+  GOOGLE_REDIRECT_URI: z.string().url().optional(),
+  // The page the browser returns to after the callback finishes. The callback runs
+  // on the API origin, so without this the user would end up on :4000.
+  WEB_APP_ORIGIN: z.string().url().default("http://localhost:3000"),
 });
 
 const parsed = EnvSchema.safeParse({

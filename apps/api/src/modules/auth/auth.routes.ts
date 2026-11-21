@@ -30,6 +30,7 @@ import {
 } from "../../middleware/security.middleware";
 import { recordAuditEvent } from "../audit/audit.service";
 import { resolveSmsGatewayAdapter } from "../integrations/gateways.service";
+import { readGoogleIdentity } from "./google-oauth.service";
 
 export const authRouter = Router();
 
@@ -111,6 +112,29 @@ export function serializeOwnUserAccount(user: {
     organization: user.organization ?? null,
   };
 }
+
+// GET /api/v1/auth/providers — what the sign-in page may offer.
+//
+// Public and unauthenticated by necessity: the page has to know whether to draw a
+// Google button before anybody is signed in. It reveals only whether the feature is
+// switched on -- never the client id, never a secret -- because the client id is
+// not needed by the browser in the redirect flow (the API builds that URL).
+authRouter.get("/providers", (_req, res) => {
+  let googleAvailable = false;
+  let googleMisconfigured = false;
+  try {
+    googleAvailable = readGoogleIdentity() !== null;
+  } catch {
+    googleMisconfigured = true;
+  }
+  sendSuccess(res, {
+    password: true,
+    otp: true,
+    google: googleAvailable,
+    // The page shows an operator-facing note only when someone set half the config.
+    googleMisconfigured,
+  });
+});
 
 // POST /api/v1/auth/register
 authRouter.post(

@@ -582,3 +582,67 @@ ALTER TABLE "AIScanRecord" ADD COLUMN IF NOT EXISTS "perceptualHash" TEXT;
 ALTER TABLE "AIScanRecord" ADD COLUMN IF NOT EXISTS "mediaStorageKey" TEXT;
 CREATE INDEX IF NOT EXISTS "AIScanRecord_imageSha256_idx" ON "AIScanRecord"("imageSha256");
 
+
+-- ============================================================================
+-- 5. Google Sign-In (additive, idempotent)
+-- ============================================================================
+--
+-- A Google identity is stored in its own table rather than as columns on "User".
+-- One account may later hold more than one provider (Google now, something else
+-- later) without another ALTER on the hot table, and unlinking is a DELETE of one
+-- row instead of a nullable column that has to be reasoned about everywhere.
+--
+-- "providerAccountId" is the `sub` claim from Google, which is stable for a given
+-- Google account even if the person changes their Gmail address. The email column
+-- is stored for display and for the link-by-verified-email flow, and is never used
+-- as the lookup key -- emails can be reassigned, `sub` cannot.
+CREATE TABLE IF NOT EXISTS "OAuthAccount" (
+  "id" TEXT PRIMARY KEY,
+  "userId" TEXT NOT NULL REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE,
+  "provider" TEXT NOT NULL,
+  "providerAccountId" TEXT NOT NULL,
+  "email" TEXT,
+  "emailVerified" BOOLEAN NOT NULL DEFAULT FALSE,
+  "displayName" TEXT,
+  "avatarUrl" TEXT,
+  "linkedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "lastUsedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "OAuthAccount_provider_account_unique" UNIQUE ("provider", "providerAccountId")
+);
+CREATE INDEX IF NOT EXISTS "OAuthAccount_userId_idx" ON "OAuthAccount"("userId");
+CREATE INDEX IF NOT EXISTS "OAuthAccount_email_idx" ON "OAuthAccount"("email");
+
+-- The CSRF `state` value of an in-flight authorization. It is stored server-side,
+-- single-use, and short-lived, because a state that only lives in a cookie can be
+-- replayed by anyone who can set that cookie. `codeVerifier` is the PKCE secret for
+-- the matching token exchange -- PKCE matters here even though the client secret is
+-- also used: it protects against an intercepted authorization code.
+CREATE TABLE IF NOT EXISTS "OAuthState" (
+  "id" TEXT PRIMARY KEY,
+  "stateHash" TEXT NOT NULL UNIQUE,
+  "codeVerifier" TEXT NOT NULL,
+  "redirectTo" TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "expiresAt" TIMESTAMP(3) NOT NULL,
+  "consumedAt" TIMESTAMP(3)
+);
+CREATE INDEX IF NOT EXISTS "OAuthState_expiresAt_idx" ON "OAuthState"("expiresAt");
+
+-- "Google said yes, but this person has not chosen an account type yet." Holds the
+-- verified profile for a few minutes so the chooser screen can render without the
+-- browser carrying any of it. Single-use, like the state above.
+CREATE TABLE IF NOT EXISTS "PendingGoogleSignup" (
+  "id" TEXT PRIMARY KEY,
+  "handleHash" TEXT NOT NULL UNIQUE,
+  "profileJson" TEXT NOT NULL,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "expiresAt" TIMESTAMP(3) NOT NULL,
+  "consumedAt" TIMESTAMP(3)
+);
+CREATE INDEX IF NOT EXISTS "PendingGoogleSignup_expiresAt_idx" ON "PendingGoogleSignup"("expiresAt");
+
+-- "phone" stays NOT NULL on purpose. Google does not supply a number, and this
+-- marketplace cannot work without one -- the collector has to call somebody, and
+-- OTP login is keyed on it. Rather than a nullable column that every screen then
+-- has to reason about, the Google sign-up step simply asks for the phone. That is
+-- also the honest moment to ask: before the account exists, not after.

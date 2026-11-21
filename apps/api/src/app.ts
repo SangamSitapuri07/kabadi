@@ -15,6 +15,7 @@ import { adminRouter } from "./modules/admin/admin.routes";
 import { aiRouter } from "./modules/ai/ai.routes";
 import { getOnnxEngineHealth } from "./modules/ai/onnx.engine";
 import { authRouter } from "./modules/auth/auth.routes";
+import { googleAuthRouter } from "./modules/auth/google-oauth.routes";
 import { webhooksRouter } from "./modules/integrations/webhooks.routes";
 import { marketplaceRouter } from "./modules/marketplace/marketplace.routes";
 import { operationsRouter } from "./modules/operations/operations.routes";
@@ -81,6 +82,9 @@ export function createApp() {
   });
 
   // Versioned modular /api/v1 routes
+  // Mounted before the main auth router so /auth/google/* is not shadowed by any
+  // future wildcard on /auth.
+  app.use("/api/v1/auth/google", googleAuthRouter);
   app.use("/api/v1/auth", authRouter);
   app.use("/api/v1/users", usersRouter);
   app.use("/api/v1/public", publicVerifyRouter);

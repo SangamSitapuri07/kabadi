@@ -116,6 +116,8 @@ enum DisputeStatus {
 
 model User {
   id                String            @id @default(uuid())
+  // NOT NULL even for Google sign-ups: the phone is how a pickup happens, so the
+  // Google sign-up screen asks for it before creating the account.
   phone             String            @unique
   email             String?           @unique
   passwordHash      String
@@ -147,6 +149,7 @@ model User {
   syncOperations         SyncOperation[]
   notifications          Notification[]
   auditEvents            AuditEvent[]
+  oAuthAccounts          OAuthAccount[]
 
   @@index([role, tier])
   @@index([accountStatus])
@@ -721,4 +724,55 @@ model AuditEvent {
   @@index([action, createdAt])
   @@index([resourceType, resourceId])
   @@index([actorId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Google Sign-In
+// ---------------------------------------------------------------------------
+
+// One row per provider identity. Keyed on Google's `sub`, never on the email.
+model OAuthAccount {
+  id                String   @id @default(uuid())
+  userId            String
+  provider          String
+  providerAccountId String
+  email             String?
+  emailVerified     Boolean  @default(false)
+  displayName       String?
+  avatarUrl         String?
+  linkedAt          DateTime @default(now())
+  lastUsedAt        DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@index([email])
+}
+
+// The server-side half of the OAuth CSRF defence while a browser is at Google.
+model OAuthState {
+  id           String    @id @default(uuid())
+  stateHash    String    @unique
+  codeVerifier String
+  redirectTo   String?
+  createdAt    DateTime  @default(now())
+  expiresAt    DateTime
+  consumedAt   DateTime?
+
+  @@index([expiresAt])
+}
+
+// "Google said yes, but this person has not chosen an account type yet."
+// Holds the verified profile for a few minutes so the chooser screen can render
+// without the browser carrying any of it.
+model PendingGoogleSignup {
+  id          String    @id @default(uuid())
+  handleHash  String    @unique
+  profileJson String
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+  consumedAt  DateTime?
+
+  @@index([expiresAt])
 }
