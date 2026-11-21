@@ -900,20 +900,3 @@ authRouter.post(
     }
   }
 );
-
-// GET /api/v1/auth/me
-authRouter.get("/me", authenticate, async (req, res) => {
-  const prisma = await getPrisma();
-  const user = await prisma.user.findUnique({
-    where: { id: req.actor!.id },
-    include: {
-      profile: true,
-      organization: { include: { storefront: true } },
-    },
-  });
-  if (!user) {
-    sendError(res, 404, "NOT_FOUND", "Account not found");
-    return;
-  }
-  sendSuccess(res, { user: serializeOwnUserAccount(user) });
-});

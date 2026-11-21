@@ -2,31 +2,29 @@
 
 // Sign-in, and the front door.
 //
-// The previous version auto-signed-in as one hardcoded collector on mount, kept
-// the token in React state, and had no way to restore a session. Every visitor was
-// therefore the same person, which is why every role looked identical. Accounts
-// are still listed here for convenience -- they are seeded development identities,
-// clearly labelled -- but choosing one is a real login and the result is a real
-// session that survives a reload.
+// The previous version auto-signed-in as one hardcoded collector on mount and kept
+// the token in React state, so every visitor was the same person. This one performs
+// a real login and the API's httpOnly cookie is the session; a reload keeps it.
+//
+// There is deliberately no list of seeded accounts on this page. That block was a
+// development harness, and it published working passwords in the UI.
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { AlertTriangle, ArrowRight, Lock, Sprout } from "lucide-react";
+import { AlertTriangle, ArrowRight, Sprout } from "lucide-react";
 import { dashboardPathFor, useSession, type SessionUser } from "../lib/session";
 
-// Seeded development identities (see apps/api/prisma/seed.ts). Not secrets: they
-// only exist in a local database, and the API refuses them in production because
-// registration is the only way to make an account there.
-const DEMO_ACCOUNTS = [
-  { label: "Customer", detail: "Sells scrap", email: "customer@kabadiwala.local", pass: "KabadiPass123" },
-  { label: "Collector", detail: "Collects locally", email: "collector@kabadiwala.local", pass: "KabadiPass123" },
-  { label: "Area shop", detail: "Buys from collectors", email: "shop@kabadiwala.local", pass: "KabadiPass123" },
-  { label: "Wholesale mandi", detail: "Buys from shops", email: "wholesale@kabadiwala.local", pass: "KabadiPass123" },
-  { label: "Recycler", detail: "End of the chain", email: "recycler@kabadiwala.local", pass: "KabadiPass123" },
-  { label: "Admin", detail: "Platform staff", email: "admin@kabadiwala.local", pass: "AdminPass123" },
-];
-
 type Phase = "idle" | "submitting" | "error";
+
+// The chain a user lands in, shown so the sign-in page explains the product rather
+// than only collecting a password.
+const CHAIN = [
+  { name: "Customer", detail: "Lists scrap, gets offers, watches the weight and the settlement." },
+  { name: "Collector", detail: "Finds pickups nearby, collects, sells on to an area shop." },
+  { name: "Area shop", detail: "Publishes rates, buys from collectors, sells to the mandi." },
+  { name: "Wholesale mandi", detail: "Buys in bulk from shops, bales and sells to recyclers." },
+  { name: "Recycler", detail: "Takes material at the end of the chain and processes it." },
+];
 
 export default function Home() {
   const router = useRouter();
@@ -36,8 +34,7 @@ export default function Home() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [message, setMessage] = useState("");
 
-  // Already signed in? Go where that account belongs. This replaces the old
-  // behaviour of forgetting the session on every navigation.
+  // Already signed in? Go where that account belongs.
   useEffect(() => {
     if (state.status === "authenticated") {
       router.replace(dashboardPathFor(state.session.user));
@@ -60,14 +57,14 @@ export default function Home() {
         | null;
 
       if (!response.ok || !envelope?.success || !envelope.data?.user) {
-        // The API's own message is shown when it has one, because "invalid
-        // credentials" and "account suspended" mean different things to the user.
+        // The API's own message is shown when it has one, because "wrong password"
+        // and "account suspended" mean different things to the person reading it.
         setPhase("error");
         setMessage(envelope?.error?.message ?? "Those details were not accepted.");
         return;
       }
-      // The tokens are in httpOnly cookies, so the only thing left to do is ask
-      // the API who we now are and route accordingly.
+      // The tokens are in httpOnly cookies, so the only thing left is to ask the API
+      // who we now are and route accordingly.
       await reload();
       router.push(dashboardPathFor(envelope.data.user));
     } catch {
@@ -82,15 +79,32 @@ export default function Home() {
         <Sprout className="h-5 w-5" />
         <span className="text-sm font-semibold">Kabadiwala Connect</span>
       </div>
-      <h1 className="mt-4 text-3xl font-semibold tracking-tight">
-        Give your scrap a <span className="text-emerald-700">new beginning.</span>
-      </h1>
-      <p className="mt-2 max-w-xl text-slate-600">
-        Connect with local collectors, area shops, wholesale mandis and authorised
-        recyclers. Every role gets its own dashboard.
-      </p>
 
-      <div className="mt-8 grid gap-6 md:grid-cols-2">
+      <div className="mt-8 grid gap-10 md:grid-cols-2 md:items-start">
+        <div>
+          <h1 className="text-3xl font-semibold tracking-tight">
+            Give your scrap a <span className="text-emerald-700">new beginning.</span>
+          </h1>
+          <p className="mt-3 text-slate-600">
+            One chain, five kinds of account, and a dashboard for each. Nobody sees
+            another role&apos;s tools.
+          </p>
+
+          <ol className="mt-8 space-y-4">
+            {CHAIN.map((step, index) => (
+              <li key={step.name} className="flex gap-3">
+                <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-xs font-semibold text-emerald-800">
+                  {index + 1}
+                </span>
+                <div>
+                  <p className="text-sm font-medium">{step.name}</p>
+                  <p className="text-sm text-slate-600">{step.detail}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <h2 className="text-base font-semibold">Sign in</h2>
           <form
@@ -130,6 +144,7 @@ export default function Home() {
               {phase !== "submitting" && <ArrowRight className="h-4 w-4" />}
             </button>
           </form>
+
           {message && (
             <p
               role="alert"
@@ -139,45 +154,13 @@ export default function Home() {
               {message}
             </p>
           )}
+
           <p className="mt-4 text-xs text-slate-500">
             New here?{" "}
             <Link href="/sign-up" className="font-medium text-emerald-700 underline">
               Create an account
             </Link>
           </p>
-        </section>
-
-        <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex items-center gap-2">
-            <Lock className="h-4 w-4 text-slate-400" />
-            <h2 className="text-base font-semibold">Development accounts</h2>
-          </div>
-          <p className="mt-1 text-sm text-slate-600">
-            These exist only in a seeded local database. Each one opens a different
-            dashboard.
-          </p>
-          <ul className="mt-4 divide-y divide-slate-100">
-            {DEMO_ACCOUNTS.map((account) => (
-              <li key={account.email} className="flex items-center justify-between gap-3 py-2">
-                <div>
-                  <p className="text-sm font-medium">{account.label}</p>
-                  <p className="text-xs text-slate-500">{account.detail}</p>
-                </div>
-                <button
-                  type="button"
-                  disabled={phase === "submitting"}
-                  onClick={() => {
-                    setIdentifier(account.email);
-                    setPassword(account.pass);
-                    void signIn(account.email, account.pass);
-                  }}
-                  className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-50 disabled:opacity-60"
-                >
-                  Sign in
-                </button>
-              </li>
-            ))}
-          </ul>
         </section>
       </div>
     </main>

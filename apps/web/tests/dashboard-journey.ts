@@ -81,12 +81,30 @@ function check(condition: boolean, label: string) {
   }
 }
 
-async function signInIn(account: Account): Promise<string> {
+// The API rate-limits auth to 25 requests a minute per IP (`authRateLimiter`), and one
+// run of this script performs 12 logins. Running it three times in a minute is a 429,
+// which is the limiter working correctly -- not a product failure. Retrying once after
+// the window, then failing with a plain explanation, keeps a real credential problem
+// distinguishable from "you just ran the tests too fast".
+async function signInIn(account: Account, attempt = 0): Promise<string> {
   const response = await fetch(`${WEB}/api/v1/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ identifier: account.identifier, password: account.password }),
   });
+
+  if (response.status === 429) {
+    if (attempt === 0) {
+      console.log("  ..   auth rate limit hit, waiting 60s (the limiter is doing its job)");
+      await new Promise((resolve) => setTimeout(resolve, 60_000));
+      return signInIn(account, 1);
+    }
+    throw new Error(
+      `rate limited twice on ${account.identifier}. The API allows 25 auth requests per ` +
+        `minute and this script needs 12 per run -- wait a minute before running it again.`
+    );
+  }
+
   if (!response.ok) throw new Error(`login failed for ${account.identifier}: ${response.status}`);
   const cookies = response.headers.getSetCookie?.() ?? [];
   const jar = cookies.map((cookie) => cookie.split(";")[0]).join("; ");
