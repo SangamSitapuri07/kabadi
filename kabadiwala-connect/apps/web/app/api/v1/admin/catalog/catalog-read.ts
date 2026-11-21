@@ -1,4 +1,5 @@
 // Narrow, read-only development catalog bridge. The API authorizes every read.
+import { loadWorkspaceEnv } from '../../../../env';
 const headers = {'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
 const unavailable = () => Response.json({error:{code:'CATALOG_UNAVAILABLE',message:'Catalog administration is unavailable.'}},{status:503,headers});
 const invalid = () => Response.json({error:{code:'INVALID_CURSOR',message:'Category or catalog cursor is invalid.'}},{status:400,headers});

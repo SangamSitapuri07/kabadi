@@ -1,6 +1,8 @@
 // Narrow same-origin bridge for the collector's own work queue. It forwards no
 // collector id and no price: the API derives both from the session and catalog.
+import { loadWorkspaceEnv } from '../../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });
 const unavailable = () => error(503, 'COLLECTOR_UNAVAILABLE', 'Collector actions are unavailable.');

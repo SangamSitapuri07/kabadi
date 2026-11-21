@@ -2,6 +2,7 @@
 // decides authorization: the API checks the active admin grant inside its write
 // transaction. This layer only refuses cross-site requests, bounds the body,
 // forwards cookies and projects a limited response.
+import { loadWorkspaceEnv } from '../../../../env';
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });

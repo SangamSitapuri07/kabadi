@@ -1,5 +1,7 @@
 // This is deliberately a liveness-only bridge, not a general-purpose API proxy.
+import { loadWorkspaceEnv } from '../../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 
 const headers = { 'Cache-Control': 'no-store' };
 const unavailable = () => Response.json(

@@ -1,7 +1,9 @@
 // Same-origin read bridge for the caller's own roles. Only the six chain roles
 // may come back, and anything else is dropped rather than trusted: which panels appear is
 // a display hint, while every route still enforces its own grant.
+import { loadWorkspaceEnv } from '../../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });
 const unavailable = () => error(503, 'ACCOUNT_UNAVAILABLE', 'Account details are unavailable.');

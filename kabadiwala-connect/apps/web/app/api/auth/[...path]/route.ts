@@ -1,5 +1,7 @@
 // Explicit, same-origin auth bridge. No arbitrary proxy paths or forwarded hosts.
+import { loadWorkspaceEnv } from '../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const fail = () => Response.json({ error: { code: 'AUTH_UNAVAILABLE', message: 'Sign-in is unavailable.' } }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
 
 async function forward(request: Request): Promise<Response> {

@@ -1,7 +1,9 @@
 // Same-origin bridge for one lot's custody history. The API decides whether the
 // caller may see the lot at all and masks the prices of trades they were not
 // part of; this route only re-validates the shape before the browser sees it.
+import { loadWorkspaceEnv } from '../../../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });
 const unavailable = () => error(503, 'LOTS_UNAVAILABLE', 'Lot history is unavailable.');

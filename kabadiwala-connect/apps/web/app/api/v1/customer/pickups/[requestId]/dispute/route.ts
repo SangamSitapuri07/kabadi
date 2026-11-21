@@ -1,6 +1,8 @@
 // Narrow same-origin bridge for a customer's dispute. A reason is required, and
 // nothing else is forwarded: no weight, no amount, no collector.
+import { loadWorkspaceEnv } from '../../../../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });
 const unavailable = () => error(503, 'PICKUP_UNAVAILABLE', 'Test pickup requests are unavailable.');

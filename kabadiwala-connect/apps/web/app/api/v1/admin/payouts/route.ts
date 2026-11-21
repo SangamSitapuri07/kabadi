@@ -1,6 +1,8 @@
 // Narrow same-origin read bridge for the admin payout queue. The API decides
 // whether the caller is an admin, and it alone decides the amount owed.
+import { loadWorkspaceEnv } from '../../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });
 const unavailable = () => error(503, 'PAYOUT_UNAVAILABLE', 'Payout recording is unavailable.');

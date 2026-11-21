@@ -1,7 +1,9 @@
 // Same-origin bridge for development sign-in. It rebuilds the body from two
 // primitives so a browser cannot smuggle a name, a role or an account id, and
 // it never forwards an arbitrary path upstream.
+import { loadWorkspaceEnv } from '../../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) =>
   Response.json({ error: { code, message } }, { status, headers });

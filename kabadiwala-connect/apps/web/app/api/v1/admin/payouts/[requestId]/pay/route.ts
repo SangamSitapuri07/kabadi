@@ -1,6 +1,8 @@
 // Same-origin bridge for recording that a payout happened. The browser never
 // sends an amount: the API pays whatever the settled settlement says.
+import { loadWorkspaceEnv } from '../../../../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });
 const unavailable = () => error(503, 'PAYOUT_UNAVAILABLE', 'Payout recording is unavailable.');

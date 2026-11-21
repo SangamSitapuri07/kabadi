@@ -1,6 +1,8 @@
 // Same-origin bridge for accept/collect. The body is rebuilt from primitives so
 // a browser cannot smuggle in a collector id, a rate or an amount.
+import { loadWorkspaceEnv } from '../../../../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });
 const unavailable = () => error(503, 'COLLECTOR_UNAVAILABLE', 'Collector actions are unavailable.');

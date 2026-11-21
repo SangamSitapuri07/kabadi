@@ -1,7 +1,9 @@
 // Same-origin bridge for acknowledging in-app notifications. Marking read takes
 // no input: the body must be an empty object, and the API scopes the update to
 // the caller's own rows, so an id belonging to somebody else is a plain 404.
+import { loadWorkspaceEnv } from '../../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });
 const unavailable = () => error(503, 'NOTIFICATION_UNAVAILABLE', 'Notifications are unavailable.');

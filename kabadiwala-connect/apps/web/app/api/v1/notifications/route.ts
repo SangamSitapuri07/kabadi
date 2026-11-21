@@ -1,6 +1,8 @@
 // Narrow same-origin read bridge for the signed-in account's in-app inbox. The
 // API decides who the caller is; this only projects what it returns.
+import { loadWorkspaceEnv } from '../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });
 const unavailable = () => error(503, 'NOTIFICATION_UNAVAILABLE', 'Notifications are unavailable.');

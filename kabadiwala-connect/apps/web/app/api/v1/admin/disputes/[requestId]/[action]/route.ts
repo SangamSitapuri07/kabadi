@@ -1,6 +1,8 @@
 // Same-origin bridge for resolving or rejecting one dispute. A resolution carries
 // only the corrected weight; the price is never sent from the browser.
+import { loadWorkspaceEnv } from '../../../../../../env';
 export const dynamic = 'force-dynamic';
+loadWorkspaceEnv();
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 const error = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status, headers });
 const unavailable = () => error(503, 'DISPUTE_UNAVAILABLE', 'Dispute handling is unavailable.');
