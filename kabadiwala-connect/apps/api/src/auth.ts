@@ -22,10 +22,6 @@ export type AuthConfig = {
   devSignIn: boolean;
 };
 
-// The local hosts a development origin may use. An email/password account with
-// a known password must never be creatable on a host reachable by anyone else.
-const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
-
 // No fallback credentials or dynamic request-derived origin. Never log values.
 export function readAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
   if (env.AUTH_ENABLED === undefined || env.AUTH_ENABLED === 'false') return null;
