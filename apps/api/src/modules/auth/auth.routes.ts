@@ -4,6 +4,7 @@ import {
   LoginRequestSchema,
   RegisterRequestSchema,
   RequestOtpSchema,
+  ROLE_CAPABILITIES,
   SupplyChainTier,
   UserRole,
   VerificationLevel,
@@ -526,6 +527,50 @@ authRouter.post("/refresh", authRateLimiter, async (req, res) => {
       refreshToken: nextRefreshToken,
       expiresInSeconds: env.ACCESS_TOKEN_TTL_SECONDS,
     },
+  });
+});
+
+// GET /api/v1/auth/me — Who is this session, and what may it do?
+//
+// The web app needs this to survive a page load. The access token lives in an
+// httpOnly cookie, so the browser cannot read it to restore a session in memory,
+// and `/auth/refresh` deliberately returns only new tokens -- not the user. Without
+// this endpoint every route change would have to re-enter a password, which is why
+// the old single page auto-logged-in as one hardcoded collector on mount and never
+// showed anything else.
+//
+// It returns the same projection as login (never passwordHash, never session
+// hashes), plus the caller's capabilities so a dashboard can decide which sections
+// to mount. Capabilities are a display hint only: every route still checks its own
+// grant, so a forged response in the browser cannot grant anything.
+authRouter.get("/me", authenticate, async (req, res) => {
+  const prisma = await getPrisma();
+  const actor = req.actor!;
+
+  const user = await prisma.user.findUnique({
+    where: { id: actor.id },
+    include: {
+      profile: true,
+      organization: { include: { storefront: true } },
+    },
+  });
+
+  // A session whose user row has vanished is not a session. Fail closed rather
+  // than answering with the token's claims, which would outlive the account.
+  if (!user) {
+    clearAuthCookies(res);
+    sendError(res, 401, "ACCOUNT_NOT_FOUND", "This account no longer exists");
+    return;
+  }
+  if (user.accountStatus !== "ACTIVE") {
+    clearAuthCookies(res);
+    sendError(res, 403, "ACCOUNT_NOT_ACTIVE", "This account is not active");
+    return;
+  }
+
+  sendSuccess(res, {
+    user: serializeOwnUserAccount(user),
+    capabilities: ROLE_CAPABILITIES[user.role as UserRole],
   });
 });
 
