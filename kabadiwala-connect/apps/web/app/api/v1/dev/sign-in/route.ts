@@ -40,13 +40,17 @@ export async function POST(request: Request) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) return error(400, 'INVALID_BODY', 'Request is invalid.');
     const v = input as Record<string, unknown>;
     const keys = Object.keys(v);
-    if (keys.length !== 2 || keys.some(key => key !== 'email' && key !== 'password')) {
-      return error(400, 'INVALID_BODY', 'Exactly an email and a password are required.');
+    if (keys.length !== 3 || keys.some(key => !['email', 'password', 'role'].includes(key))) {
+      return error(400, 'INVALID_BODY', 'Exactly an email, a password and a role are required.');
     }
     const email = typeof v.email === 'string' ? v.email.trim().toLowerCase() : '';
     const password = typeof v.password === 'string' ? v.password : '';
-    if (!/^[a-z0-9][a-z0-9._-]{0,63}@example\.test$/.test(email) || password.length < 12 || password.length > 200) {
-      return error(400, 'INVALID_BODY', 'Use an @example.test address and a password of at least 12 characters.');
+    const role = v.role;
+    // The same five roles the API accepts. admin is not among them: it is granted
+    // by the local role tool with a recorded reason, never by a public form.
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}@example\.test$/.test(email) || password.length < 12 || password.length > 200 ||
+      typeof role !== 'string' || !['customer', 'collector', 'shop', 'mandi', 'recycler'].includes(role)) {
+      return error(400, 'INVALID_BODY', 'Use an @example.test address, a password of at least 12 characters, and one of the five chain roles.');
     }
     const internal = new URL(process.env.API_INTERNAL_ORIGIN ?? 'http://127.0.0.1:4000');
     if (!['http:', 'https:'].includes(internal.protocol) || internal.username || internal.password ||
@@ -54,7 +58,7 @@ export async function POST(request: Request) {
     const upstream = await fetch(new URL('/api/v1/dev/sign-in', internal), {
       method: 'POST',
       headers: new Headers({ 'content-type': 'application/json', origin: expected.origin }),
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, role }),
       redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(5000),
     });
     const data: unknown = await upstream.json();
@@ -62,12 +66,12 @@ export async function POST(request: Request) {
     let payload: object;
     if (upstream.status === 201 && data && typeof data === 'object' && 'data' in data && data.data &&
       typeof data.data === 'object' && (data.data as Record<string, unknown>).created === true) {
-      payload = { data: { created: true } };
+      payload = { data: { created: true, role: (data.data as Record<string, unknown>).role ?? null } };
     } else if (data && typeof data === 'object' && 'error' in data && data.error && typeof data.error === 'object' &&
       'code' in data.error && typeof data.error.code === 'string') {
       const messages: Record<string, [number, string]> = {
         DEV_SIGNIN_UNAVAILABLE: [503, 'Development sign-in is not enabled.'],
-        INVALID_REQUEST: [400, 'Use an @example.test address and a password of at least 12 characters.'],
+        INVALID_REQUEST: [400, 'Use an @example.test address, a password of at least 12 characters, and one of the five chain roles.'],
         ACCOUNT_EXISTS: [409, 'That test account already exists. Sign in through the normal screen.'],
         INVALID_ORIGIN: [403, 'Request origin is not allowed.'],
       };

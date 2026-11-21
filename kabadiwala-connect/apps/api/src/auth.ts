@@ -7,6 +7,8 @@ import { createCustomerOnboarder } from './customer-onboarding.js';
 import { createCustomerDetailsStore } from './customer-details.js';
 import { createAccountViewStore, createCollectorStore, createDisputeStore, createNotificationStore, createPayoutStore, createPickupStore } from './pickups.js';
 import { createLotStore } from './lots.js';
+import { createDevProvisioner } from './dev-provision.js';
+import type { Role } from './account-store.js';
 import { createCatalogStore } from './catalog.js';
 
 export type AuthConfig = {
@@ -81,20 +83,33 @@ const DEV_PASSWORD_MIN = 12;
 const DEV_PASSWORD_MAX = 200;
 
 export type DevSignInResult =
-  | { outcome: 'created'; cookies: string[] }
+  | { outcome: 'created'; cookies: string[]; role: Role }
   | { outcome: 'unavailable' }
   | { outcome: 'invalid' }
   | { outcome: 'exists' };
 
-export function createDevSignIn(config: AuthConfig, signUpEmail: (input: { email: string; password: string; name: string }) => Promise<Response>) {
+// The roles a test identity can be created as. `admin` is deliberately absent:
+// this form exists to walk the supply chain, and an operator role is granted by
+// the local role tool with a recorded reason, never by a public form.
+const DEV_ROLES: readonly Role[] = ['customer', 'collector', 'shop', 'mandi', 'recycler'];
+
+export function createDevSignIn(
+  config: AuthConfig,
+  signUpEmail: (input: { email: string; password: string; name: string }) => Promise<Response>,
+  provision: (userId: string, role: Role) => Promise<'ready' | 'forbidden' | 'taken'>,
+) {
   return async function devSignIn(input: unknown): Promise<DevSignInResult> {
     if (!config.devSignIn) return { outcome: 'unavailable' };
     if (!input || typeof input !== 'object' || Array.isArray(input)) return { outcome: 'invalid' };
     const raw = input as Record<string, unknown>;
-    if (Object.keys(raw).length !== 2) return { outcome: 'invalid' };
+    // Exactly three fields: nothing a caller can add is silently ignored, so a
+    // smuggled `admin` cannot ride along unnoticed.
+    if (Object.keys(raw).length !== 3) return { outcome: 'invalid' };
     const email = typeof raw.email === 'string' ? raw.email.trim().toLowerCase() : '';
     const password = typeof raw.password === 'string' ? raw.password : '';
+    const role = raw.role;
     if (!DEV_EMAIL.test(email)) return { outcome: 'invalid' };
+    if (typeof role !== 'string' || !(DEV_ROLES as readonly string[]).includes(role)) return { outcome: 'invalid' };
     // Length only. Complexity rules push people towards predictable
     // substitutions and are not a meaningful defence on a local test account.
     if (password.length < DEV_PASSWORD_MIN || password.length > DEV_PASSWORD_MAX) return { outcome: 'invalid' };
@@ -111,7 +126,26 @@ export function createDevSignIn(config: AuthConfig, signUpEmail: (input: { email
         const status = result.status;
         return status === 422 || status === 400 ? { outcome: 'exists' } : { outcome: 'unavailable' };
       }
-      return { outcome: 'created', cookies };
+      // The new user's id comes from the sign-up response body, which Better Auth
+      // returns as { token, user }. It is read here rather than accepted from the
+      // caller, so the account provisioned is always the one just created.
+      let userId: string | null = null;
+      try {
+        const body: unknown = await result.clone().json();
+        const user = body && typeof body === 'object' ? (body as { user?: { id?: unknown } }).user : undefined;
+        if (user && typeof user.id === 'string' && user.id.trim()) userId = user.id;
+      } catch { /* treated as a failed creation below */ }
+      if (!userId) return { outcome: 'unavailable' };
+      // The user now exists but has no account row, so every autorized route
+      // would refuse it and the role tool would reject it. Provisioning is part
+      // of creation, not a step the operator has to remember: the account and its
+      // chosen role are created together, and the role is the one selected here,
+      // never inferred from the email.
+      const provisioned = await provision(userId, role as Role);
+      // A taken address must not leave a half-made identity behind: the sign-up
+      // above already created the auth user, and reporting success would be a lie.
+      if (provisioned !== 'ready') return { outcome: provisioned === 'taken' ? 'exists' : 'unavailable' };
+      return { outcome: 'created', cookies, role: role as Role };
     } catch { return { outcome: 'unavailable' }; }
   };
 }
@@ -165,7 +199,7 @@ export function createAuthRuntime(config: AuthConfig) {
   const devSignIn = createDevSignIn(config, async ({ email, password, name }) => {
     const result = await auth.api.signUpEmail({ body: { email, password, name }, asResponse: true });
     return result;
-  });
+  }, createDevProvisioner(pool));
   return {
     resolveIdentity,
     devSignIn,

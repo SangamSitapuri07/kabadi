@@ -809,9 +809,21 @@ app can create disposable identities at `@example.test` addresses instead.
 DEV_SIGNIN_ENABLED=yes npm run start:api
 ```
 
-With it set, the signed-out screen grows a **Create a test account** form. Sign
-in as `shop@example.test`, create another, and grant the tiers with the role tool
-as usual.
+With it set, the signed-out screen grows a **Create a test account** form. Pick
+what the identity **is** — customer, collector, shop, mandi or recycler — and the
+account is created with that tier already granted. You land straight in that
+role's view: a shop sees the stock board, a customer sees the pickup panel.
+
+Creating the account and granting its tier are **one step, not two**. The two rows
+written are the application account and its role grant, in one transaction, for
+the auth user Better Auth just made. Before this, the form created only the auth
+user, so the role tool refused the address with "no application account yet" and
+the identity was unusable until someone ran a manual grant — which is not a step
+a person testing the product should have to know about.
+
+`admin` is deliberately **not** in the dropdown. It sits outside the supply chain
+and is granted by the local role tool with a recorded reason, never by a form
+anyone can reach.
 
 **Every guard, and why it exists.** This is the one place in the system that
 invents an identity, so the constraints are deliberately tight:

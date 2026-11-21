@@ -956,6 +956,36 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         await unmount();
       }
     });
+    await t.test('the test account form asks what you are, and sends that role', async () => {
+      const posts = [];
+      await mount(async (url, init) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:[], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:false});
+        if (url.endsWith('/api/v1/dev/sign-in') && init?.method === 'POST') {
+          posts.push(JSON.parse(init.body));
+          return json({ data: { created: true, role: 'mandi' } }, 201);
+        }
+        return json({authenticated:false});
+      });
+      await clickButton('Create a test account (development only)');
+      // Five chain roles, and no operator role: admin is granted by the local tool.
+      const select = document.querySelector('.dev-signin select');
+      assert.ok(select, 'a role dropdown exists');
+      const options = [...select.querySelectorAll('option')].map(o => o.value);
+      assert.deepEqual(options, ['customer', 'collector', 'shop', 'mandi', 'recycler']);
+      assert.equal(options.includes('admin'), false, 'admin cannot be self-selected');
+
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLSelectElement.prototype, 'value').set;
+      await act(async () => { setter.call(select, 'mandi'); select.dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
+      const emailInput = document.querySelector('.dev-signin input[type="email"]');
+      const inputSetter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+      await act(async () => { inputSetter.call(emailInput, 'mandi1@example.test'); emailInput.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+      const pwInput = document.querySelector('.dev-signin input[type="password"]');
+      await act(async () => { inputSetter.call(pwInput, 'a-long-enough-password'); pwInput.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+      await act(async () => { [...document.querySelectorAll('.dev-signin button')].find(b => b.textContent === 'Create and sign in').click(); });
+      assert.deepEqual(posts, [{ email: 'mandi1@example.test', password: 'a-long-enough-password', role: 'mandi' }]);
+      await unmount();
+    });
     await t.test('an account holding two tiers gets ONE stock board, at its highest tier', async () => {
       // Before this, a collector who was also a shop saw two identical boards
       // from the same endpoint, each with its own Sell button, and could not tell

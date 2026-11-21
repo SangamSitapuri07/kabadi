@@ -894,15 +894,15 @@ export function createApp(auth?: AuthMount) {
       const result = await auth!.devSignIn!(req.body);
       if (result.outcome === 'created') {
         for (const cookie of result.cookies ?? []) res.append('Set-Cookie', cookie);
-        res.status(201).json({ data: { created: true } });
+        res.status(201).json({ data: { created: true, role: (result as { role?: string }).role ?? null } });
         return;
       }
       if (result.outcome === 'exists') {
-        res.status(409).json({ error: { code: 'ACCOUNT_EXISTS', message: 'That test account already exists. Sign in through the normal screen.' } });
+        res.status(409).json({ error: { code: 'ACCOUNT_EXISTS', message: 'That test account already exists. Sign in with its password instead.' } });
         return;
       }
       if (result.outcome === 'invalid') {
-        res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'Use an @example.test address and a password of at least 12 characters.' } });
+        res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'Use an @example.test address, a password of at least 12 characters, and one of the five chain roles.' } });
         return;
       }
       res.status(503).json({ error: { code: 'DEV_SIGNIN_UNAVAILABLE', message: 'Development sign-in is not enabled.' } });

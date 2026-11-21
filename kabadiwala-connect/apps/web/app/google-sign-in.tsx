@@ -84,6 +84,10 @@ export function GoogleSignIn() {
   // it exists at all; this form only appears once the server has said so.
   const [devOpen, setDevOpen] = useState(false);
   const [devEmail, setDevEmail] = useState('');
+  // What this test identity IS. The role is chosen before the account exists, so
+  // the account is created with its tier rather than being created empty and then
+  // needing a database-side grant before anything works.
+  const [devRole, setDevRole] = useState('customer');
   const [devPassword, setDevPassword] = useState('');
   const [devMessage, setDevMessage] = useState('');
   const [devAvailable, setDevAvailable] = useState<boolean | null>(null);
@@ -127,13 +131,13 @@ export function GoogleSignIn() {
     try {
       const response = await fetch('/api/v1/dev/sign-in', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: devEmail, password: devPassword }),
+        body: JSON.stringify({ email: devEmail, password: devPassword, role: devRole }),
         signal: AbortSignal.timeout(15000),
       });
       const json: unknown = await response.json();
       if (response.status === 503) { setDevAvailable(false); setBusy(null); return; }
       if (response.status === 409) {
-        setDevMessage('That test account already exists. Use a different address, or sign in with Google.');
+        setDevMessage('That test account already exists. Sign in with its password below, or use a different address.');
         setBusy(null); return;
       }
       if (response.status !== 201) {
@@ -325,8 +329,19 @@ export function GoogleSignIn() {
         <h2>Test account</h2>
         <p>Development only. These accounts are disposable and use a reserved address domain. Never use them for real data.</p>
         <fieldset disabled={busy !== null}>
+          <label>I am a
+            {/* The five chain roles. Choosing one creates the account with that
+                tier, so the screen the account lands on matches what was picked. */}
+            <select value={devRole} onChange={event => { setDevRole(event.target.value); setDevMessage(''); }}>
+              <option value="customer">Customer — I have scrap to sell</option>
+              <option value="collector">Collector — I collect from customers</option>
+              <option value="shop">Shop — I buy from collectors</option>
+              <option value="mandi">Mandi — I buy from shops</option>
+              <option value="recycler">Recycler — I buy from mandis</option>
+            </select>
+          </label>
           <label>Email
-            <input type="email" required autoComplete="off" placeholder="shop@example.test"
+            <input type="email" required autoComplete="off" placeholder={devRole === 'customer' ? 'customer1@example.test' : `${devRole}1@example.test`}
               value={devEmail} maxLength={80}
               onChange={event => { setDevEmail(event.target.value); setDevMessage(''); }} />
           </label>
