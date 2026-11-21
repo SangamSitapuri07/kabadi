@@ -12,6 +12,7 @@ import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { AlertTriangle, ArrowRight, Sprout } from "lucide-react";
+import { GoogleButton } from "../components/GoogleButton";
 import { dashboardPathFor, useSession, type SessionUser } from "../lib/session";
 
 type Phase = "idle" | "submitting" | "error";
@@ -155,6 +156,9 @@ export default function Home() {
             </p>
           )}
 
+          {/* Renders nothing at all when the API has no Google credentials, so the
+              page never offers a button that can only fail. */}
+          <GoogleButton intent="signin" />
           <p className="mt-4 text-xs text-slate-500">
             New here?{" "}
             <Link href="/sign-up" className="font-medium text-emerald-700 underline">

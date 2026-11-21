@@ -181,7 +181,7 @@ instead of rendering panels that would all 403.
 | Silent refresh | **Working** — `POST /auth/refresh`, rotating, replay revokes the family |
 | Sign out | **Working** — `POST /auth/logout` revokes the family |
 | OTP (request / verify / login) | Routes exist — `POST /auth/otp/request`, `/otp/verify`, `/otp/login-request`, `/otp/login-verify`; SMS goes through a sandbox gateway, not a live provider |
-| **Google OAuth** | **Does not exist.** No OAuth client, no callback route, no provider config, in `apps/api`, `apps/web` or `apps/mobile`. This is new work, not a missing page: it needs a Google Cloud project, a client ID/secret, a callback route, and a decision on how an OAuth identity maps to a phone-verified `User` |
+| **Google OAuth** | **Built** (`433b94c`). `GET /auth/google/start` → Google → `GET /auth/google/callback` → chooser. Existing Google link signs in directly; an unknown person is asked what they meant before anything is created. Setup: `docs/GOOGLE_SIGNIN.md`. Off until `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are set — without them the button does not render. Verified with Google's servers stubbed (11 tests); Google's real consent screen has not been clicked |
 
 The sign-in page no longer lists the seeded accounts. Those are development identities created
 by `prisma/seed.ts`; `docs/RUN_AND_SIGN_IN.md` has them for manual testing.
