@@ -47,6 +47,21 @@ async function getSession(signal?: AbortSignal): Promise<boolean> {
   return result.authenticated;
 }
 
+// The chain, highest last. Kept in the same order as the API's CHAIN_ROLES so a
+// panel and the server cannot disagree about which tier this account sells at.
+const CHAIN_ORDER = ['customer', 'collector', 'shop', 'mandi', 'recycler'] as const;
+
+function sellingTier(roles: string[] | null): string | null {
+  if (!roles) return null;
+  let highest: string | null = null;
+  for (const role of CHAIN_ORDER) {
+    // A customer holds no stock, so only collector and above count here.
+    if (role === 'customer') continue;
+    if (roles.includes(role)) highest = role;
+  }
+  return highest;
+}
+
 export function GoogleSignIn() {
   const [status, setStatus] = useState<SessionStatus>('checking');
   const [busy, setBusy] = useState<'sign-in' | 'sign-out' | 'customer-setup' | 'profile-load' | 'profile-save' | 'dev-signin' | null>(null);
@@ -354,9 +369,13 @@ export function GoogleSignIn() {
       {busy !== 'sign-out' && roles?.includes('collector') && <CollectorQueue disabled={busy !== null} />}
       {/* Every tier that holds material shares one board: they hold the same
           capability, and the tier above each is the server's decision, not the
-          panel's. A collector is in the chain too -- they sell to a shop. */}
-      {busy !== 'sign-out' && (['collector', 'shop', 'mandi', 'recycler'] as const).map(tier =>
-        roles?.includes(tier) && <LotBoard key={tier} tier={tier} disabled={busy !== null} />)}
+          panel's. A collector is in the chain too -- they sell to a shop.
+          ONE board, at the HIGHEST tier the account holds: an account with two
+          tiers used to render two identical boards from the same endpoint, each
+          with its own Sell button. The highest tier is also the tier the API
+          sells at, so the panel and the server agree on who this person is. */}
+      {busy !== 'sign-out' && sellingTier(roles) !== null &&
+        <LotBoard tier={sellingTier(roles)!} disabled={busy !== null} />}
       {/* Admin tools only for admins. The catalogue is read/write for admins and
           read-only for everyone else, so it stays visible to all signed-in
           accounts, as before. */}

@@ -956,6 +956,34 @@ test('Google sign-in component: session, errors, retry and sign-out', async t =>
         await unmount();
       }
     });
+    await t.test('an account holding two tiers gets ONE stock board, at its highest tier', async () => {
+      // Before this, a collector who was also a shop saw two identical boards
+      // from the same endpoint, each with its own Sell button, and could not tell
+      // which one the server would act on.
+      await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer','collector','shop'], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        if (url.endsWith('/api/v1/lots')) return json({data:{lots:[]}});
+        return json({authenticated:true});
+      });
+      const boards = [...document.querySelectorAll('section')].filter(el =>
+        el.textContent.includes('Stock in your custody'));
+      assert.equal(boards.length, 1, 'exactly one stock board');
+      // One Sell control, not one per tier: a duplicate board would offer two.
+      assert.equal(boards[0].querySelectorAll('button').length, 0,
+        'an empty board offers no controls at all');
+      await unmount();
+    });
+    await t.test('a customer with no stock-holding tier gets no board', async () => {
+      await mount(async (url) => {
+        if (url.endsWith('/account/roles')) return json({data:{roles:['customer'], active:true}});
+        if (url.endsWith('get-session')) return json({authenticated:true});
+        return json({authenticated:true});
+      });
+      assert.equal([...document.querySelectorAll('section')].filter(el =>
+        el.textContent.includes('Stock in your custody')).length, 0);
+      await unmount();
+    });
     await t.test('a collector takes custody of a collected pickup, and cannot restate its weight or cost', async () => {
       const requestId='123e4567-e89b-42d3-a456-426614174200', rateId='123e4567-e89b-42d3-a456-426614174201';
       const address={name:'Sample',addressLine:'12 Example',city:'Ludhiana',state:'Punjab',postalCode:'141001'};
