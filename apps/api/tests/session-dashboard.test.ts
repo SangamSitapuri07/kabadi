@@ -36,11 +36,16 @@ describe("GET /api/v1/auth/me — session restore and per-role dashboards", () =
 
   // The cookie the browser would hold. supertest's agent keeps it for us, but
   // asserting on the raw header proves the token is httpOnly rather than readable.
+  function setCookie(response: request.Response, name: string): string {
+    const cookies = (response.headers["set-cookie"] as unknown as string[]) ?? [];
+    const found = cookies.find((cookie) => cookie.startsWith(`${name}=`));
+    expect(found, `login must set a ${name} cookie`).toBeTruthy();
+    // Only the `name=value` pair travels back; attributes are asserted separately.
+    return String(found).split(";")[0]!;
+  }
+
   function authHeader(response: request.Response): string {
-    const cookies = response.headers["set-cookie"] as unknown as string[];
-    const access = cookies.find((cookie) => cookie.startsWith("kc_access_token="));
-    expect(access, "login must set an access-token cookie").toBeTruthy();
-    return access!;
+    return setCookie(response, "kc_access_token");
   }
 
   it("refuses to answer without a session, rather than guessing", async () => {
@@ -53,7 +58,7 @@ describe("GET /api/v1/auth/me — session restore and per-role dashboards", () =
     const login = await signIn("shop@kabadiwala.local");
     const response = await request(app)
       .get("/api/v1/auth/me")
-      .set("Cookie", authHeader(login).split(";")[0]);
+      .set("Cookie", authHeader(login));
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
@@ -73,7 +78,7 @@ describe("GET /api/v1/auth/me — session restore and per-role dashboards", () =
     const login = await signIn("customer@kabadiwala.local");
     const response = await request(app)
       .get("/api/v1/auth/me")
-      .set("Cookie", authHeader(login).split(";")[0]);
+      .set("Cookie", authHeader(login));
 
     const raw = JSON.stringify(response.body).toLowerCase();
     for (const forbidden of ["passwordhash", "tokenhash", "accesstoken", "refreshtoken", "familyid"]) {
@@ -83,7 +88,9 @@ describe("GET /api/v1/auth/me — session restore and per-role dashboards", () =
 
   it("marks the access token httpOnly so a script cannot read it", async () => {
     const login = await signIn("collector@kabadiwala.local");
-    const access = authHeader(login);
+    const raw = (login.headers["set-cookie"] as unknown as string[]) ?? [];
+    const access = raw.find((cookie) => cookie.startsWith("kc_access_token=")) ?? "";
+    expect(access).toBeTruthy();
     expect(access).toMatch(/HttpOnly/i);
     // SameSite=Lax is what stops a cross-site form from carrying the session.
     expect(access).toMatch(/SameSite=Lax/i);
@@ -102,7 +109,7 @@ describe("GET /api/v1/auth/me — session restore and per-role dashboards", () =
       const login = await signIn(identifier, role === "ADMIN" ? "AdminPass123" : SEED_PASSWORD);
       const response = await request(app)
         .get("/api/v1/auth/me")
-        .set("Cookie", authHeader(login).split(";")[0]);
+        .set("Cookie", authHeader(login));
       expect(response.status).toBe(200);
       expect(response.body.data.user.role).toBe(role);
       byRole[role] = response.body.data.capabilities;
@@ -120,7 +127,7 @@ describe("GET /api/v1/auth/me — session restore and per-role dashboards", () =
 
   it("fails closed when the account is suspended, instead of serving a stale claim", async () => {
     const login = await signIn("wholesale@kabadiwala.local");
-    const cookie = authHeader(login).split(";")[0];
+    const cookie = authHeader(login);
     const prisma = await getPrisma();
 
     const user = await prisma.user.findFirst({ where: { email: "wholesale@kabadiwala.local" } });
