@@ -1,7 +1,7 @@
 // Component interaction tests in a DOM simulator; no Google or real users.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { JSDOM } from 'jsdom';
@@ -19,6 +19,16 @@ const compiled = babel.transformSync(await readFile('apps/web/app/google-sign-in
   plugins: [require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
 });
 const temp = await mkdtemp(resolve('node_modules', 'auth-ui-test-'));
+// The sign-in screen imports where each role belongs. Compile that module too, into
+// ./dashboard/paths.* under the temp dir so the relative import resolves exactly as
+// it does under Next.
+await mkdir(join(temp, 'dashboard'), { recursive: true });
+const pathsCompiled = babel.transformSync(await readFile('apps/web/app/dashboard/paths.ts', 'utf8'), {
+  filename: 'paths.ts', babelrc: false, configFile: false,
+  presets: [[require('next/dist/compiled/babel/preset-typescript'), { allExtensions: true, isTSX: true }]],
+  plugins: [require('next/dist/compiled/babel/plugin-transform-modules-commonjs')],
+});
+await writeFile(join(temp, 'dashboard', 'paths.js'), pathsCompiled.code);
 const modulePath = join(temp, 'component.cjs');
 await writeFile(modulePath, compiled.code);
 const pickupCompiled = babel.transformSync(await readFile('apps/web/app/test-pickups.tsx', 'utf8'), {

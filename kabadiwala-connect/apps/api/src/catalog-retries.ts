@@ -10,7 +10,11 @@ export async function migrateCatalogRetries(pool: pg.Pool): Promise<void> {
       const marker = await c.query<{marker:string | null}>(`SELECT to_regclass('${schema}.schema_version')::text AS marker`);
       if (!marker.rows[0]?.marker) throw Error('Prerequisite schema missing');
       const version = await c.query<{version:number}>(`SELECT version FROM ${schema}.schema_version`);
-      if (version.rows.length !== 1 || version.rows[0]?.version !== 1) throw Error('Unsupported prerequisite schema');
+      // Same reasoning as catalog.ts: the authorization schema is at 2 since the
+      // role-change audit landed, and a retry table that only needs the account
+      // tables must not refuse to install because of it.
+      const authzVersion = version.rows.length === 1 ? version.rows[0]?.version : undefined;
+      if (typeof authzVersion !== 'number' || authzVersion < 1) throw Error('Unsupported prerequisite schema');
     }
     const exists = await c.query<{exists:boolean}>("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='kabadi_catalog_retry') AS exists");
     if (exists.rows[0]?.exists) {

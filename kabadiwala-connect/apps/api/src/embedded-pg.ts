@@ -18,6 +18,7 @@ import EventEmitter from "events";
 import fs from "fs";
 import path from "path";
 import { PGlite } from "@electric-sql/pglite";
+import type pg from "pg";
 
 type RowMode = { text: string; values?: unknown[]; rowMode?: "array" };
 
@@ -92,8 +93,18 @@ export class EmbeddedPglitePool extends EventEmitter {
         name: field.name,
         dataTypeID: field.dataTypeID,
       })),
-      // PGlite reports `affectedRows` for writes and `rows.length` for reads.
-      rowCount: res.affectedRows ?? res.rows.length,
+      // PGlite reports `affectedRows` for writes and `rows.length` for reads --
+      // but it reports `0` for a read rather than omitting the field, so `??`
+      // picks the 0 and every SELECT looks empty to `rowCount` checks.
+      //
+      // That is not a cosmetic difference. `createDevProvisioner` asks
+      // `SELECT 1 FROM "user" WHERE id=$1` and treats `rowCount === 0` as "no such
+      // identity, refuse"; with this bug it refused every account, so a test
+      // sign-in created the auth user and then reported 'unavailable'.
+      //
+      // A statement that returned rows has that many rows; only a statement that
+      // returned none falls back to the write count.
+      rowCount: res.rows.length > 0 ? res.rows.length : (res.affectedRows ?? 0),
       command: "",
       oid: 0,
     };
@@ -139,7 +150,7 @@ export class EmbeddedPglitePool extends EventEmitter {
   }
 }
 
-let pool: EmbeddedPglitePool | null = null;
+let pool: pg.Pool | null = null;
 let pglite: PGlite | null = null;
 
 /**
@@ -150,14 +161,22 @@ let pglite: PGlite | null = null;
  * would not give, and which is the difference between "it works" and "it works until
  * you reload".
  */
-export async function getDatabasePool(databaseURL: string | undefined): Promise<EmbeddedPglitePool> {
+/**
+ * Typed as `pg.Pool` on purpose.
+ *
+ * Every caller -- nine CLIs, Better Auth, the stores -- is written against `pg.Pool`,
+ * and the embedded stand-in implements exactly the members they use. Returning the
+ * concrete class would force a cast at every call site for no gain; the honest place
+ * to record "this is not a real pg.Pool" is here, once.
+ */
+export async function getDatabasePool(databaseURL: string | undefined): Promise<pg.Pool> {
   if (pool) return pool;
 
   const useExternal = process.env.USE_EXTERNAL_POSTGRES === "true";
   if (useExternal && databaseURL) {
     // The caller wanted their own server; hand `
     const { Pool } = await import("pg");
-    pool = new Pool({ connectionString: databaseURL, max: 5 }) as unknown as EmbeddedPglitePool;
+    pool = new Pool({ connectionString: databaseURL, max: 5 });
     return pool;
   }
 
@@ -165,7 +184,7 @@ export async function getDatabasePool(databaseURL: string | undefined): Promise<
   fs.mkdirSync(dataDir, { recursive: true });
   pglite = new PGlite(dataDir);
   await pglite.waitReady;
-  pool = new EmbeddedPglitePool(pglite);
+  pool = new EmbeddedPglitePool(pglite) as unknown as pg.Pool;
   return pool;
 }
 

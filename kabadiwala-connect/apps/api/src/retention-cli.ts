@@ -1,4 +1,4 @@
-import pg from 'pg';
+import { closeDatabasePool, getDatabasePool } from './embedded-pg.js';
 import { createAuthRuntime, readAuthConfig } from './auth.js';
 import { createRetentionStore, ADDRESS_RETENTION_DAYS, READ_NOTIFICATION_RETENTION_DAYS, UNREAD_NOTIFICATION_RETENTION_DAYS } from './retention.js';
 
@@ -18,7 +18,7 @@ const knownReasons = new Map<string, string>([
 ]);
 
 let auth: ReturnType<typeof createAuthRuntime> | undefined;
-let pool: pg.Pool | undefined;
+let pool: Awaited<ReturnType<typeof getDatabasePool>> | undefined;
 try {
   if (APPLY && process.env.RETENTION_APPLY_CONFIRM !== 'yes') {
     console.error('Applying a retention sweep needs RETENTION_APPLY_CONFIRM=yes. Nothing was changed.');
@@ -29,7 +29,10 @@ try {
     auth = createAuthRuntime(config);
     const status = await auth.schemaStatus();
     if (status.missing || status.problems) throw new Error('Authentication schema is not ready.');
-    pool = new pg.Pool({ connectionString: config.databaseURL, max: 1, connectionTimeoutMillis: 5000 });
+    // Embedded PostgreSQL when no DATABASE_URL was supplied, external when it was.
+  // Constructing `new pg.Pool` here would bypass that switch and leave the
+  // embedded default unable to migrate at all.
+  pool = await getDatabasePool(config.databaseURL);
     pool.on('error', () => console.error('An idle pickup database connection failed.'));
     const marker = await pool.query<{ marker: string | null }>(
       "SELECT to_regclass('kabadi_pickup.notifications')::text AS marker");
@@ -81,6 +84,9 @@ try {
   else console.error('Could not run retention: the database could not be reached. Check development configuration.');
   process.exitCode = 1;
 } finally {
-  if (pool) await pool.end();
+  // The shared closer shuts down whichever pool was used -- the embedded
+  // database holds the process open otherwise, and a migration that never exits
+  // looks identical to one that hung.
+  await closeDatabasePool();
   if (auth) await auth.close();
 }

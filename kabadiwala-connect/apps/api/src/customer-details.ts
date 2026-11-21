@@ -37,7 +37,11 @@ export async function migrateCustomerDetails(pool: pg.Pool): Promise<void> {
     const authzMarker = await client.query<{ marker: string | null }>("SELECT to_regclass('kabadi_authz.schema_version')::text AS marker");
     if (!authzMarker.rows[0]?.marker) throw new Error('Authorization schema is not ready');
     const authzVersions = await client.query<{ version: number }>('SELECT version FROM kabadi_authz.schema_version');
-    if (authzVersions.rows.length !== 1 || authzVersions.rows[0]?.version !== 1) throw new Error('Unsupported authorization schema');
+    // Accepts 1 and everything after it, for the same reason role-admin.ts does:
+    // the audit migration moved this schema to 2, and a details table that only
+    // references accounts must not refuse to install because the schema grew.
+    const authzVersion = authzVersions.rows.length === 1 ? authzVersions.rows[0]?.version : undefined;
+    if (typeof authzVersion !== 'number' || authzVersion < 1) throw new Error('Unsupported authorization schema');
     const existing = await client.query<{ exists: boolean }>("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'kabadi_customer') AS exists");
     if (existing.rows[0]?.exists) {
       const marker = await client.query<{ marker: string | null }>("SELECT to_regclass('kabadi_customer.schema_version')::text AS marker");

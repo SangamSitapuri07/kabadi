@@ -16,7 +16,7 @@ try {
     runtime = createAuthRuntime(config);
     const status = await runtime.schemaStatus();
     if (status.missing || status.problems) throw new Error('Authentication schema is not ready.');
-    mount = { origin: config.origin, handler: runtime.handler, resolveIdentity: runtime.resolveIdentity, onboardCustomer: runtime.onboardCustomer, customerDetails: runtime.customerDetails, pickups: runtime.pickups, catalog: runtime.catalog, collector: runtime.collector, disputes: runtime.disputes, payouts: runtime.payouts, notifications: runtime.notifications, accountView: runtime.accountView, lots: runtime.lots, devSignIn: runtime.devSignIn };
+    mount = { origin: config.origin, handler: runtime.handler, resolveIdentity: runtime.resolveIdentity, onboardCustomer: runtime.onboardCustomer, customerDetails: runtime.customerDetails, pickups: runtime.pickups, catalog: runtime.catalog, collector: runtime.collector, disputes: runtime.disputes, payouts: runtime.payouts, notifications: runtime.notifications, accountView: runtime.accountView, accountName: runtime.accountName, lots: runtime.lots, devSignIn: runtime.devSignIn };
   }
 } catch {
   console.error('Authentication could not start; check configuration and schema.');

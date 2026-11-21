@@ -319,8 +319,22 @@ export function createAuthRuntime(config: AuthConfig) {
     provision: createDevProvisioner(pool),
     rolesOf: async userId => (await accountView.for(userId)).roles,
   });
+  // Better Auth keeps the profile name on its own `user` row. This is the only
+  // thing the application may read from the auth tables, so it is exposed by
+  // itself rather than by handing over the pool.
+  const accountName = async (userId: string): Promise<string | null> => {
+    const result = await pool.query('SELECT name FROM "user" WHERE id = $1', [userId]);
+    const name = result.rows[0]?.name;
+    return typeof name === 'string' && name.trim() ? name.trim() : null;
+  };
+
   return {
     resolveIdentity,
+    // The dashboard header shows a name. That is the only thing the app may read
+    // from the auth tables, so that is the only thing handed over -- a whole pool
+    // would let the route layer query sessions and accounts directly, which is
+    // exactly the boundary `resolveIdentity` exists to hold.
+    accountName,
     devSignIn,
     onboardCustomer: createCustomerOnboarder(pool),
     customerDetails: createCustomerDetailsStore(pool),

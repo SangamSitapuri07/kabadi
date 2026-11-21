@@ -22,6 +22,9 @@ type AuthMount = {
     raiseDispute: (userId: string, requestId: string, reason: string) => Promise<DisputeOutcome | 'forbidden'>;
   };
   accountView?: { for: (actorId: string) => Promise<{ roles: string[]; active: boolean }> };
+  // The account's display name, for the dashboard header. Optional: a server
+  // without it simply shows no name rather than failing.
+  accountName?: (userId: string) => Promise<string | null>;
   // Development-only test identity creation. Absent unless the server was
   // started with DEV_SIGNIN_ENABLED=yes on a local origin.
   devSignIn?: (input: unknown) => Promise<{ outcome: string; cookies?: string[] }>;
@@ -158,6 +161,12 @@ export function createApp(auth?: AuthMount) {
     return identity.userId;
   };
   const detailsForbidden = (response: express.Response) => response.status(403).json({ error: { code: 'FORBIDDEN', message: 'Customer details are not available for this account.' } });
+  // The name comes from a narrow mount function, not a database handle: the route
+  // layer never gets to read auth tables itself.
+  const authAccountName = async (userId: string): Promise<string | null> => {
+    if (!auth?.accountName) return null;
+    return auth.accountName(userId);
+  };
   app.use('/api/v1/account/customer/details', (_request, response, next) => { response.set('Cache-Control', 'no-store'); next(); });
   app.get('/api/v1/account/customer/details', async (request, response) => {
     if (!auth?.resolveIdentity || !auth.customerDetails) { detailsUnavailable(response); return; }
@@ -484,6 +493,58 @@ export function createApp(auth?: AuthMount) {
       const roles = view.roles.filter(isRole);
       res.json({ data: { roles, active: view.active === true } });
     } catch { res.status(503).json({ error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account details are unavailable.' } }); }
+  });
+
+  // ---- Dashboard session -------------------------------------------------
+  //
+  // One call for the dashboard shell: is this person signed in, what roles do they
+  // hold, and what should be displayed as their name. `/api/v1/account/roles`
+  // already answers most of this, but the shell also needs "signed out" as a
+  // first-class answer rather than a 401 it has to translate, and a display name.
+  //
+  // Deliberately separate from the role list: this is a presentation hint. Every
+  // route behind the dashboards still checks its own grant.
+  app.use('/api/v1/auth/dashboard-session', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  app.get('/api/v1/auth/dashboard-session', async (request, response) => {
+    if (!auth?.resolveIdentity || !auth.accountView) {
+      response.status(503).json({ error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account details are unavailable.' } });
+      return;
+    }
+    try {
+      const identity = await auth.resolveIdentity(request.headers.cookie);
+      if (!Array.isArray(identity.cookies) || !identity.cookies.every(cookie => typeof cookie === 'string')) {
+        throw new Error('Invalid identity');
+      }
+      if (identity.cookies.length) response.append('Set-Cookie', identity.cookies);
+
+      if (identity.userId === null) {
+        // Not an error. A signed-out visitor is a normal state for a dashboard URL,
+        // and answering 401 would make the shell treat a first visit as a failure.
+        response.json({ signedIn: false, roles: [], displayName: null });
+        return;
+      }
+
+      const view = await auth.accountView.for(identity.userId);
+      // The account store holds roles and status; the name lives on Better Auth's
+      // own user row. Read separately so a missing name shows nothing rather than
+      // failing the whole shell -- an account with no name still has dashboards.
+      let displayName: string | null = null;
+      try {
+        const named = await authAccountName(identity.userId);
+        displayName = named;
+      } catch {
+        displayName = null;
+      }
+      response.json({
+        signedIn: true,
+        // Filtered only to what this build knows; an unknown role from a newer
+        // database must not crash the page that lists the navigation.
+        roles: view.roles.filter(isRole),
+        displayName,
+      });
+    } catch {
+      response.status(503).json({ error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account details are unavailable.' } });
+    }
   });
 
   // ---- In-app notifications ---------------------------------------------

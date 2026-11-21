@@ -192,7 +192,11 @@ export async function migratePickups(pool: pg.Pool): Promise<PickupMigrationRepo
       const marker = await c.query<{ marker: string | null }>(`SELECT to_regclass('${schema}.schema_version')::text AS marker`);
       if (!marker.rows[0]?.marker) throw Error('Prerequisite schema missing');
       const versions = await c.query<{ version: number }>(`SELECT version FROM ${schema}.schema_version`);
-      if (versions.rows.length !== 1 || versions.rows[0]?.version !== 1) throw Error('Unsupported schema');
+      // Any version at or above 1 is a shape this migration can build on: later
+      // versions only add tables, and pinning to exactly 1 made the order of the
+      // migrations decide whether the install worked at all.
+      const version = versions.rows.length === 1 ? versions.rows[0]?.version : undefined;
+      if (typeof version !== 'number' || version < 1) throw Error('Unsupported schema');
     }
     const existing = await c.query<{ exists: boolean }>("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='kabadi_pickup') AS exists");
     let currentVersion = 0;

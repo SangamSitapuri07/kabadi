@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { dashboardPathFor, sellingTier } from './dashboard/paths';
 import { TestPickups } from './test-pickups';
 import { CatalogViewer } from './catalog-viewer';
 import { CollectorQueue } from './collector-queue';
@@ -47,20 +48,8 @@ async function getSession(signal?: AbortSignal): Promise<boolean> {
   return result.authenticated;
 }
 
-// The chain, highest last. Kept in the same order as the API's CHAIN_ROLES so a
-// panel and the server cannot disagree about which tier this account sells at.
-const CHAIN_ORDER = ['customer', 'collector', 'shop', 'mandi', 'recycler'] as const;
-
-function sellingTier(roles: string[] | null): string | null {
-  if (!roles) return null;
-  let highest: string | null = null;
-  for (const role of CHAIN_ORDER) {
-    // A customer holds no stock, so only collector and above count here.
-    if (role === 'customer') continue;
-    if (roles.includes(role)) highest = role;
-  }
-  return highest;
-}
+// `sellingTier` lives in ./dashboard/paths so the sign-in screen, the dashboards
+// and their tests all agree on which tier an account sells at.
 
 export function GoogleSignIn() {
   const [status, setStatus] = useState<SessionStatus>('checking');
@@ -205,6 +194,21 @@ export function GoogleSignIn() {
     if (status === 'signed-in') void loadRoles();
     else if (status === 'signed-out') { setRoles(null); setDevSignedIn(false); }
   }, [status]);
+  // Signing in lands you on your own dashboard rather than on a page that renders
+  // every panel to everybody. This is what people were asking for when they said
+  // three different logins showed the same options.
+  //
+  // A full location replace, not a client-side push: the destination is a different
+  // part of the app with its own session read, and starting it from a fresh request
+  // is simpler than carrying this screen's state into it.
+  //
+  // An account with no roles is NOT redirected: it has no dashboard to go to, and
+  // sending it to `/` would loop. The "no roles yet" message below stays.
+  useEffect(() => {
+    if (status !== 'signed-in' || roles === null || roles.length === 0) return;
+    const target = dashboardPathFor(roles);
+    if (target !== '/') window.location.assign(target);
+  }, [status, roles]);
 
   async function retrySession() {
     setStatus('checking');

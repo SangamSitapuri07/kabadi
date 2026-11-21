@@ -1,4 +1,4 @@
-import pg from 'pg';
+import { closeDatabasePool, getDatabasePool } from './embedded-pg.js';
 import { createAuthRuntime, readAuthConfig } from './auth.js';
 import { migratePickups } from './pickups.js';
 
@@ -31,14 +31,17 @@ function environmentHint(): string | null {
 }
 
 let auth: ReturnType<typeof createAuthRuntime> | undefined;
-let pool: pg.Pool | undefined;
+let pool: Awaited<ReturnType<typeof getDatabasePool>> | undefined;
 try {
   const config = readAuthConfig(process.env);
   if (!config) throw new Error('Auth is disabled.');
   auth = createAuthRuntime(config);
   const status = await auth.schemaStatus();
   if (status.missing || status.problems) throw new Error('Authentication schema is not ready.');
-  pool = new pg.Pool({ connectionString: config.databaseURL, max: 1, connectionTimeoutMillis: 5000 });
+  // Embedded PostgreSQL when no DATABASE_URL was supplied, external when it was.
+  // Constructing `new pg.Pool` here would bypass that switch and leave the
+  // embedded default unable to migrate at all.
+  pool = await getDatabasePool(config.databaseURL);
   pool.on('error', () => console.error('An idle pickup database connection failed.'));
   const report = await migratePickups(pool);
   // Say exactly what happened, especially on an upgrade: legacy rows are kept
@@ -77,6 +80,9 @@ try {
   console.error('No changes were committed.');
   process.exitCode = 1;
 } finally {
-  if (pool) await pool.end();
+  // The shared closer shuts down whichever pool was used -- the embedded
+  // database holds the process open otherwise, and a migration that never exits
+  // looks identical to one that hung.
+  await closeDatabasePool();
   if (auth) await auth.close();
 }

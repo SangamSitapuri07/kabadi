@@ -36,7 +36,14 @@ export async function migrateCatalog(pool: pg.Pool): Promise<void> {
     const marker = await client.query<{marker: string | null}>("SELECT to_regclass('kabadi_authz.schema_version')::text AS marker");
     if (!marker.rows[0]?.marker) throw Error('Authorization schema missing');
     const versions = await client.query<{version: number}>('SELECT version FROM kabadi_authz.schema_version');
-    if (versions.rows.length !== 1 || versions.rows[0]?.version !== 1) throw Error('Unsupported authorization schema');
+    // The authorization schema has evolved (the role-change audit took it to 2),
+    // so pinning this to exactly 1 meant a fresh install could not create the
+    // catalogue at all: the two migrations disagree about how far ahead the other
+    // may be. What the catalogue actually requires is that the account tables
+    // exist and are the version-1 shape it was written against -- every later
+    // version only ADDS tables, so `>= 1` is the honest requirement.
+    const authzVersion = versions.rows.length === 1 ? versions.rows[0]?.version : undefined;
+    if (typeof authzVersion !== 'number' || authzVersion < 1) throw Error('Unsupported authorization schema');
     const existing = await client.query<{exists: boolean}>("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='kabadi_catalog') AS exists");
     if (existing.rows[0]?.exists) {
       const present = await client.query<{marker: string | null}>("SELECT to_regclass('kabadi_catalog.schema_version')::text AS marker");
