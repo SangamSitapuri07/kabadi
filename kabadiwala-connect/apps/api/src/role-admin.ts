@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
+import { ROLES } from './account-store.js';
 import type { Role } from './account-store.js';
 
 // Development-only local operator tooling for privileged role grants.
@@ -68,13 +69,43 @@ export async function migrateRoleAdmin(pool: pg.Pool): Promise<void> {
     const marker = await c.query<{ marker: string | null }>("SELECT to_regclass('kabadi_authz.schema_version')::text AS marker");
     if (!marker.rows[0]?.marker) throw new Error('Authorization schema missing');
     const versions = await c.query<{ version: number }>('SELECT version FROM kabadi_authz.schema_version');
-    if (versions.rows.length !== 1 || versions.rows[0]?.version !== 1) throw new Error('Unsupported authorization schema');
+    // Accepts version 1 and 2. The admin audit table only needs the authz
+    // schema to exist so it can reference accounts; requiring exactly v1 meant
+    // that widening the chain tiers in authz made this migration refuse to run
+    // at all, on any database that had been upgraded -- the two migrations
+    // disagreeing about the same schema.
+    if (versions.rows.length !== 1 || ![1, 2].includes(versions.rows[0]?.version as number)) {
+      throw new Error('Unsupported authorization schema');
+    }
     const existing = await c.query<{ exists: boolean }>("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='kabadi_admin') AS exists");
     if (existing.rows[0]?.exists) {
       const present = await c.query<{ marker: string | null }>("SELECT to_regclass('kabadi_admin.schema_version')::text AS marker");
       if (!present.rows[0]?.marker) throw new Error('Unrecognized admin schema');
       const version = await c.query<{ version: number }>('SELECT version FROM kabadi_admin.schema_version');
       if (version.rows.length !== 1 || version.rows[0]?.version !== 1) throw new Error('Unsupported admin schema');
+      // An audit table created before the chain tiers existed still has the
+      // three-role CHECK. Widening it here is what makes a `grant ... shop`
+      // succeed on a database that was set up months ago: without this the
+      // migration reports success, changes nothing, and the grant then fails at
+      // the database with a constraint the operator never saw.
+      const check = await c.query<{ def: string }>(
+        `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+         WHERE conrelid = 'kabadi_admin.role_changes'::regclass AND contype = 'c'
+           AND pg_get_constraintdef(oid) LIKE '%role%'`);
+      const stale = check.rows.some(row => !ROLES.every(role => row.def.includes(`'${role}'`)));
+      if (stale) {
+        // Widening a CHECK can never fail on existing rows: every value the old
+        // constraint allowed is still allowed by the new one.
+        const named = await c.query<{ conname: string }>(
+          `SELECT conname FROM pg_constraint
+           WHERE conrelid = 'kabadi_admin.role_changes'::regclass AND contype = 'c'
+             AND pg_get_constraintdef(oid) LIKE '%role%'`);
+        for (const row of named.rows) {
+          await c.query(`ALTER TABLE kabadi_admin.role_changes DROP CONSTRAINT "${row.conname.replace(/"/g, '""')}"`);
+        }
+        await c.query(`ALTER TABLE kabadi_admin.role_changes
+          ADD CONSTRAINT role_changes_role_check CHECK (role IN (${ROLES.map(r => `'${r}'`).join(', ')}))`);
+      }
     } else {
       await c.query('CREATE SCHEMA kabadi_admin');
       await c.query('CREATE TABLE kabadi_admin.schema_version (version integer PRIMARY KEY CHECK (version = 1))');

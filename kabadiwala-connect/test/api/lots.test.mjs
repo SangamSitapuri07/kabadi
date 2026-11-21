@@ -406,3 +406,62 @@ test('every holding tier in the chain has exactly one tier above it, except the 
   assert.deepEqual(await createLotStore(recycler).sell('rec-1', { lotId: randomUUID(), grams: 100, pricePaise: '1000' }),
     { outcome: 'no-next-tier' });
 });
+
+test('an audit table built before the chain tiers is widened, not left stale', async () => {
+  // The bug this catches: `grant ... shop` on a months-old database reported
+  // "migration completed, nothing changed" because the admin migration only set
+  // the role CHECK when creating the table fresh, then failed at the database
+  // with a constraint the operator had never seen.
+  const { migrateRoleAdmin } = await import('../../apps/api/dist/role-admin.js');
+  const statements = [];
+  const staleDef = "CHECK ((role = ANY (ARRAY['customer'::text, 'collector'::text, 'admin'::text])))";
+  const pool = { connect: async () => ({
+    query: async (sql, params) => {
+      const text = String(sql).replace(/\s+/g, ' ').trim();
+      statements.push({ text, params });
+      if (text.startsWith('SELECT to_regclass')) return { rows: [{ marker: 'some_table' }] };
+      if (text.startsWith('SELECT version FROM kabadi_authz')) return { rows: [{ version: 2 }] };
+      if (text.startsWith('SELECT EXISTS (SELECT 1 FROM pg_namespace')) return { rows: [{ exists: true }] };
+      if (text.startsWith('SELECT version FROM kabadi_admin')) return { rows: [{ version: 1 }] };
+      if (text.startsWith('SELECT pg_get_constraintdef')) return { rows: [{ def: staleDef }] };
+      if (text.startsWith('SELECT conname FROM pg_constraint')) return { rows: [{ conname: 'role_changes_role_check' }] };
+      return { rows: [] };
+    },
+    release: () => {},
+  }) };
+
+  // It must not refuse a v2 authorization schema: that is the state every
+  // upgraded database is in, and refusing would block the audit table forever.
+  await migrateRoleAdmin(pool);
+
+  const dropped = statements.find(s => s.text.startsWith('ALTER TABLE kabadi_admin.role_changes DROP CONSTRAINT'));
+  assert.ok(dropped, 'the stale CHECK is dropped');
+  assert.equal(dropped.text, 'ALTER TABLE kabadi_admin.role_changes DROP CONSTRAINT "role_changes_role_check"');
+  const added = statements.find(s => s.text.startsWith('ALTER TABLE kabadi_admin.role_changes ADD CONSTRAINT'));
+  assert.ok(added, 'a widened CHECK is added');
+  // Every role the application knows must be acceptable afterwards.
+  for (const role of CHAIN_ROLES) assert.ok(added.text.includes(`'${role}'`), `${role} is accepted`);
+  assert.ok(added.text.includes(`'admin'`), 'admin is still accepted');
+});
+
+test('an audit table that already allows every role is left alone', async () => {
+  const { migrateRoleAdmin } = await import('../../apps/api/dist/role-admin.js');
+  const statements = [];
+  const currentDef = "CHECK ((role = ANY (ARRAY['customer'::text, 'collector'::text, 'shop'::text, 'mandi'::text, 'recycler'::text, 'admin'::text])))";
+  const pool = { connect: async () => ({
+    query: async sql => {
+      const text = String(sql).replace(/\s+/g, ' ').trim();
+      statements.push(text);
+      if (text.startsWith('SELECT to_regclass')) return { rows: [{ marker: 'some_table' }] };
+      if (text.startsWith('SELECT version FROM kabadi_authz')) return { rows: [{ version: 2 }] };
+      if (text.startsWith('SELECT EXISTS (SELECT 1 FROM pg_namespace')) return { rows: [{ exists: true }] };
+      if (text.startsWith('SELECT version FROM kabadi_admin')) return { rows: [{ version: 1 }] };
+      if (text.startsWith('SELECT pg_get_constraintdef')) return { rows: [{ def: currentDef }] };
+      return { rows: [] };
+    },
+    release: () => {},
+  }) };
+  await migrateRoleAdmin(pool);
+  // A migration that always rewrites is a migration that can fail for no reason.
+  assert.equal(statements.some(s => s.startsWith('ALTER TABLE kabadi_admin')), false);
+});
