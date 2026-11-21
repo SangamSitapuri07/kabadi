@@ -21,9 +21,11 @@ type AuthMount = {
     raiseDispute: (userId: string, requestId: string, reason: string) => Promise<DisputeOutcome | 'forbidden'>;
   };
   accountView?: { for: (actorId: string) => Promise<{ roles: string[]; active: boolean }> };
+  // Development-only test identity creation. Absent unless the server was
+  // started with DEV_SIGNIN_ENABLED=yes on a local origin.
+  devSignIn?: (input: unknown) => Promise<{ outcome: string; cookies?: string[] }>;
   // The upward supply chain: lots held, sold up a tier, and their custody
   // history. Absent when the separate lot migration has not run.
-  devSignIn?: (input: unknown) => Promise<{ outcome: string; cookies?: string[] }>;
   lots?: {
     openFromPickup(actorId: string, raw: unknown): Promise<unknown>;
     held(actorId: string): Promise<unknown>;

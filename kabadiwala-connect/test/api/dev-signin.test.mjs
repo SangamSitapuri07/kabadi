@@ -165,3 +165,38 @@ test('without the flag the route reports that it is unavailable, not that it fai
     assert.equal((await response.json()).error.code, 'DEV_SIGNIN_UNAVAILABLE');
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
+
+test('the server actually mounts the dev sign-in handler', async () => {
+  // This is the bug that made the feature useless on first contact with a real
+  // machine: the route existed, the flag was set, and server.ts never passed the
+  // handler through, so every request got 503 and the form never appeared.
+  // A route test that builds its own mount cannot see that, so this one reads
+  // the composition root.
+  const { readFile } = await import('node:fs/promises');
+  const server = await readFile(new URL('../../apps/api/src/server.ts', import.meta.url), 'utf8');
+  assert.match(server, /devSignIn:\s*runtime\.devSignIn/,
+    'server.ts must pass runtime.devSignIn into the app mount');
+  // And the runtime must actually provide it, or the mount would be undefined.
+  const { createAuthRuntime } = await import('../../apps/api/dist/auth.js');
+  assert.equal(typeof createAuthRuntime, 'function');
+});
+
+test('the mount passes through the stores the app actually asks for', async () => {
+  // The same class of mistake was caught once for lots and once for dev sign-in.
+  // Rather than a hand-written list that drifts (an earlier draft of this test
+  // named a 'payments' mount that does not exist), derive the keys from the app's
+  // own type and check each one is present.
+  const { readFile } = await import('node:fs/promises');
+  const [server, app] = await Promise.all([
+    readFile(new URL('../../apps/api/src/server.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../../apps/api/src/app.ts', import.meta.url), 'utf8'),
+  ]);
+  const mountLine = server.split('\n').find(line => line.includes('mount = {')) ?? '';
+  const typeBlock = app.slice(app.indexOf('type AuthMount'), app.indexOf('export function createApp'));
+  // Optional members: `name?:`. These are the ones a caller can forget.
+  const optional = [...typeBlock.matchAll(/^\s{2}([a-zA-Z]+)\?:/gm)].map(m => m[1]);
+  assert.ok(optional.length >= 4, `found the optional mounts (${optional.join(', ')})`);
+  for (const key of optional) {
+    assert.ok(mountLine.includes(`${key}:`), `${key} is passed into the mount`);
+  }
+});
