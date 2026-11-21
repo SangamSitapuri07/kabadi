@@ -172,6 +172,20 @@ instead of rendering panels that would all 403.
   page read `data.order` where `POST /listings` answers `data.listing`, crashing on the first
   successful post; and a shop with no storefront showed a spinner forever.
 
+### Authentication — what actually exists (checked 2026-11-14)
+
+| Method | Status |
+|---|---|
+| Phone/email + password | **Working** — `POST /auth/register`, `POST /auth/login`, argon2id hashes |
+| Session restore | **Working** — `GET /auth/me` (added for this work) |
+| Silent refresh | **Working** — `POST /auth/refresh`, rotating, replay revokes the family |
+| Sign out | **Working** — `POST /auth/logout` revokes the family |
+| OTP (request / verify / login) | Routes exist — `POST /auth/otp/request`, `/otp/verify`, `/otp/login-request`, `/otp/login-verify`; SMS goes through a sandbox gateway, not a live provider |
+| **Google OAuth** | **Does not exist.** No OAuth client, no callback route, no provider config, in `apps/api`, `apps/web` or `apps/mobile`. This is new work, not a missing page: it needs a Google Cloud project, a client ID/secret, a callback route, and a decision on how an OAuth identity maps to a phone-verified `User` |
+
+The sign-in page no longer lists the seeded accounts. Those are development identities created
+by `prisma/seed.ts`; `docs/RUN_AND_SIGN_IN.md` has them for manual testing.
+
 **Still open under G1:**
 - **No real browser has rendered these pages.** Playwright's browser CDN is unreachable from
   this sandbox (`npx playwright install chromium` → ECONNRESET). jsdom now proves the panels
