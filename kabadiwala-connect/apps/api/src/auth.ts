@@ -3,6 +3,7 @@ import { getMigrations } from 'better-auth/db/migration';
 import { toNodeHandler } from 'better-auth/node';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import pg from 'pg';
+import { getDatabasePool } from './embedded-pg.js';
 import { createCustomerOnboarder } from './customer-onboarding.js';
 import { createCustomerDetailsStore } from './customer-details.js';
 import { createAccountViewStore, createCollectorStore, createDisputeStore, createNotificationStore, createPayoutStore, createPickupStore } from './pickups.js';
@@ -17,6 +18,15 @@ export type AuthConfig = {
   secret: string;
   googleClientId: string;
   googleClientSecret: string;
+  /**
+   * Use the caller's own PostgreSQL instead of the embedded one.
+   *
+   * Embedded is the default so that a fresh clone can sign in without installing a
+   * database. Production must set this to true -- readAuthConfig already refuses a
+   * non-local origin, and the embedded database has one connection, so it could not
+   * serve a real deployment anyway.
+   */
+  useExternalPostgres: boolean;
   // Development-only email sign-in. False unless explicitly enabled, and never
   // true in production -- it creates accounts with a password instead of
   // proving an identity through Google, which is not something a real user
@@ -40,19 +50,30 @@ export function readAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
   }
   if (env.NODE_ENV === 'production') throw new Error('Google auth is not yet enabled for production.');
   const { AUTH_PUBLIC_ORIGIN, DATABASE_URL, BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET } = env;
-  if (!AUTH_PUBLIC_ORIGIN || !DATABASE_URL || !BETTER_AUTH_SECRET || !GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
-    throw new Error('Google auth configuration is incomplete.');
+  // An embedded PostgreSQL is started when no database is supplied, so DATABASE_URL
+  // is required only when the operator asked for their own.
+  const useExternalPostgres = env.USE_EXTERNAL_POSTGRES === 'true';
+  if (!AUTH_PUBLIC_ORIGIN || !BETTER_AUTH_SECRET || !GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    throw new Error(
+      'Google auth configuration is incomplete: set AUTH_PUBLIC_ORIGIN, BETTER_AUTH_SECRET, ' +
+        'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.'
+    );
+  }
+  if (useExternalPostgres && !DATABASE_URL) {
+    throw new Error('USE_EXTERNAL_POSTGRES=true requires DATABASE_URL.');
   }
   let origin: URL;
-  let database: URL;
-  try { origin = new URL(AUTH_PUBLIC_ORIGIN); database = new URL(DATABASE_URL); }
-  catch { throw new Error('Google auth configuration has invalid URLs.'); }
+  let database: URL | null = null;
+  try {
+    origin = new URL(AUTH_PUBLIC_ORIGIN);
+    if (DATABASE_URL) database = new URL(DATABASE_URL);
+  } catch { throw new Error('Google auth configuration has invalid URLs.'); }
   const local = origin.hostname === 'localhost' || origin.hostname === '127.0.0.1' || origin.hostname === '[::1]';
   if ((origin.protocol !== 'https:' && !(origin.protocol === 'http:' && local)) || origin.username || origin.password ||
       origin.pathname !== '/' || origin.search || origin.hash || origin.origin !== AUTH_PUBLIC_ORIGIN) {
     throw new Error('AUTH_PUBLIC_ORIGIN must be an exact HTTPS origin (or local HTTP origin).');
   }
-  if (!['postgres:', 'postgresql:'].includes(database.protocol) || !database.hostname || !database.pathname || database.pathname === '/') {
+  if (database && (!['postgres:', 'postgresql:'].includes(database.protocol) || !database.hostname || !database.pathname || database.pathname === '/')) {
     throw new Error('DATABASE_URL must identify a PostgreSQL database.');
   }
   if (BETTER_AUTH_SECRET.length < 32) throw new Error('BETTER_AUTH_SECRET must contain at least 32 characters.');
@@ -61,8 +82,9 @@ export function readAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
   if (devSignInRequested && !local) {
     throw new Error('Development sign-in is only allowed on a local origin.');
   }
-  return { origin: origin.origin, databaseURL: DATABASE_URL, secret: BETTER_AUTH_SECRET,
-    googleClientId: GOOGLE_CLIENT_ID, googleClientSecret: GOOGLE_CLIENT_SECRET, devSignIn: devSignInRequested };
+  return { origin: origin.origin, databaseURL: DATABASE_URL ?? '', secret: BETTER_AUTH_SECRET,
+    googleClientId: GOOGLE_CLIENT_ID, googleClientSecret: GOOGLE_CLIENT_SECRET,
+    devSignIn: devSignInRequested, useExternalPostgres };
 }
 
 // Development-only test identities: create one, or sign back in to one that
@@ -197,7 +219,52 @@ export function createDevSignIn(config: AuthConfig, deps: DevDeps) {
 }
 
 export function createAuthRuntime(config: AuthConfig) {
-  const pool = new pg.Pool({ connectionString: config.databaseURL, max: 5, connectionTimeoutMillis: 5000 });
+  // External: an ordinary pg.Pool, created immediately. Embedded: the PGlite pool
+  // is created lazily below, because starting PostgreSQL is asynchronous and this
+  // factory is called synchronously from a dozen migrate/CLI entry points.
+  // `ready` is the promise every request awaits before touching the database.
+  let resolved: pg.Pool | null = null;
+  let ready: Promise<void>;
+  if (config.useExternalPostgres) {
+    resolved = new pg.Pool({ connectionString: config.databaseURL, max: 5, connectionTimeoutMillis: 5000 });
+    ready = Promise.resolve();
+  } else {
+    ready = getDatabasePool(config.databaseURL).then((embedded) => {
+      resolved = embedded as unknown as pg.Pool;
+    });
+  }
+
+  /**
+   * A `pg.Pool` that defers until the embedded database has started.
+   *
+   * Every store below (`createPickupStore`, `createLotStore`, ...) was written
+   * against a real pool and is called synchronously during startup. Rather than
+   * thread an await through all of them, this object answers the two methods they
+   * and Better Auth actually use, waiting for `ready` first. The type says
+   * `pg.Pool` because that is what they expect; it is a structural stand-in, not a
+   * subclass, so nothing inherits socket code it does not have.
+   */
+  const pool = {
+    query: async (...args: unknown[]) => {
+      await ready;
+      return (resolved as unknown as pg.Pool).query(...(args as [never]));
+    },
+    connect: async () => {
+      await ready;
+      return (resolved as unknown as pg.Pool).connect();
+    },
+    on: (event: 'error', listener: (...args: unknown[]) => void) => {
+      void ready.then(() => resolved?.on(event, listener as never));
+      return pool;
+    },
+    // Shutdown calls this. Awaiting `ready` first means a failure during startup is
+    // still cleaned up rather than leaking the embedded database's files.
+    end: async () => {
+      await ready.catch(() => undefined);
+      await resolved?.end();
+    },
+  } as unknown as pg.Pool;
+
   // Idle client errors should not leak connection details or crash the process.
   pool.on('error', () => console.error('An idle authentication database connection failed.'));
   const options = {
